@@ -29,6 +29,10 @@ packages:
     path: Packages/AnalysisKit
   BoardUI:
     path: Packages/BoardUI
+  TrainingCore:
+    path: Packages/TrainingCore
+  ClaudeKit:
+    path: Packages/ClaudeKit
 
 targets:
   ChessCoach:
@@ -96,3 +100,7 @@ targets:
         product: AnalysisKit
       - package: BoardUI
         product: BoardUI
+      - package: TrainingCore
+        product: TrainingCore
+      - package: ClaudeKit
+        product: ClaudeKit
