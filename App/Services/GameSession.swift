@@ -423,7 +423,7 @@ final class GameSession {
 
         guard let persistence else {
             persistenceFailure = "The database is unavailable; this game was not saved."
-            Log.persistence.error("No database: game \(self.gameID.uuidString, privacy: .public) discarded.")
+            AppLog.persistence.error("No database: game \(self.gameID.uuidString, privacy: .public) discarded.")
             return
         }
 
@@ -437,7 +437,7 @@ final class GameSession {
             do {
                 try await persistence.save(record)
             } catch {
-                await self?.recordPersistenceFailure(String(describing: error))
+                self?.recordPersistenceFailure(String(describing: error))
                 return
             }
 
@@ -451,7 +451,7 @@ final class GameSession {
 
     private func recordPersistenceFailure(_ reason: String) {
         persistenceFailure = reason
-        Log.persistence.error("Game \(self.gameID.uuidString, privacy: .public) not saved: \(reason, privacy: .public)")
+        AppLog.persistence.error("Game \(self.gameID.uuidString, privacy: .public) not saved: \(reason, privacy: .public)")
     }
 
     private func finishedGameRecord(outcome: Outcome) -> FinishedGameRecord {

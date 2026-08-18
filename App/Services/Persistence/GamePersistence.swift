@@ -39,10 +39,10 @@ actor GamePersistence {
                 loop.gamePlayed = true
             }
         } catch {
-            Log.persistence.error("Daily loop not updated: \(String(describing: error), privacy: .public)")
+            AppLog.persistence.error("Daily loop not updated: \(String(describing: error), privacy: .public)")
         }
 
-        Log.persistence.info(
+        AppLog.persistence.info(
             "Saved game \(record.id.uuidString, privacy: .public) (\(record.moves.count) plies, \(record.termination, privacy: .public))"
         )
     }

@@ -59,10 +59,10 @@ private struct PhoneRootView: View {
                 NavigationStack { PlayScreen() }
             }
             Tab("Train", systemImage: "square.grid.3x3") {
-                NavigationStack { TrainScreen() }
+                NavigationStack { TrainHomeScreen() }
             }
             Tab("Profile", systemImage: "chart.line.uptrend.xyaxis") {
-                NavigationStack { ProfileScreen() }
+                NavigationStack { ProfileView() }
             }
         }
     }
@@ -104,9 +104,9 @@ private struct MacRootView: View {
         } detail: {
             switch selection {
             case .today, nil: TodayScreen()
-            case .games: GamesListScreen()
-            case .train: TrainScreen()
-            case .profile: ProfileScreen()
+            case .games: GameLibraryScreen()
+            case .train: TrainHomeScreen()
+            case .profile: ProfileView()
             case .settings: SettingsScreen()
             }
         }

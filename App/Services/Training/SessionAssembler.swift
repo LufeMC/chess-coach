@@ -280,17 +280,16 @@ enum SessionAssembler {
             tuning: tuning.cards
         )
 
-        let planWithRetries = plan
-        let mix = mix(freshSlots: planWithRetries.freshCount, focus: inputs.focus, tuning: tuning.focus)
+        let mix = mix(freshSlots: plan.freshCount, focus: inputs.focus, tuning: tuning.focus)
 
         var focusPool = inputs.focusThemedPuzzles[...]
         var generalPool = inputs.generalPuzzles[...]
         var focusRemaining = mix.focusThemed
 
         var items: [SessionItemPlan] = []
-        items.reserveCapacity(planWithRetries.items.count)
+        items.reserveCapacity(plan.items.count)
 
-        for entry in planWithRetries.items {
+        for entry in plan.items {
             switch entry {
             case let .review(card, presentation):
                 guard let item = presentedItem(for: card, presentation: presentation, inputs: inputs) else { continue }
@@ -325,7 +324,7 @@ enum SessionAssembler {
             }
         }
 
-        return AssembledSession(items: items, retired: planWithRetries.retired, mix: mix)
+        return AssembledSession(items: items, retired: plan.retired, mix: mix)
     }
 
     /// Appends same-day retries for the cards failed during this session.

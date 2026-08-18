@@ -266,16 +266,30 @@ struct PuzzleSolveMachine: Sendable {
 
     /// Applies a UCI move to a board, including promotion.
     ///
-    /// Returns `false` rather than trapping when the move is not legal: every
-    /// caller here has a meaningful answer for "that did not work".
-    static func apply(uci: String, to board: inout Board) -> Bool {
-        guard uci.count == 4 || uci.count == 5 else { return false }
+    /// Returns `nil` rather than trapping when the move is not legal: every
+    /// caller here has a meaningful answer for "that did not work". The move is
+    /// returned rather than discarded because it carries the disambiguation and
+    /// check state that SAN needs, and recomputing those is exactly the work
+    /// `Board` has just done.
+    @discardableResult
+    static func move(uci: String, on board: inout Board) -> Move? {
+        guard uci.count == 4 || uci.count == 5 else { return nil }
         let characters = Array(uci)
         let start = Square(String(characters[0...1]))
         let end = Square(String(characters[2...3]))
 
+        // `Board.canMove(pieceAt:to:)` answers "is this a legal move for that
+        // piece", which is not the same question as "is this a legal move now":
+        // it does not check whose turn it is. Without this guard, dragging a
+        // white piece while Black is to move is accepted as a *wrong answer* and
+        // costs the user the puzzle, rather than being ignored as the mis-tap it
+        // is.
+        guard let piece = board.position.piece(at: start), piece.color == board.position.sideToMove else {
+            return nil
+        }
+
         guard board.canMove(pieceAt: start, to: end), let move = board.move(pieceAt: start, to: end) else {
-            return false
+            return nil
         }
 
         if case .promotion = board.state {
@@ -284,9 +298,13 @@ struct PuzzleSolveMachine: Sendable {
             // what every engine and every puzzle line assumes.
             let suffix = characters.count == 5 ? String(characters[4]).uppercased() : "Q"
             let kind = Piece.Kind(rawValue: suffix) ?? .queen
-            board.completePromotion(of: move, to: kind)
+            return board.completePromotion(of: move, to: kind)
         }
 
-        return true
+        return move
+    }
+
+    static func apply(uci: String, to board: inout Board) -> Bool {
+        move(uci: uci, on: &board) != nil
     }
 }

@@ -48,11 +48,11 @@ struct AppDatabase: Sendable {
         do {
             return .success(try AppDatabase.bootstrap())
         } catch let error as AppDatabaseError {
-            Log.persistence.error("Database bootstrap failed: \(error.description, privacy: .public)")
+            AppLog.persistence.error("Database bootstrap failed: \(error.description, privacy: .public)")
             return .failure(error)
         } catch {
             let wrapped = AppDatabaseError(description: String(describing: error))
-            Log.persistence.error("Database bootstrap failed: \(wrapped.description, privacy: .public)")
+            AppLog.persistence.error("Database bootstrap failed: \(wrapped.description, privacy: .public)")
             return .failure(wrapped)
         }
     }()
@@ -102,10 +102,10 @@ struct AppDatabase: Sendable {
                 // resource-value change there just fails silently.
                 puzzles = try PuzzleDatabase.open(at: puzzleDatabaseURL, excludeFromBackup: false)
             } catch {
-                Log.persistence.error("Puzzle database unavailable: \(String(describing: error), privacy: .public)")
+                AppLog.persistence.error("Puzzle database unavailable: \(String(describing: error), privacy: .public)")
             }
         } else {
-            Log.persistence.error("No puzzles.sqlite in the bundle; puzzle features are disabled.")
+            AppLog.persistence.error("No puzzles.sqlite in the bundle; puzzle features are disabled.")
         }
 
         // This is what makes `@FetchAll` / `@FetchOne` work in SwiftUI views:
@@ -123,7 +123,7 @@ struct AppDatabase: Sendable {
             _ = try? user.sync(enabled: false)
         #endif
 
-        Log.persistence.info("Opened user database at \(userURL.path, privacy: .public)")
+        AppLog.persistence.info("Opened user database at \(userURL.path, privacy: .public)")
         return AppDatabase(user: user, puzzles: puzzles)
     }
 
@@ -149,7 +149,7 @@ struct AppDatabaseError: Error, Sendable, CustomStringConvertible, Equatable {
 
 // MARK: - Logging
 
-enum Log {
+enum AppLog {
     static let persistence = Logger(subsystem: "com.usenivel.chesscoach", category: "persistence")
     static let analysis = Logger(subsystem: "com.usenivel.chesscoach", category: "analysis")
 }

@@ -32,12 +32,24 @@ struct TodayScreen: View {
             // Settings lives behind a gear rather than a fifth tab: it is
             // configuration, not part of the daily loop.
             .toolbar {
+                // Past games live behind the history glyph rather than a fifth
+                // tab: reviewing is something you do after a game, not a
+                // destination you navigate to cold.
+                ToolbarItem(placement: .topBarTrailing) {
+                    NavigationLink {
+                        GameLibraryScreen()
+                    } label: {
+                        Image(systemName: "clock.arrow.circlepath")
+                    }
+                    .accessibilityLabel("Past games")
+                }
                 ToolbarItem(placement: .topBarTrailing) {
                     NavigationLink {
                         SettingsScreen()
                     } label: {
                         Image(systemName: "gearshape")
                     }
+                    .accessibilityLabel("Settings")
                 }
             }
         #endif

@@ -5,7 +5,6 @@ options:
   createIntermediateGroups: true
   deploymentTarget:
     iOS: "18.0"
-    macOS: "15.0"
   generateEmptyDirectories: true
 
 settings:
@@ -37,7 +36,7 @@ packages:
 targets:
   ChessCoach:
     type: application
-    supportedDestinations: [iOS, macOS]
+    supportedDestinations: [iOS]
     sources:
       - path: App
         excludes:
@@ -84,9 +83,6 @@ targets:
           - CloudKit
         com.apple.developer.ubiquity-kvstore-identifier: $(TeamIdentifierPrefix)$(CFBundleIdentifier)
         aps-environment: development
-        com.apple.security.app-sandbox: true
-        com.apple.security.network.client: true
-        com.apple.security.files.user-selected.read-only: true
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.usenivel.chesscoach
@@ -110,3 +106,20 @@ targets:
         product: TrainingCore
       - package: ClaudeKit
         product: ClaudeKit
+
+  ChessCoachTests:
+    type: bundle.unit-test
+    supportedDestinations: [iOS]
+    sources:
+      - path: AppTests
+    dependencies:
+      - target: ChessCoach
+    settings:
+      base:
+        # Host the tests in the app so anything touching the Keychain or the
+        # bundled resources runs with the app's identity rather than the test
+        # runner's. Without a host, Keychain calls fail with
+        # errSecMissingEntitlement and bundle lookups return nil.
+        TEST_HOST: "$(BUILT_PRODUCTS_DIR)/ChessCoach.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/ChessCoach"
+        BUNDLE_LOADER: "$(TEST_HOST)"
+        GENERATE_INFOPLIST_FILE: YES

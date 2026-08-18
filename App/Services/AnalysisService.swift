@@ -151,7 +151,7 @@ actor AnalysisService {
         for game in stalled {
             try? store.setState(.pending, forGame: game.id)
         }
-        Log.analysis.info("Requeued \(stalled.count) game(s) left running by a previous launch.")
+        AppLog.analysis.info("Requeued \(stalled.count) game(s) left running by a previous launch.")
     }
 
     // MARK: - One game
@@ -270,7 +270,7 @@ actor AnalysisService {
                     )
                 } catch {
                     // A failed enrichment costs a coaching line, not the pass.
-                    Log.analysis.error("Enrichment failed at ply \(plyIndex + 1): \(String(describing: error), privacy: .public)")
+                    AppLog.analysis.error("Enrichment failed at ply \(plyIndex + 1): \(String(describing: error), privacy: .public)")
                 }
                 emit(AnalysisProgress(gameID: gameID, stage: .enriching, ply: index + 1, total: flagged.count))
             }
@@ -306,7 +306,7 @@ actor AnalysisService {
             return fail(gameID, String(describing: error))
         }
 
-        Log.analysis.info(
+        AppLog.analysis.info(
             "Analysed \(gameID.uuidString, privacy: .public): \(analyzed.moments.count) moment(s), accuracy \(analyzed.userAccuracy ?? -1)"
         )
         emit(AnalysisProgress(gameID: gameID, stage: .finished, ply: replay.positions.count, total: replay.positions.count))
@@ -426,12 +426,12 @@ actor AnalysisService {
             try store.storeEvals(evals.map { $0.row(gameID: gameID) }, forGame: gameID)
         } catch {
             // Losing the checkpoint costs time on the next run, nothing else.
-            Log.analysis.error("Could not checkpoint evals: \(String(describing: error), privacy: .public)")
+            AppLog.analysis.error("Could not checkpoint evals: \(String(describing: error), privacy: .public)")
         }
     }
 
     private func fail(_ gameID: UUID, _ reason: String) -> Outcome {
-        Log.analysis.error("Analysis of \(gameID.uuidString, privacy: .public) failed: \(reason, privacy: .public)")
+        AppLog.analysis.error("Analysis of \(gameID.uuidString, privacy: .public) failed: \(reason, privacy: .public)")
         // The schema has no column for the reason — `analysisState` is a single
         // string — so it goes to the log and to the progress stream, and the row
         // records only that the pass failed.

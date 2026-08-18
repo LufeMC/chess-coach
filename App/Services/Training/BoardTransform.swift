@@ -5,6 +5,7 @@
 
 import ChessKit
 import Foundation
+import TrainingCore
 
 /// A geometric transform applied to a stored position before it is shown again.
 ///

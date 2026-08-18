@@ -61,19 +61,29 @@ enum AnalysisPipeline {
         )
     }
 
-    /// The score a terminal position deserves, side-to-move relative.
+    /// The score a position with no legal move deserves, side-to-move relative.
     ///
-    /// `.mate(-1)` for checkmate, not the engine's own `.mate(0)`, and the reason
-    /// is a sign bug waiting to happen: converting an after-move score to the
-    /// mover's perspective negates it, and `-0 == 0`. A `.mate(0)` would therefore
-    /// stay `.mate(0)` and read as 0% — for the player who just *delivered* mate.
-    /// `-1` negates to `+1` and reads 100%, which is what actually happened.
+    /// Two things are deliberate here.
+    ///
+    /// `Board(position:).state` is **not** used, even though it looks like the
+    /// obvious answer. `Board` computes its state for the side that just moved, so
+    /// a board built from a bare position reports on the side that is *not* to
+    /// move and calls a mated position `.active`. `PositionUtilities` exists
+    /// precisely because of that, and says so in its own documentation.
+    ///
+    /// Checkmate scores `.mate(-1)`, not the engine's own `.mate(0)`, because
+    /// converting an after-move score to the mover's perspective negates it and
+    /// `-0 == 0`. A `.mate(0)` would survive the flip unchanged and read as 0% —
+    /// for the player who just *delivered* mate. `-1` negates to `+1`, which is
+    /// what actually happened.
+    ///
+    /// Only mate and stalemate count. A fifty-move or insufficient-material
+    /// position still has legal moves, so the engine can and should search it; the
+    /// live game's own termination is what records the draw.
     static func terminalScore(for position: Position) -> UCIScore? {
-        switch Board(position: position).state {
-        case .checkmate: .mate(-1)
-        case .draw: .centipawns(0)
-        default: nil
-        }
+        if PositionUtilities.isCheckmate(position) { return .mate(-1) }
+        if PositionUtilities.isStalemate(position) { return .centipawns(0) }
+        return nil
     }
 
     // MARK: - Stored evaluations

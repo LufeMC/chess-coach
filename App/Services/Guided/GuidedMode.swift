@@ -82,16 +82,28 @@ struct GuidedMode: Sendable {
 
         let gap = criticalityGap(context)
 
-        // A position matching the focus habit's own trigger clears a lower bar.
-        if matchesFocusPredicate(context), gap >= budget.focusGapThreshold {
-            return Prompt(habit: focusHabit, question: question(for: focusHabit), ply: context.ply)
+        // A position matching the focus habit's own trigger clears a lower bar:
+        // these are the positions the user is specifically training for, so a
+        // slightly less sharp one is still worth a pause.
+        let focusMatches = matchesFocusPredicate(context)
+        let threshold = focusMatches ? budget.focusGapThreshold : budget.genericGapThreshold
+        guard gap >= threshold else { return nil }
+
+        // Which question to ask is a separate decision from whether to pause.
+        //
+        // Some habits have predicates that match essentially any sharp position
+        // — blunderCheck is the obvious one, since "could this move be refuted?"
+        // always applies. Letting those claim every pause would mean a user
+        // whose focus is blunderCheck gets asked about refutations even in a
+        // position that is plainly about converting a won game. So a
+        // non-discriminating focus yields to a situational habit that actually
+        // fits; a discriminating one keeps the pause it earned.
+        let habit: Habit
+        if focusMatches, focusHabit.hasDiscriminatingTrigger {
+            habit = focusHabit
+        } else {
+            habit = situationalHabit(for: context) ?? focusHabit
         }
-
-        guard gap >= budget.genericGapThreshold else { return nil }
-
-        // Generic critical position: ask the habit that fits what makes it
-        // critical, falling back to the week's focus.
-        let habit = situationalHabit(for: context) ?? focusHabit
         return Prompt(habit: habit, question: question(for: habit), ply: context.ply)
     }
 
@@ -104,7 +116,7 @@ struct GuidedMode: Sendable {
     }
 
     /// Whether this position is the kind the focus habit exists to train.
-    private func matchesFocusPredicate(_ context: Context) -> Bool {
+    func matchesFocusPredicate(_ context: Context) -> Bool {
         switch focusHabit {
         case .whatChanged, .scanThreats:
             return (context.nullMoveThreatEP ?? 0) >= 0.10
@@ -181,5 +193,18 @@ struct GuidedMode: Sendable {
             return gap <= 0.05 ? 0.7 : 0
         }
         return 0
+    }
+}
+
+extension Habit {
+    /// Whether this habit's trigger actually narrows the field.
+    ///
+    /// `blunderCheck` applies to every sharp position by definition — "could
+    /// this move be refuted?" is always a fair question — so it can never lose a
+    /// tie-break on specificity. Treating it as discriminating would let it
+    /// answer for positions another habit describes far better, which is exactly
+    /// what a weekly focus of blunderCheck would otherwise cause.
+    var hasDiscriminatingTrigger: Bool {
+        self != .blunderCheck
     }
 }
