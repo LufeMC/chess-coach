@@ -12,11 +12,19 @@ struct RootView: View {
         case .failed(let message):
             BootFailureView(message: message)
         case .ready:
-            #if os(macOS)
-                MacRootView()
-            #else
-                PhoneRootView()
-            #endif
+            // Calibration gates the app rather than presenting over it: the
+            // rating and starting rung it produces are what every other screen
+            // reads, so entering Today first would mean showing a ladder and a
+            // leak chart with nothing behind them.
+            if model.needsCalibration {
+                CalibrationScreen { model.calibrationFinished() }
+            } else {
+                #if os(macOS)
+                    MacRootView()
+                #else
+                    PhoneRootView()
+                #endif
+            }
         }
     }
 }

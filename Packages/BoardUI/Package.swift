@@ -22,6 +22,7 @@ let package = Package(
     .target(
       name: "BoardUI",
       dependencies: ["ChessKit"],
+      resources: [.process("Resources/Pieces.xcassets")],
       swiftSettings: [.swiftLanguageMode(.v6)]
     ),
     .testTarget(

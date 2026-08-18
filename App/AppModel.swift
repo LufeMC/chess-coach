@@ -41,6 +41,34 @@ final class AppModel {
     /// can play — but nothing is saved, so this is surfaced rather than swallowed.
     private(set) var databaseError: String?
 
+    /// Whether the day-one calibration still needs to run.
+    ///
+    /// Completion is stored as a metric rather than a settings column: adding a
+    /// column to a CloudKit-synced table is a schema migration, and "have we
+    /// measured this user yet" is exactly the kind of derived fact the metrics
+    /// table already exists to hold.
+    private(set) var needsCalibration = false
+
+    /// Marks calibration done so the gate closes without waiting on a re-read.
+    func calibrationFinished() {
+        needsCalibration = false
+    }
+
+    private func refreshCalibrationState() {
+        guard let database = AppDatabase.sharedIfAvailable else {
+            // With no database there is nowhere to record a result, so putting
+            // the user through a five-game diagnostic every launch would be
+            // worse than skipping it.
+            needsCalibration = false
+            return
+        }
+        let completed = try? database.metrics.metric(
+            key: StoredCalibrationOutcome.completedKey,
+            window: "allTime"
+        )
+        needsCalibration = completed == nil
+    }
+
     /// True when the process was launched by the test runner.
     ///
     /// Unit tests are hosted *inside* this app, so launching normally would boot
@@ -69,6 +97,7 @@ final class AppModel {
         case .failure(let error):
             databaseError = String(describing: error)
         }
+        refreshCalibrationState()
 
         do {
             try await engineService.boot(networks: .standard())

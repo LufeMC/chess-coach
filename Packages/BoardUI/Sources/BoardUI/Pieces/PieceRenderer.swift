@@ -31,6 +31,12 @@ public struct PieceRenderer: Hashable, Sendable, Identifiable {
     /// e.g. `"merida-wK"`. The bundle is resolved by identifier so the value
     /// stays `Sendable`.
     case images(bundleIdentifier: String?, prefix: String)
+    /// Artwork shipped inside this package's own resource bundle.
+    ///
+    /// Separate from `images` because that case resolves `nil` to the *main*
+    /// bundle — correct for a set the host app supplies, wrong for one that
+    /// travels with BoardUI.
+    case bundledImages(prefix: String)
   }
 
   public var id: String { name }
@@ -62,7 +68,18 @@ public struct PieceRenderer: Hashable, Sendable, Identifiable {
     self.outlineWidth = outlineWidth
   }
 
-  /// Built-in vector set.
+  /// Cburnett — the Lichess default, bundled with this package.
+  ///
+  /// The artwork carries its own fills and outlines, so the body/outline
+  /// colours below are unused for this set. It is the default because the
+  /// built-in vector silhouettes read as placeholder art next to it, and the
+  /// board is the surface the user looks at more than any other.
+  public static let cburnett = PieceRenderer(
+    name: "Cburnett",
+    source: .bundledImages(prefix: "cburnett-")
+  )
+
+  /// Built-in vector set. Kept as the fallback for any missing asset.
   public static let vector = PieceRenderer(name: "Vector", source: .vector)
 
   /// System glyph set.
@@ -108,14 +125,24 @@ public struct PieceRenderer: Hashable, Sendable, Identifiable {
 
   /// The asset name an image-backed set would look for.
   func assetName(for kind: Piece.Kind, color: Piece.Color) -> String? {
-    guard case let .images(_, prefix) = source else { return nil }
-    return prefix + color.rawValue + kindLetter(kind)
+    switch source {
+    case let .images(_, prefix), let .bundledImages(prefix):
+      return prefix + color.rawValue + kindLetter(kind)
+    case .vector, .unicode:
+      return nil
+    }
   }
 
   func bundle() -> Bundle? {
-    guard case let .images(identifier, _) = source else { return nil }
-    guard let identifier else { return .main }
-    return Bundle(identifier: identifier)
+    switch source {
+    case let .images(identifier, _):
+      guard let identifier else { return .main }
+      return Bundle(identifier: identifier)
+    case .bundledImages:
+      return .module
+    case .vector, .unicode:
+      return nil
+    }
   }
 
   private func kindLetter(_ kind: Piece.Kind) -> String {
@@ -146,7 +173,7 @@ public struct PieceView: View {
   public init(
     kind: Piece.Kind,
     color: Piece.Color,
-    renderer: PieceRenderer = .vector,
+    renderer: PieceRenderer = .cburnett,
     size: CGFloat
   ) {
     self.kind = kind
@@ -155,7 +182,7 @@ public struct PieceView: View {
     self.size = size
   }
 
-  public init(piece: Piece, renderer: PieceRenderer = .vector, size: CGFloat) {
+  public init(piece: Piece, renderer: PieceRenderer = .cburnett, size: CGFloat) {
     self.init(kind: piece.kind, color: piece.color, renderer: renderer, size: size)
   }
 
@@ -172,7 +199,7 @@ public struct PieceView: View {
       vector
     case .unicode:
       glyph
-    case .images:
+    case .images, .bundledImages:
       if let name = renderer.assetName(for: kind, color: color),
         let bundle = renderer.bundle(),
         // `Image(_:bundle:)` renders a placeholder rather than failing when the

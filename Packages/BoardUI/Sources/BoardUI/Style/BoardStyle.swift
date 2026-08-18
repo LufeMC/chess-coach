@@ -62,7 +62,7 @@ public struct BoardStyle: Hashable, Sendable, Identifiable {
     coordinate: DualColor,
     showsCoordinates: Bool = false,
     cornerRadius: CGFloat = 0,
-    pieceSet: PieceRenderer = .vector
+    pieceSet: PieceRenderer = .cburnett
   ) {
     self.name = name
     self.lightSquare = lightSquare
