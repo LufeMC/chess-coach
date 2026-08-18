@@ -88,7 +88,7 @@ public struct PieceRenderer: Hashable, Sendable, Identifiable {
   /// Outline colour for a piece colour — always the opposing body tone, so the
   /// silhouette survives on either square tone.
   public func outline(for color: Piece.Color) -> DualColor {
-    color == .white ? blackBody.opacity(0.55) : whiteBody.opacity(0.45)
+    color == .white ? blackBody.opacity(0.55) : whiteBody.opacity(0.52)
   }
 
   /// The asset name an image-backed set would look for.

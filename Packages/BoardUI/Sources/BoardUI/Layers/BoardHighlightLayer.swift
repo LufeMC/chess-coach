@@ -77,10 +77,12 @@ struct HighlightMark: View {
         .strokeBorder(accent.opacity(0.70), lineWidth: side * 0.09)
         .padding(side * 0.03)
     case .hint:
-      Circle()
-        .strokeBorder(accent.opacity(0.9), lineWidth: side * 0.07)
-        .background(Circle().fill(accent.opacity(0.14)))
-        .padding(side * 0.06)
+      // A framed square, deliberately *not* a ring: a coach hint and a legal
+      // capture would otherwise be the same teal circle, and the hint ladder
+      // depends on the user reading "look here" as its own thing.
+      Rectangle()
+        .strokeBorder(accent.opacity(0.9), lineWidth: side * 0.08)
+        .background(accent.opacity(0.18))
     case .momentSquare:
       Rectangle()
         .strokeBorder(

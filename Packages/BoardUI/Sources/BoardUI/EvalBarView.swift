@@ -63,15 +63,21 @@ public struct EvalBarView: View {
             height: axis == .vertical ? whiteLength : nil
           )
       }
+      // Clip the fills, not the label: a three-digit number cannot fit inside a
+      // 16pt bar, so the pill is allowed to overhang it on purpose.
+      .clipShape(Capsule())
       .overlay(alignment: labelAlignment) {
         if showsLabel {
           Text(label)
             .font(.system(size: 10, weight: .semibold).monospacedDigit())
             .foregroundStyle(labelColor)
-            .padding(.horizontal, 3)
-            .padding(.vertical, 2)
+            .padding(.horizontal, 4)
+            .padding(.vertical, 1)
             .fixedSize()
-            .rotationEffect(.degrees(axis == .vertical ? 0 : 0))
+            // The pill guarantees the number stays legible even when the fill
+            // boundary lands underneath it — which happens on any short bar and
+            // on every position near equality.
+            .background(labelBacking, in: Capsule())
             .padding(2)
         }
       }
@@ -80,7 +86,6 @@ public struct EvalBarView: View {
       width: axis == .vertical ? thickness : nil,
       height: axis == .vertical ? nil : thickness
     )
-    .clipShape(Capsule())
     // One spring for the whole bar. Eval arrives in bursts as the engine
     // deepens, and un-animated jumps make a stable position look chaotic.
     .animation(.smooth(duration: 0.45), value: score)
@@ -145,11 +150,18 @@ public struct EvalBarView: View {
 
   /// The label lives at the viewer's end, so it normally sits on the viewer's
   /// own fill — unless they are being crushed and the other fill has reached it.
-  private var labelColor: Color {
+  private var labelSitsOnWhite: Bool {
     let viewerShare = orientation == .white ? whiteFraction : 1 - whiteFraction
     let viewerFillIsWhite = orientation == .white
-    let onWhite = viewerShare > 0.16 ? viewerFillIsWhite : !viewerFillIsWhite
-    return onWhite ? blackFill : whiteFill
+    return viewerShare > 0.16 ? viewerFillIsWhite : !viewerFillIsWhite
+  }
+
+  private var labelColor: Color {
+    labelSitsOnWhite ? blackFill : whiteFill
+  }
+
+  private var labelBacking: Color {
+    (labelSitsOnWhite ? whiteFill : blackFill).opacity(0.85)
   }
 }
 

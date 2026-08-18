@@ -89,9 +89,12 @@ public struct BoardView: View {
 
       BoardPiecesLayer(
         tokens: model.layout.tokens,
+        departing: model.departing,
         geometry: geometry,
         style: style,
-        draggingTokenID: model.drag?.isReturning == false ? model.drag?.tokenID : nil
+        // Hidden for the whole drag, the snap-back included: while the ghost is
+        // travelling home there must not be a second copy already sitting there.
+        draggingTokenID: model.drag?.tokenID
       )
 
       BoardHighlightLayer(

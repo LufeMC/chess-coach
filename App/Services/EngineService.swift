@@ -94,14 +94,24 @@ actor EngineService {
     func boot(networks: NetworkPaths) async throws {
         guard !booted else { return }
 
-        guard FileManager.default.fileExists(atPath: networks.small.path) else {
-            throw EngineError.missingNetwork(networks.small.lastPathComponent)
+        // BOTH networks must exist before the engine is touched.
+        //
+        // Stockfish runs in-process and calls `exit(EXIT_FAILURE)` from
+        // `Network::load` when a net is missing or unreadable — see
+        // Stockfish/src/nnue/network.cpp ("The engine will be terminated now").
+        // In a subprocess that kills the engine; in-process it kills the whole
+        // app, with no crash report and no chance to catch it. So the check has
+        // to happen here, before any UCI command is sent.
+        //
+        // Notably the big net cannot be skipped by simply leaving EvalFile
+        // unset: the default value names a file that must then exist, and the
+        // small net cannot stand in for it because the two have different
+        // architectures.
+        for network in [networks.small, networks.big] where !FileManager.default.fileExists(atPath: network.path) {
+            throw EngineError.missingNetwork(network.lastPathComponent)
         }
-        // The big net is optional: Stockfish runs on the small net alone, just
-        // weaker. That lets the app be useful while the big net downloads.
-        let bigNet = FileManager.default.fileExists(atPath: networks.big.path) ? networks.big : nil
 
-        try await engine.start(bigNet: bigNet, smallNet: networks.small)
+        try await engine.start(bigNet: networks.big, smallNet: networks.small)
         device = await calibrate()
         booted = true
     }
@@ -221,13 +231,16 @@ struct NetworkPaths: Sendable {
         let support = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
             .appending(path: "Networks", directoryHint: .isDirectory)
 
-        let bundledSmall =
-            bundle.url(forResource: "nn-37f18f62d772", withExtension: "nnue")
-            ?? support.appending(path: "nn-37f18f62d772.nnue")
+        // Bundle first, Application Support as the fallback so a
+        // downloaded/updated net can override the shipped one later.
+        func resolve(_ name: String) -> URL {
+            bundle.url(forResource: name, withExtension: "nnue")
+                ?? support.appending(path: "\(name).nnue")
+        }
 
         return NetworkPaths(
-            small: bundledSmall,
-            big: support.appending(path: "nn-1c0000000000.nnue")
+            small: resolve("nn-37f18f62d772"),
+            big: resolve("nn-1c0000000000")
         )
     }
 }

@@ -25,6 +25,15 @@ final class BoardModel {
   /// Colour of the king currently in check, if any.
   private(set) var checkedColor: Piece.Color?
 
+  /// Pieces that have just left the board.
+  ///
+  /// A captured piece is held for as long as the capturing piece takes to slide
+  /// onto it. Removing it the instant the position changes leaves the target
+  /// square visibly empty for the whole animation, which reads as the piece
+  /// having been taken by nothing.
+  private(set) var departing: [PieceToken] = []
+  private var departureToken = 0
+
   var orientation: Piece.Color
 
   // MARK: Interaction state
@@ -119,10 +128,12 @@ final class BoardModel {
     guard newPosition != position else { return }
 
     let previousPieceCount = position.pieces.count
+    let previousTokens = layout.tokens
     position = newPosition
     board = Board(position: newPosition)
     checkedColor = Self.checkedKing(in: newPosition)
     layout.apply(position: newPosition)
+    holdDepartingPieces(from: previousTokens)
 
     // Any external change ends the current interaction — the piece the user was
     // holding may no longer exist.
@@ -137,6 +148,23 @@ final class BoardModel {
     }
     if checkedColor != nil {
       checkTicks += 1
+    }
+  }
+
+  /// Keeps just-captured pieces on screen until the capturing piece arrives.
+  private func holdDepartingPieces(from previous: [PieceToken]) {
+    let live = Set(layout.tokens.map(\.id))
+    let gone = previous.filter { !live.contains($0.id) }
+    departing = gone
+    guard !gone.isEmpty else { return }
+
+    departureToken += 1
+    let token = departureToken
+    Task { @MainActor in
+      // Slightly longer than the piece slide so the capture never uncovers an
+      // empty square, short enough that it is never noticed as a delay.
+      try? await Task.sleep(for: .milliseconds(220))
+      if self.departureToken == token { self.departing = [] }
     }
   }
 

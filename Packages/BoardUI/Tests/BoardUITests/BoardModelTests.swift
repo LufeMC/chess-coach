@@ -242,6 +242,31 @@ struct BoardModelTests {
     #expect(checking.checkedKingSquare == .e1)
   }
 
+  @Test func aCapturedPieceIsHeldUntilTheCapturerLands() async {
+    let model = model("rnbqkbnr/ppp1pppp/8/3p4/4P3/8/PPPP1PPP/RNBQKBNR w KQkq - 0 2")
+    let victim = model.layout.token(at: .d5)
+
+    var board = Board(position: model.position)
+    board.move(pieceAt: .e4, to: .d5)
+    model.update(position: board.position)
+
+    // It is off the board but still on screen, otherwise the target square
+    // would sit empty for the whole slide.
+    #expect(model.layout.token(at: .d5)?.id != victim?.id)
+    #expect(model.departing.map(\.id) == [victim?.id].compactMap { $0 })
+
+    try? await Task.sleep(for: .milliseconds(400))
+    #expect(model.departing.isEmpty)
+  }
+
+  @Test func aQuietMoveLeavesNothingBehind() {
+    let model = model()
+    var board = Board(position: .standard)
+    board.move(pieceAt: .e2, to: .e4)
+    model.update(position: board.position)
+    #expect(model.departing.isEmpty)
+  }
+
   @Test func repeatingTheSamePositionRaisesNoFeedback() {
     let model = model()
     model.update(position: .standard)

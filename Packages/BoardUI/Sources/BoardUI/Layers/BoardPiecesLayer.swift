@@ -16,6 +16,9 @@ import SwiftUI
 struct BoardPiecesLayer: View {
 
   let tokens: [PieceToken]
+  /// Captured pieces still finishing their exit. Drawn first so the piece that
+  /// took them slides over the top rather than under.
+  let departing: [PieceToken]
   let geometry: BoardGeometry
   let style: BoardStyle
   /// Token currently held by the pointer — drawn by the drag layer instead.
@@ -23,6 +26,16 @@ struct BoardPiecesLayer: View {
 
   var body: some View {
     ZStack(alignment: .topLeading) {
+      ForEach(departing) { token in
+        PieceView(
+          kind: token.kind,
+          color: token.color,
+          renderer: style.pieceSet,
+          size: geometry.squareSide
+        )
+        .position(geometry.center(of: token.square))
+      }
+
       ForEach(tokens) { token in
         PieceView(
           kind: token.kind,

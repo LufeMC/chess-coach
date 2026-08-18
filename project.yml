@@ -39,9 +39,23 @@ targets:
         excludes:
           - "Resources/Networks/**"
           - "Resources/puzzles.sqlite"
-    # Large binary assets are referenced explicitly so xcodegen doesn't try to
-    # treat them as compilable sources.
-    resources: []
+      # Large binary assets are declared as resources explicitly. The small NNUE
+      # net and the curated puzzle DB must be in the bundle: the engine cannot
+      # search without a network, and the puzzle DB is read-only reference data.
+      # Both nets are bundled. The big one is 71MB, which the plan originally
+      # wanted to download on first run — but Stockfish runs in-process and
+      # calls exit() when a net is missing, so a failed or pending download
+      # would take the whole app down rather than degrading. For a personally
+      # installed app the size is a fair trade for that robustness.
+      - path: App/Resources/Networks/nn-37f18f62d772.nnue
+        buildPhase: resources
+        optional: true
+      - path: App/Resources/Networks/nn-1c0000000000.nnue
+        buildPhase: resources
+        optional: true
+      - path: App/Resources/puzzles.sqlite
+        buildPhase: resources
+        optional: true
     info:
       path: App/Info.plist
       properties:

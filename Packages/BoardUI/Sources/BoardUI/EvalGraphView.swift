@@ -115,7 +115,7 @@ public struct EvalGraphView: View {
         RuleMark(x: .value("Ply", selection))
           .lineStyle(StrokeStyle(lineWidth: 1))
           .foregroundStyle(.secondary.opacity(0.6))
-          .annotation(position: .top, overflowResolution: .init(x: .fit, y: .disabled)) {
+          .annotation(position: .top, overflowResolution: .init(x: .fit, y: .fit)) {
             tooltip(for: point)
           }
       }

@@ -79,7 +79,7 @@ enum PieceGeometry {
     var path = Path()
     switch kind {
     case .knight:
-      path.addEllipse(in: CGRect(x: 36.5, y: 30.5, width: 7, height: 7))
+      path.addEllipse(in: CGRect(x: 40, y: 31, width: 7, height: 7))
     case .bishop:
       // The mitre slit: a thin parallelogram running up-left to down-right.
       path.move(to: CGPoint(x: 44, y: 34))
@@ -157,37 +157,45 @@ enum PieceGeometry {
   }
 
   private static func appendKnight(_ path: inout Path) {
-    // Horse's head in profile, facing left. The right side of the outline is the
-    // back of the neck; the left side is the face.
+    // Horse's head in profile, facing left. Travelling up the back of the neck,
+    // over the crest, out along the ears, then down the face to the muzzle and
+    // back under the jaw. The long sloping forehead and the squared-off muzzle
+    // are what separate a knight from a generic animal head at thumbnail size.
     path.addCurve(
-      to: CGPoint(x: 67, y: 48),
-      control1: CGPoint(x: 73, y: 70),
-      control2: CGPoint(x: 71, y: 58)
+      to: CGPoint(x: 68, y: 50),
+      control1: CGPoint(x: 74, y: 72),
+      control2: CGPoint(x: 72, y: 58)
     )
     path.addCurve(
-      to: CGPoint(x: 56, y: 22),
-      control1: CGPoint(x: 64, y: 38),
-      control2: CGPoint(x: 62, y: 28)
+      to: CGPoint(x: 60, y: 26),
+      control1: CGPoint(x: 65, y: 40),
+      control2: CGPoint(x: 64, y: 31)
     )
-    path.addLine(to: CGPoint(x: 58, y: 10))
-    path.addLine(to: CGPoint(x: 48, y: 20))
-    path.addLine(to: CGPoint(x: 43, y: 11))
-    path.addLine(to: CGPoint(x: 38, y: 24))
+    path.addLine(to: CGPoint(x: 63, y: 13))
+    path.addLine(to: CGPoint(x: 53, y: 23))
+    path.addLine(to: CGPoint(x: 48, y: 9))
+    path.addLine(to: CGPoint(x: 43, y: 26))
     path.addCurve(
-      to: CGPoint(x: 16, y: 46),
-      control1: CGPoint(x: 30, y: 28),
-      control2: CGPoint(x: 19, y: 34)
+      to: CGPoint(x: 23, y: 41),
+      control1: CGPoint(x: 37, y: 30),
+      control2: CGPoint(x: 28, y: 33)
     )
-    path.addLine(to: CGPoint(x: 20, y: 54))
     path.addCurve(
-      to: CGPoint(x: 38, y: 60),
-      control1: CGPoint(x: 28, y: 58),
-      control2: CGPoint(x: 33, y: 60)
+      to: CGPoint(x: 14, y: 53),
+      control1: CGPoint(x: 19, y: 46),
+      control2: CGPoint(x: 15, y: 48)
+    )
+    path.addLine(to: CGPoint(x: 18, y: 59))
+    path.addLine(to: CGPoint(x: 27, y: 58))
+    path.addCurve(
+      to: CGPoint(x: 37, y: 63),
+      control1: CGPoint(x: 31, y: 61),
+      control2: CGPoint(x: 34, y: 63)
     )
     path.addCurve(
       to: CGPoint(x: 30, y: 82),
-      control1: CGPoint(x: 32, y: 68),
-      control2: CGPoint(x: 30, y: 74)
+      control1: CGPoint(x: 34, y: 70),
+      control2: CGPoint(x: 30, y: 75)
     )
   }
 
@@ -235,18 +243,19 @@ enum PieceGeometry {
       control2: CGPoint(x: 64, y: 64)
     )
     path.addLine(to: CGPoint(x: 66, y: 50))
-    // Five-point coronet: tips at y = 14, valleys at y = 34.
-    path.addLine(to: CGPoint(x: 78, y: 48))
-    path.addLine(to: CGPoint(x: 76, y: 15))
-    path.addLine(to: CGPoint(x: 69, y: 34))
-    path.addLine(to: CGPoint(x: 63, y: 13))
-    path.addLine(to: CGPoint(x: 56, y: 32))
-    path.addLine(to: CGPoint(x: 50, y: 11))
-    path.addLine(to: CGPoint(x: 44, y: 32))
-    path.addLine(to: CGPoint(x: 37, y: 13))
-    path.addLine(to: CGPoint(x: 31, y: 34))
-    path.addLine(to: CGPoint(x: 24, y: 15))
-    path.addLine(to: CGPoint(x: 22, y: 48))
+    // Five-point coronet: tips at y = 15, valleys at y = 33. Held inside the
+    // base width for the same reason as the king's crown.
+    path.addLine(to: CGPoint(x: 74, y: 48))
+    path.addLine(to: CGPoint(x: 72, y: 16))
+    path.addLine(to: CGPoint(x: 66, y: 33))
+    path.addLine(to: CGPoint(x: 61, y: 14))
+    path.addLine(to: CGPoint(x: 55, y: 32))
+    path.addLine(to: CGPoint(x: 50, y: 12))
+    path.addLine(to: CGPoint(x: 45, y: 32))
+    path.addLine(to: CGPoint(x: 39, y: 14))
+    path.addLine(to: CGPoint(x: 34, y: 33))
+    path.addLine(to: CGPoint(x: 28, y: 16))
+    path.addLine(to: CGPoint(x: 26, y: 48))
     path.addLine(to: CGPoint(x: 34, y: 50))
     path.addLine(to: CGPoint(x: 38, y: 58))
     path.addCurve(
@@ -263,25 +272,27 @@ enum PieceGeometry {
       control2: CGPoint(x: 64, y: 64)
     )
     path.addLine(to: CGPoint(x: 66, y: 50))
-    path.addLine(to: CGPoint(x: 77, y: 47))
-    path.addLine(to: CGPoint(x: 70, y: 25))
-    path.addLine(to: CGPoint(x: 58, y: 32))
-    path.addLine(to: CGPoint(x: 55, y: 21))
+    // The crown stays narrower than the base. Flaring it past the footprint
+    // makes the king top-heavy and the wings start reading as horns.
+    path.addLine(to: CGPoint(x: 69, y: 45))
+    path.addLine(to: CGPoint(x: 64, y: 29))
+    path.addLine(to: CGPoint(x: 56, y: 33))
+    path.addLine(to: CGPoint(x: 54, y: 22))
     // Surmounting cross.
-    path.addLine(to: CGPoint(x: 55, y: 18))
-    path.addLine(to: CGPoint(x: 62, y: 18))
-    path.addLine(to: CGPoint(x: 62, y: 12))
-    path.addLine(to: CGPoint(x: 55, y: 12))
-    path.addLine(to: CGPoint(x: 55, y: 6))
-    path.addLine(to: CGPoint(x: 45, y: 6))
-    path.addLine(to: CGPoint(x: 45, y: 12))
-    path.addLine(to: CGPoint(x: 38, y: 12))
-    path.addLine(to: CGPoint(x: 38, y: 18))
-    path.addLine(to: CGPoint(x: 45, y: 18))
-    path.addLine(to: CGPoint(x: 45, y: 21))
-    path.addLine(to: CGPoint(x: 42, y: 32))
-    path.addLine(to: CGPoint(x: 30, y: 25))
-    path.addLine(to: CGPoint(x: 23, y: 47))
+    path.addLine(to: CGPoint(x: 54, y: 19))
+    path.addLine(to: CGPoint(x: 61, y: 19))
+    path.addLine(to: CGPoint(x: 61, y: 13))
+    path.addLine(to: CGPoint(x: 54, y: 13))
+    path.addLine(to: CGPoint(x: 54, y: 7))
+    path.addLine(to: CGPoint(x: 46, y: 7))
+    path.addLine(to: CGPoint(x: 46, y: 13))
+    path.addLine(to: CGPoint(x: 39, y: 13))
+    path.addLine(to: CGPoint(x: 39, y: 19))
+    path.addLine(to: CGPoint(x: 46, y: 19))
+    path.addLine(to: CGPoint(x: 46, y: 22))
+    path.addLine(to: CGPoint(x: 44, y: 33))
+    path.addLine(to: CGPoint(x: 36, y: 29))
+    path.addLine(to: CGPoint(x: 31, y: 45))
     path.addLine(to: CGPoint(x: 34, y: 50))
     path.addLine(to: CGPoint(x: 38, y: 58))
     path.addCurve(
