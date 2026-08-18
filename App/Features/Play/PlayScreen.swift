@@ -34,6 +34,13 @@ struct PlayScreen: View {
     @State private var summaryTarget: GameSummaryTarget?
     @State private var boardFlipped = false
     @State private var lowTimeWarned = false
+    @State private var picker: OpponentPicker = .unmeasured
+
+    /// Alternate colours across games so the user isn't always White. Playing
+    /// only one side hides half the openings and half the mistakes.
+    private var userColor: Piece.Color {
+        picker.gamesPlayed.isMultiple(of: 2) ? .white : .black
+    }
 
     /// Measured so a sheet can be sized to the space *below* the board.
     @State private var boardFrame: CGRect = .zero
@@ -59,6 +66,9 @@ struct PlayScreen: View {
         }
         .navigationTitle("Play")
         .navigationBarTitleDisplayMode(.inline)
+        // Loaded on appear so the start prompt names the opponent you will
+        // actually face, not a placeholder that changes when you tap.
+        .task { picker = .current() }
         .toolbar(session == nil ? .visible : .hidden, for: .navigationBar)
         .toolbar(session == nil ? .visible : .hidden, for: .tabBar)
         .navigationDestination(item: $summaryTarget) { target in
@@ -96,17 +106,21 @@ struct PlayScreen: View {
     }
 
     private var opponentName: String {
-        OpponentRoster.opponent(forRating: opponentRating).name
+        picker.opponent.name
     }
 
     private var opponentRating: Int {
-        OpponentLadder.rating(forUserRating: 1100, gameIndex: 0)
+        picker.rating
     }
 
     private func startGame() {
+        // Re-read on each start: the rating moves after every rated game, and
+        // the games-played count is what advances the offset cycle.
+        picker = .current()
+
         let configuration = GameSession.Configuration.sparring(
-            userColor: .white,
-            opponentRating: opponentRating
+            userColor: userColor,
+            opponentRating: picker.rating
         )
         let newSession = GameSession(configuration: configuration, engineService: model.engineService)
         sequencer.reset()
