@@ -1,0 +1,12 @@
+.DS_Store
+
+# SPM
+.swiftpm
+.build
+Packages/
+Package.resolved
+
+# Xcode
+/*.xcodeproj
+xcuserdata/
+/*.playground/*
