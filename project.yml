@@ -68,6 +68,12 @@ targets:
         CFBundleVersion: $(CURRENT_PROJECT_VERSION)
         UILaunchScreen: {}
         ITSAppUsesNonExemptEncryption: false
+        # CloudKit pushes silent notifications to tell a device its records
+        # changed. Without this background mode the sync engine only catches up
+        # when the app is next foregrounded, which for an iPhone/Mac pair means
+        # analysis done on one device shows up on the other minutes late.
+        UIBackgroundModes:
+          - remote-notification
         NSHumanReadableCopyright: ""
     entitlements:
       path: App/ChessCoach.entitlements

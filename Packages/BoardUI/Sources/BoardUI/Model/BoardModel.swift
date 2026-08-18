@@ -45,6 +45,12 @@ final class BoardModel {
   var pendingPromotion: PendingPromotion?
   var rejection: Rejection?
 
+  /// The press currently under the user's finger, if any.
+  private(set) var press: Press?
+
+  /// Set when the position changes under a press that is still in flight.
+  private var pressInvalidated = false
+
   // MARK: Feedback counters
   //
   // `.sensoryFeedback` fires on a value *change*, so each event needs its own
@@ -82,6 +88,20 @@ final class BoardModel {
     var square: Square
     var reason: String?
     var token: Int
+  }
+
+  /// A press in flight, from touch-down to lift.
+  ///
+  /// The lift can only be interpreted in the light of what the press already
+  /// did. A press that *created* the selection has done the tap's work
+  /// already; sending its lift through ``tap(_:interaction:geometry:)`` as well
+  /// would read as "tapped the selected piece" and switch the selection
+  /// straight back off, which is precisely why tap-then-tap used to do nothing.
+  struct Press: Equatable {
+    /// Square the press went down on. `nil` when it landed off the board.
+    var square: Square?
+    /// True when this press is what put the selection on `square`.
+    var selectedOnPress: Bool
   }
 
   private var rejectionToken = 0
@@ -141,6 +161,17 @@ final class BoardModel {
     legalDestinations = []
     drag = nil
     pendingPromotion = nil
+    // Whatever was refused, the game has moved on from it.
+    rejection = nil
+
+    // A gesture still in the user's finger was aimed at a board that has just
+    // stopped existing — an engine reply landing mid-tap is the usual cause.
+    // Marking it means the lift is discarded rather than replayed against
+    // whatever now happens to occupy those squares.
+    if press != nil {
+      press = nil
+      pressInvalidated = true
+    }
 
     placementTicks += 1
     if newPosition.pieces.count < previousPieceCount {
@@ -220,6 +251,212 @@ final class BoardModel {
     return position.pieces.first { $0.kind == .king && $0.color == checkedColor }?.square
   }
 
+  // MARK: - Pointer input
+  //
+  // Tap-tap and drag-and-drop are one gesture, not two modes: a press that
+  // never travels is a tap, one that travels is a drag, and either can finish a
+  // move the other one started. The whole state machine lives here rather than
+  // in the view so the rules can be exercised without rendering a board.
+
+  /// Handles pointer movement, beginning the press on the first callback.
+  ///
+  /// A zero-distance drag gesture has no separate "began" callback — the first
+  /// change *is* the touch-down — so the press is opened lazily here.
+  func pressChanged(
+    start: CGPoint,
+    location: CGPoint,
+    geometry: BoardGeometry,
+    interaction: BoardInteraction
+  ) {
+    guard interaction.allowsPieceSelection, pendingPromotion == nil else { return }
+
+    if press == nil {
+      beginPress(at: start, geometry: geometry, interaction: interaction)
+    }
+
+    let travelled = hypot(location.x - start.x, location.y - start.y)
+    updateDrag(
+      location: location,
+      target: geometry.nearestSquare(to: location),
+      isActive: travelled > geometry.dragThreshold
+    )
+  }
+
+  /// Handles the lift, resolving the press as either a drop or a tap.
+  func pressEnded(
+    start: CGPoint,
+    location: CGPoint,
+    geometry: BoardGeometry,
+    interaction: BoardInteraction
+  ) {
+    guard interaction.allowsPieceSelection, pendingPromotion == nil else {
+      press = nil
+      return
+    }
+    guard !pressInvalidated else {
+      press = nil
+      pressInvalidated = false
+      endLiveDrag()
+      clearSelection()
+      return
+    }
+    // Every real press arrives through `pressChanged` first. Opening one here
+    // as well costs nothing and keeps a lone `onEnded` behaving like a tap
+    // rather than like nothing at all.
+    if press == nil {
+      beginPress(at: start, geometry: geometry, interaction: interaction)
+    }
+    let press = self.press
+    self.press = nil
+
+    let travelled = hypot(location.x - start.x, location.y - start.y)
+    let wasDrag = liveDrag?.isActive == true || travelled > geometry.dragThreshold
+
+    if let drag = liveDrag, wasDrag {
+      drop(drag, at: location, geometry: geometry, interaction: interaction)
+      return
+    }
+
+    endLiveDrag()
+    guard let press else {
+      clearSelection()
+      return
+    }
+    // The press has already selected this square; taking the lift through
+    // `tap` as well would toggle the selection straight back off.
+    guard !press.selectedOnPress else { return }
+    tap(press.square, interaction: interaction, geometry: geometry)
+  }
+
+  /// Opens a press: picks the piece up when there is one to pick up.
+  ///
+  /// The piece is lifted on touch-down so a drag can start from the very first
+  /// movement. A press that turns out to be a tap simply puts it back down.
+  private func beginPress(at point: CGPoint, geometry: BoardGeometry, interaction: BoardInteraction) {
+    pressInvalidated = false
+
+    var record = Press(square: geometry.square(at: point), selectedOnPress: false)
+    defer { press = record }
+
+    guard let square = record.square else { return }
+    // A press on a square the selected piece can reach is a move in waiting,
+    // not a new selection — even when one of our own pieces is standing there,
+    // which is how castling reads when the rook is the target square.
+    if interaction.allowsMoves, selection != nil, legalDestinations.contains(square) { return }
+    guard canPickUp(square, interaction: interaction) else { return }
+
+    if selection != square {
+      select(square)
+      record.selectedOnPress = true
+    }
+    beginDrag(at: square, location: point)
+  }
+
+  /// What a press that never travelled means, expressed purely in squares.
+  ///
+  /// This is also the entry point VoiceOver uses, which is why it takes no
+  /// geometry it cannot do without: activating a square is a tap on it.
+  func tap(_ square: Square?, interaction: BoardInteraction, geometry: BoardGeometry? = nil) {
+    guard interaction.allowsPieceSelection, pendingPromotion == nil else { return }
+    guard let square else {
+      // Released off the board: nothing was aimed at, so put the piece down.
+      clearSelection()
+      return
+    }
+
+    if let selection {
+      // Tapping the piece again puts it down.
+      if square == selection {
+        clearSelection()
+        return
+      }
+      // A legal destination is a move whatever is standing on it. An enemy
+      // piece there is a capture, not a request to look at the other side.
+      if interaction.allowsMoves, legalDestinations.contains(square) {
+        attemptMove(from: selection, to: square, interaction: interaction, geometry: geometry)
+        return
+      }
+    }
+
+    if canPickUp(square, interaction: interaction) {
+      select(square)
+    } else {
+      clearSelection()
+    }
+  }
+
+  /// Resolves a drag that has been released.
+  func drop(
+    _ drag: DragState,
+    at point: CGPoint,
+    geometry: BoardGeometry,
+    interaction: BoardInteraction
+  ) {
+    // A release more than one square outside the board is an abort, not a move
+    // to the nearest edge square — that is how people take a drag back.
+    let bounds = CGRect(x: 0, y: 0, width: geometry.side, height: geometry.side)
+      .insetBy(dx: -geometry.squareSide, dy: -geometry.squareSide)
+    guard bounds.contains(point) else {
+      endLiveDrag()
+      clearSelection()
+      return
+    }
+
+    let target = geometry.nearestSquare(to: point)
+    guard target != drag.origin else {
+      // Dropped back where it started: keep the selection so the move can still
+      // be finished with a tap instead of picking the piece up again.
+      endLiveDrag()
+      if selection != drag.origin { select(drag.origin) }
+      return
+    }
+    guard interaction.allowsMoves else {
+      // Replay: the piece goes back but the legal-move dots stay up, because
+      // asking "where could that have gone?" is the whole point of the mode.
+      endLiveDrag()
+      return
+    }
+    attemptMove(from: drag.origin, to: target, interaction: interaction, geometry: geometry)
+  }
+
+  // MARK: - Accessibility
+  //
+  // The board is the app's primary control, so it has to be operable without
+  // pointing at anything. Every square gets its own element, and the two
+  // strings below are what a reader hears: where they are, and what happens if
+  // they act. They live on the model rather than in the layer because they are
+  // derived from interaction state, and because that makes them testable.
+
+  /// What a square *is*: its name, its occupant, and its role in the move being
+  /// composed. Complete on its own — hints can be switched off, labels cannot.
+  func accessibilityLabel(for square: Square) -> String {
+    var parts = [square.notation]
+    if let piece = position.piece(at: square) {
+      parts.append("\(piece.color.description) \(piece.kind.description)".lowercased())
+    } else {
+      parts.append("empty")
+    }
+    if square == selection {
+      parts.append("selected")
+    } else if selection != nil, legalDestinations.contains(square) {
+      parts.append(isCapture(square) ? "legal capture" : "legal move")
+    }
+    return parts.joined(separator: ", ")
+  }
+
+  /// What activating a square would *do*, or `nil` when it would do nothing.
+  func accessibilityHint(for square: Square, interaction: BoardInteraction) -> String? {
+    guard interaction.allowsPieceSelection, pendingPromotion == nil else { return nil }
+    if square == selection { return "Deselects" }
+    if interaction.allowsMoves, selection != nil, legalDestinations.contains(square) {
+      return isCapture(square) ? "Captures" : "Moves here"
+    }
+    if canPickUp(square, interaction: interaction) {
+      return interaction.allowsMoves ? "Selects" : "Shows legal moves"
+    }
+    return nil
+  }
+
   // MARK: - Move attempts
 
   /// Runs a move attempt through the caller's handler and reacts to the answer.
@@ -253,6 +490,10 @@ final class BoardModel {
       // board does not show a stale selection for a frame.
       clearSelection()
       endDrag()
+      // A move that lands answers the refusal that came before it. Leaving the
+      // red ring and its caption up would have them describing the move the
+      // user just fixed.
+      rejection = nil
 
     case let .rejected(reason):
       snapBack(to: from, reason: reason, in: geometry)
@@ -284,7 +525,20 @@ final class BoardModel {
 
   // MARK: - Drag
 
+  /// The drag that belongs to the gesture in the user's finger.
+  ///
+  /// A piece flying home from a refusal still has a ``DragState``, but that one
+  /// is animation, not input: treating it as the current gesture would let a
+  /// fresh tap "drop" a piece the user is not holding.
+  var liveDrag: DragState? {
+    guard let drag, !drag.isReturning else { return nil }
+    return drag
+  }
+
   func beginDrag(at square: Square, location: CGPoint) {
+    // Never interrupt a snap-back. Replacing the returning state strands its
+    // ghost on the wrong square while the real token is still drawn hidden.
+    guard drag?.isReturning != true else { return }
     guard let token = layout.token(at: square) else { return }
     drag = DragState(
       origin: square,
@@ -305,6 +559,11 @@ final class BoardModel {
 
   func endDrag() {
     drag = nil
+  }
+
+  /// Ends the user's drag while leaving a snap-back in flight alone.
+  private func endLiveDrag() {
+    if drag?.isReturning != true { drag = nil }
   }
 
   /// Animates the dragged piece home and flashes the origin square.
@@ -337,6 +596,15 @@ final class BoardModel {
         if self.rejection?.token == token { self.rejection = nil }
       }
     }
-    clearSelection()
+
+    // A refusal puts the board back exactly as it was before the attempt, the
+    // selection included. That is what makes the second-try flow work by tap as
+    // well as by drag: "no, not that one" leaves the piece in hand, so the next
+    // try is one tap rather than a fresh pick-up.
+    if position.piece(at: square) != nil {
+      select(square)
+    } else {
+      clearSelection()
+    }
   }
 }

@@ -16,7 +16,8 @@ import SwiftUI
 ///
 /// Layers, back to front:
 /// 1. squares (`Canvas`) 2. highlights below pieces 3. arrows 4. pieces
-/// 5. highlights above pieces 6. the dragged piece 7. input 8. promotion picker.
+/// 5. highlights above pieces 6. the dragged piece 7. input, which carries the
+/// per-square accessibility grid with it 8. promotion picker.
 public struct BoardView: View {
 
   private let position: Position
@@ -198,105 +199,53 @@ public struct BoardView: View {
 
   /// A transparent surface on top of the board that owns every pointer event.
   ///
-  /// One gesture handles both idioms. Tap-tap and drag-and-drop are not separate
-  /// modes: a press that never travels is a tap, one that travels is a drag, and
-  /// either can finish a move the other one started.
+  /// The gesture only translates events into board space; what a press *means*
+  /// belongs to ``BoardModel`` so it can be tested without a rendered board.
+  /// One gesture handles both idioms — a press that never travels is a tap, one
+  /// that travels is a drag, and either can finish a move the other started.
   private func inputSurface(_ geometry: BoardGeometry) -> some View {
-    let dragThreshold = max(6, geometry.squareSide * 0.14)
+    ZStack(alignment: .topLeading) {
+      Color.clear.contentShape(Rectangle())
 
-    return Color.clear
-      .contentShape(Rectangle())
-      .frame(width: geometry.side, height: geometry.side)
-      .gesture(
-        DragGesture(minimumDistance: 0, coordinateSpace: .local)
-          .onChanged { value in
-            guard interaction.allowsPieceSelection, model.pendingPromotion == nil else { return }
-            if model.drag == nil {
-              guard let start = geometry.square(at: value.startLocation),
-                model.canPickUp(start, interaction: interaction)
-              else { return }
-              if model.selection != start { model.select(start) }
-              model.beginDrag(at: start, location: value.location)
-            }
-            let travelled = hypot(value.translation.width, value.translation.height)
-            model.updateDrag(
-              location: value.location,
-              target: geometry.nearestSquare(to: value.location),
-              isActive: travelled > dragThreshold
-            )
-          }
-          .onEnded { value in
-            guard interaction.allowsPieceSelection, model.pendingPromotion == nil else { return }
-            let travelled = hypot(value.translation.width, value.translation.height)
-            let wasDrag = model.drag?.isActive == true || travelled > dragThreshold
-
-            if let drag = model.drag, wasDrag {
-              drop(drag: drag, at: value.location, geometry: geometry)
-            } else {
-              model.endDrag()
-              if let square = geometry.square(at: value.startLocation) {
-                tap(square, geometry: geometry)
-              } else {
-                model.clearSelection()
-              }
-            }
-          }
-      )
-      #if os(macOS)
-        .onContinuousHover(coordinateSpace: .local) { phase in
-          switch phase {
-          case let .active(point):
-            model.hoveredSquare = geometry.square(at: point)
-          case .ended:
-            model.hoveredSquare = nil
-          @unknown default:
-            model.hoveredSquare = nil
-          }
+      // The squares sit *inside* the gesture's view rather than beside it: they
+      // carry no gesture of their own, so touches still reach the drag gesture
+      // on their parent, while VoiceOver gets 64 properly-framed elements
+      // instead of one board-sized rectangle with nothing to say.
+      BoardAccessibilityLayer(model: model, geometry: geometry, interaction: interaction)
+        .accessibilityHidden(model.pendingPromotion != nil)
+    }
+    .frame(width: geometry.side, height: geometry.side)
+    .gesture(
+      DragGesture(minimumDistance: 0, coordinateSpace: .local)
+        .onChanged { value in
+          model.pressChanged(
+            start: value.startLocation,
+            location: value.location,
+            geometry: geometry,
+            interaction: interaction
+          )
         }
-      #endif
-  }
-
-  private func drop(drag: BoardModel.DragState, at point: CGPoint, geometry: BoardGeometry) {
-    // A drop that lands more than a square outside the board is a cancel, not a
-    // move to the nearest edge square — that is how people abort a drag.
-    let boardRect = CGRect(x: 0, y: 0, width: geometry.side, height: geometry.side)
-      .insetBy(dx: -geometry.squareSide, dy: -geometry.squareSide)
-    guard boardRect.contains(point) else {
-      model.endDrag()
-      model.clearSelection()
-      return
-    }
-
-    let target = geometry.nearestSquare(to: point)
-    guard target != drag.origin else {
-      // Dropped back where it started: keep the selection so the user can finish
-      // with a tap instead of having to pick the piece up again.
-      model.endDrag()
-      return
-    }
-    guard interaction.allowsMoves else {
-      model.endDrag()
-      return
-    }
-    model.attemptMove(from: drag.origin, to: target, interaction: interaction, geometry: geometry)
-  }
-
-  private func tap(_ square: Square, geometry: BoardGeometry) {
-    if let selection = model.selection {
-      if square == selection {
-        model.clearSelection()
-        return
+        .onEnded { value in
+          model.pressEnded(
+            start: value.startLocation,
+            location: value.location,
+            geometry: geometry,
+            interaction: interaction
+          )
+        }
+    )
+    #if os(macOS)
+      .onContinuousHover(coordinateSpace: .local) { phase in
+        switch phase {
+        case let .active(point):
+          model.hoveredSquare = geometry.square(at: point)
+        case .ended:
+          model.hoveredSquare = nil
+        @unknown default:
+          model.hoveredSquare = nil
+        }
       }
-      if interaction.allowsMoves, model.legalDestinations.contains(square) {
-        model.attemptMove(from: selection, to: square, interaction: interaction, geometry: geometry)
-        return
-      }
-    }
-    if model.canPickUp(square, interaction: interaction) {
-      model.select(square)
-    } else {
-      model.clearSelection()
-    }
+    #endif
   }
 }
 
@@ -363,6 +312,45 @@ private let checkFEN = "rnb1kbnr/pppp1ppp/8/4p3/6Pq/5P2/PPPPP2P/RNBQKBNR w KQkq 
 #Preview("Check") {
   BoardView(position: Position(fen: checkFEN)!)
     .padding()
+}
+
+#Preview("Interactive · tap-tap and drag") {
+  @Previewable @State var position = Position.standard
+
+  // Both idioms, side by side in the same board: tap a piece then tap a
+  // destination, or drag it there. Either finishes a move the other started.
+  BoardView(
+    position: position,
+    interaction: .userMove { from, to in
+      var board = Board(position: position)
+      guard board.move(pieceAt: from, to: to) != nil else { return .rejected }
+      position = board.position
+      return .accepted
+    },
+    style: .default.showingCoordinates()
+  )
+  .padding()
+}
+
+#Preview("Contrast · light and dark") {
+  // A white piece is barely a shade away from a light square, so the outline is
+  // what makes the shape legible rather than the fill. Both appearances go here
+  // side by side because that outline is the thing most easily lost when the
+  // palette is retuned. Increased contrast cannot be forced from a preview —
+  // `colorSchemeContrast` is read-only — so it is checked in Accessibility
+  // Inspector or with Settings › Accessibility › Increase Contrast on.
+  HStack(spacing: 12) {
+    ForEach([ColorScheme.light, .dark], id: \.self) { scheme in
+      BoardView(
+        position: Position(fen: midgameFEN)!,
+        style: .default.showingCoordinates()
+      )
+      .padding(8)
+      .background(scheme == .dark ? Color.black : Color.white)
+      .environment(\.colorScheme, scheme)
+    }
+  }
+  .padding()
 }
 
 #Preview("Interactive · rejects every capture") {

@@ -79,6 +79,7 @@ private struct MacRootView: View {
         case games = "Games"
         case train = "Train"
         case profile = "Profile"
+        case settings = "Settings"
 
         var id: String { rawValue }
 
@@ -88,6 +89,7 @@ private struct MacRootView: View {
             case .games: "list.bullet.rectangle"
             case .train: "square.grid.3x3"
             case .profile: "chart.line.uptrend.xyaxis"
+            case .settings: "gearshape"
             }
         }
     }
@@ -105,6 +107,7 @@ private struct MacRootView: View {
             case .games: GamesListScreen()
             case .train: TrainScreen()
             case .profile: ProfileScreen()
+            case .settings: SettingsScreen()
             }
         }
     }

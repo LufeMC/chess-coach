@@ -28,6 +28,19 @@ struct TodayScreen: View {
             .padding(.top, 8)
         }
         .navigationTitle("Today")
+        #if os(iOS)
+            // Settings lives behind a gear rather than a fifth tab: it is
+            // configuration, not part of the daily loop.
+            .toolbar {
+                ToolbarItem(placement: .topBarTrailing) {
+                    NavigationLink {
+                        SettingsScreen()
+                    } label: {
+                        Image(systemName: "gearshape")
+                    }
+                }
+            }
+        #endif
         .safeAreaInset(edge: .bottom) {
             primaryAction
                 .padding(.horizontal)

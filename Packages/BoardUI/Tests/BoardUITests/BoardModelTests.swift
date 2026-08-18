@@ -117,7 +117,10 @@ struct BoardModelTests {
     #expect(model.drag?.target == .e2)
     #expect(model.rejection?.square == .e2)
     #expect(model.rejection?.reason == "Try again.")
-    #expect(model.selection == nil)
+    // The board goes back to exactly where it was before the attempt, the
+    // selection included, so the second try is one gesture rather than two.
+    #expect(model.selection == .e2)
+    #expect(model.legalDestinations == [.e3, .e4])
   }
 
   @Test func rejectionNeverMutatesThePosition() {

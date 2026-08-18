@@ -1,4 +1,5 @@
 import ChessKit
+import Database
 import EngineKit
 import Foundation
 import Observation
@@ -102,6 +103,11 @@ final class GameSession {
     let configuration: Configuration
     let gameID = UUID()
 
+    /// Set when the finished game could not be written to disk. The play surface
+    /// can surface it; nothing else depends on it, because a game that failed to
+    /// save was still played.
+    private(set) var persistenceFailure: String?
+
     struct PlayedMove: Sendable {
         var ply: Int
         var san: String
@@ -115,12 +121,22 @@ final class GameSession {
 
     private let engineService: EngineService
     private let humanizer: Humanizer
+    private let persistence: GamePersistence?
+    private let startedAt = Date()
     private var moveStartedAt = Date()
     private var opponentTask: Task<Void, Never>?
+    /// Retained so the save is not cancelled by the view going away when the
+    /// user leaves the finished-game screen.
+    private var saveTask: Task<Void, Never>?
 
-    init(configuration: Configuration, engineService: EngineService) {
+    init(
+        configuration: Configuration,
+        engineService: EngineService,
+        persistence: GamePersistence? = .shared
+    ) {
         self.configuration = configuration
         self.engineService = engineService
+        self.persistence = persistence
         self.humanizer = Humanizer(profile: .interpolated(rating: configuration.opponentRating))
         self.userClockMs = configuration.baseSeconds * 1000
         self.opponentClockMs = configuration.baseSeconds * 1000
@@ -143,7 +159,53 @@ final class GameSession {
     func resign() {
         opponentTask?.cancel()
         let result = configuration.userColor == .white ? "0-1" : "1-0"
-        phase = .finished(Outcome(result: result, termination: "resignation", userWon: false))
+        finish(Outcome(result: result, termination: GameTermination.resignation.rawValue, userWon: false))
+    }
+
+    /// Charges elapsed time to whoever is on move and ends the game if their
+    /// clock has run out.
+    ///
+    /// Called before every user move, but the play surface should also call it
+    /// from a display timer: a player who simply stops moving still flags, and
+    /// nothing else in this class is driven by the passage of time.
+    @discardableResult
+    func checkClock() -> Bool {
+        guard !isFinished else { return true }
+        let elapsedMs = Int(Date().timeIntervalSince(moveStartedAt) * 1000)
+
+        switch phase {
+        case .userToMove, .secondTry, .guidedPrompt:
+            guard elapsedMs >= userClockMs else { return false }
+            userClockMs = 0
+            opponentTask?.cancel()
+            finish(
+                Outcome(
+                    result: configuration.userColor == .white ? "0-1" : "1-0",
+                    termination: GameTermination.timeout.rawValue,
+                    userWon: false
+                )
+            )
+            return true
+        case .opponentThinking:
+            guard elapsedMs >= opponentClockMs else { return false }
+            opponentClockMs = 0
+            opponentTask?.cancel()
+            finish(
+                Outcome(
+                    result: configuration.userColor == .white ? "1-0" : "0-1",
+                    termination: GameTermination.timeout.rawValue,
+                    userWon: true
+                )
+            )
+            return true
+        case .notStarted, .finished:
+            return false
+        }
+    }
+
+    var isFinished: Bool {
+        if case .finished = phase { return true }
+        return false
     }
 
     // MARK: - User moves
@@ -153,6 +215,9 @@ final class GameSession {
     @discardableResult
     func attemptUserMove(from: Square, to: Square) async -> Bool {
         guard case .userToMove = phase, userToMove else { return false }
+        // Flagging is checked before legality: a move made after the clock hit
+        // zero never reaches the board.
+        guard !checkClock() else { return false }
         guard board.canMove(pieceAt: from, to: to) else { return false }
 
         let thinkTimeMs = Int(Date().timeIntervalSince(moveStartedAt) * 1000)
@@ -167,7 +232,7 @@ final class GameSession {
         lastMove = (from, to)
 
         if let outcome = terminalOutcome() {
-            phase = .finished(outcome)
+            finish(outcome)
             return true
         }
 
@@ -251,7 +316,14 @@ final class GameSession {
                 let selection = humanizer.choose(from: result.lines, ply: moves.count, using: &rng)
             else {
                 // No legal move: the position is terminal.
-                phase = .finished(terminalOutcome() ?? Outcome(result: "1/2-1/2", termination: "unknown", userWon: nil))
+                finish(
+                    terminalOutcome()
+                        ?? Outcome(
+                            result: "1/2-1/2",
+                            termination: GameTermination.unknown.rawValue,
+                            userWon: nil
+                        )
+                )
                 return
             }
 
@@ -271,6 +343,17 @@ final class GameSession {
             else { return }
 
             let thinkMs = Int(Date().timeIntervalSince(started) * 1000)
+            if thinkMs >= opponentClockMs {
+                opponentClockMs = 0
+                finish(
+                    Outcome(
+                        result: configuration.userColor == .white ? "1-0" : "0-1",
+                        termination: GameTermination.timeout.rawValue,
+                        userWon: true
+                    )
+                )
+                return
+            }
             opponentClockMs = max(0, opponentClockMs - thinkMs) + configuration.incrementSeconds * 1000
             record(move: played, byUser: false, thinkTimeMs: thinkMs, clockAfterMs: opponentClockMs)
             lastMove = (move.start, move.end)
@@ -283,7 +366,7 @@ final class GameSession {
             }
 
             if let outcome = terminalOutcome() {
-                phase = .finished(outcome)
+                finish(outcome)
             } else {
                 phase = .userToMove
                 moveStartedAt = Date()
@@ -312,10 +395,11 @@ final class GameSession {
     private func terminalOutcome() -> Outcome? {
         switch board.state {
         case .checkmate(let color):
-            let userWon = color == configuration.userColor
+            // `color` is the side that *was* mated, so the winner is the other one.
+            let userWon = color != configuration.userColor
             return Outcome(
-                result: color == .white ? "1-0" : "0-1",
-                termination: "checkmate",
+                result: color == .white ? "0-1" : "1-0",
+                termination: GameTermination.checkmate.rawValue,
                 userWon: userWon
             )
         case .draw(let reason):
@@ -323,6 +407,86 @@ final class GameSession {
         default:
             return nil
         }
+    }
+
+    // MARK: - Persistence
+
+    /// Ends the game and writes it to disk.
+    ///
+    /// Every termination — mate, resignation, draw, flag — funnels through here
+    /// so there is exactly one place a finished game can be created and exactly
+    /// one place it gets saved.
+    private func finish(_ outcome: Outcome) {
+        guard !isFinished else { return }
+        phase = .finished(outcome)
+        opponentTask?.cancel()
+
+        guard let persistence else {
+            persistenceFailure = "The database is unavailable; this game was not saved."
+            Log.persistence.error("No database: game \(self.gameID.uuidString, privacy: .public) discarded.")
+            return
+        }
+
+        // Snapshot everything the writer needs *now*, on the main actor, so the
+        // save works from immutable values and cannot observe the session
+        // mutating underneath it.
+        let record = finishedGameRecord(outcome: outcome)
+        let engineService = self.engineService
+
+        saveTask = Task { [weak self] in
+            do {
+                try await persistence.save(record)
+            } catch {
+                await self?.recordPersistenceFailure(String(describing: error))
+                return
+            }
+
+            // Analysis is queued rather than started directly: the queue is what
+            // makes a preempted or crashed pass resumable, and draining it here
+            // also picks up anything an earlier session left behind.
+            guard let service = AnalysisService.shared(engineService: engineService) else { return }
+            await service.analyzePending()
+        }
+    }
+
+    private func recordPersistenceFailure(_ reason: String) {
+        persistenceFailure = reason
+        Log.persistence.error("Game \(self.gameID.uuidString, privacy: .public) not saved: \(reason, privacy: .public)")
+    }
+
+    private func finishedGameRecord(outcome: Outcome) -> FinishedGameRecord {
+        FinishedGameRecord(
+            id: gameID,
+            startedAt: startedAt,
+            endedAt: Date(),
+            mode: configuration.mode,
+            userColor: configuration.userColor == .white ? .white : .black,
+            opponentRating: configuration.opponentRating,
+            result: outcome.result,
+            termination: outcome.termination,
+            pgn: pgn(result: outcome.result),
+            moves: moves.map {
+                FinishedGameRecord.Move(
+                    ply: $0.ply,
+                    san: $0.san,
+                    uci: $0.uci,
+                    byUser: $0.byUser,
+                    thinkTimeMs: $0.thinkTimeMs,
+                    clockAfterMs: $0.clockAfterMs
+                )
+            },
+            opponentParams: FinishedGameRecord.OpponentParams(
+                opponentRating: configuration.opponentRating,
+                baseSeconds: configuration.baseSeconds,
+                incrementSeconds: configuration.incrementSeconds,
+                secondTryEnabled: configuration.secondTryEnabled,
+                guidedEnabled: configuration.guidedEnabled
+            ),
+            // A game where blunders could be taken back, or where the coach
+            // answered questions mid-game, says nothing about playing strength —
+            // so it must not feed the rating. Calibration games have both off.
+            isRated: !configuration.secondTryEnabled && !configuration.guidedEnabled
+        )
     }
 
     /// Quick evaluation of whether the just-played move was a blunder worth

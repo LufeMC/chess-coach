@@ -83,6 +83,17 @@ public struct BoardStyle: Hashable, Sendable, Identifiable {
     squareColor == .light ? lightSquare : darkSquare
   }
 
+  /// The coordinate tone, honouring the reader's contrast preference.
+  ///
+  /// The palette's coordinate grey is deliberately quiet so file and rank
+  /// labels never compete with the position. "Increase Contrast" is a request
+  /// to stop being quiet, so the glyphs go to the extreme of the current
+  /// appearance instead — near-black on the light squares, near-white on the
+  /// dark ones, which clears 7:1 against every built-in square tone.
+  public func coordinateColor(_ contrast: ColorSchemeContrast) -> DualColor {
+    contrast == .increased ? DualColor(light: 0x1C1B19, dark: 0xF4F3F0) : coordinate
+  }
+
   /// Returns a copy with coordinates turned on.
   public func showingCoordinates(_ shown: Bool = true) -> BoardStyle {
     var copy = self

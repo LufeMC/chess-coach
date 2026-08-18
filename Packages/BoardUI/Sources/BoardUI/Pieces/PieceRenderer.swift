@@ -87,8 +87,23 @@ public struct PieceRenderer: Hashable, Sendable, Identifiable {
 
   /// Outline colour for a piece colour — always the opposing body tone, so the
   /// silhouette survives on either square tone.
-  public func outline(for color: Piece.Color) -> DualColor {
-    color == .white ? blackBody.opacity(0.55) : whiteBody.opacity(0.52)
+  ///
+  /// The outline is doing real work, not decoration: a white piece is only
+  /// about 1.2:1 against a light square, and the dark edge around it is the
+  /// entire reason the shape is visible at all. So at increased contrast the
+  /// transparency comes off — the reader who asked for more separation is
+  /// exactly the reader relying on that edge.
+  public func outline(for color: Piece.Color, contrast: ColorSchemeContrast = .standard) -> DualColor {
+    let base = color == .white ? blackBody : whiteBody
+    guard contrast != .increased else { return base }
+    return base.opacity(color == .white ? 0.55 : 0.52)
+  }
+
+  /// Outline stroke width in points for a piece drawn at `size`.
+  ///
+  /// Doubled at increased contrast: colour alone cannot rescue a hairline.
+  public func outlineWidth(for size: CGFloat, contrast: ColorSchemeContrast = .standard) -> CGFloat {
+    max(0.5, size * outlineWidth * (contrast == .increased ? 2 : 1))
   }
 
   /// The asset name an image-backed set would look for.
@@ -126,6 +141,7 @@ public struct PieceView: View {
   private let size: CGFloat
 
   @Environment(\.colorScheme) private var colorScheme
+  @Environment(\.colorSchemeContrast) private var contrast
 
   public init(
     kind: Piece.Kind,
@@ -178,14 +194,14 @@ public struct PieceView: View {
     // edges makes a dense middlegame look like a solid block of pieces.
     let inset = size * 0.06
     let body = renderer.body(for: color).color(colorScheme)
-    let outline = renderer.outline(for: color).color(colorScheme)
+    let outline = renderer.outline(for: color, contrast: contrast).color(colorScheme)
 
     return ZStack {
       PieceShape(kind: kind)
         .fill(body)
         .overlay {
           PieceShape(kind: kind)
-            .stroke(outline, lineWidth: max(0.5, size * renderer.outlineWidth))
+            .stroke(outline, lineWidth: renderer.outlineWidth(for: size, contrast: contrast))
         }
       PieceDetailShape(kind: kind)
         .fill(outline)
@@ -201,7 +217,7 @@ public struct PieceView: View {
     Text(solidGlyph)
       .font(.system(size: size * 0.82))
       .foregroundStyle(renderer.body(for: color).color(colorScheme))
-      .shadow(color: renderer.outline(for: color).color(colorScheme), radius: 0.5)
+      .shadow(color: renderer.outline(for: color, contrast: contrast).color(colorScheme), radius: 0.5)
       .minimumScaleFactor(0.5)
   }
 

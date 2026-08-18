@@ -47,6 +47,14 @@ public struct BoardGeometry: Equatable, Sendable {
   /// The edge length of one square.
   public var squareSide: CGFloat { side / 8 }
 
+  /// How far a press must travel before it counts as a drag rather than a tap.
+  ///
+  /// Scaled to the square so the same board behaves the same at thumbnail size
+  /// and full screen, with a floor for the tremor in a real finger: below about
+  /// six points every tap registers as a tiny drag, and tap-to-move stops
+  /// working for anyone whose hand is not perfectly still.
+  public var dragThreshold: CGFloat { max(6, squareSide * 0.14) }
+
   // MARK: - Square → grid
 
   /// Column index, 0 at the left edge of the board as drawn.

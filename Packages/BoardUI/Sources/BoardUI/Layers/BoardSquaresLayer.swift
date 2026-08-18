@@ -17,6 +17,16 @@ struct BoardSquaresLayer: View {
   let style: BoardStyle
 
   @Environment(\.colorScheme) private var colorScheme
+  @Environment(\.colorSchemeContrast) private var contrast
+
+  /// The reader's text-size preference, as a multiplier.
+  ///
+  /// Coordinates are sized against the square rather than against the system
+  /// text styles, because a glyph that outgrows its square stops being a
+  /// coordinate. `@ScaledMetric` is how that fixed relationship still hears
+  /// about Dynamic Type: it reports the preference, and the size is clamped so
+  /// the largest settings enlarge the labels without swallowing the board.
+  @ScaledMetric(relativeTo: .caption2) private var typeScale: CGFloat = 1
 
   var body: some View {
     Canvas(opaque: false, rendersAsynchronously: false) { context, _ in
@@ -37,8 +47,8 @@ struct BoardSquaresLayer: View {
       }
 
       guard style.showsCoordinates, side > 12 else { return }
-      let coordinateColor = style.coordinate.color(colorScheme)
-      let fontSize = max(7, side * 0.17)
+      let coordinateColor = style.coordinateColor(contrast).color(colorScheme)
+      let fontSize = min(side * 0.34, max(7, side * 0.17 * typeScale))
 
       for column in 0..<8 {
         guard let square = geometry.square(column: column, row: 7) else { continue }

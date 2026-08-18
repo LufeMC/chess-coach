@@ -35,6 +35,9 @@ struct PromotionPicker: View {
         .fill(.black.opacity(0.28))
         .contentShape(Rectangle())
         .onTapGesture { onCancel() }
+        .accessibilityLabel(Text("Cancel promotion"))
+        .accessibilityAddTraits(.isButton)
+        .accessibilityAction { onCancel() }
 
       ForEach(Array(choices.enumerated()), id: \.element) { index, kind in
         cell(for: kind)
@@ -43,6 +46,11 @@ struct PromotionPicker: View {
     }
     .frame(width: geometry.side, height: geometry.side, alignment: .topLeading)
     .transition(.opacity)
+    // The move is suspended until a piece is chosen, so the squares behind must
+    // not be reachable — a reader who walks off into the board would be picking
+    // at a position that is mid-move.
+    .accessibilityElement(children: .contain)
+    .accessibilityAddTraits(.isModal)
   }
 
   private func cell(for kind: Piece.Kind) -> some View {
