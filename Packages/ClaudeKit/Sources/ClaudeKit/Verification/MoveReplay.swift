@@ -17,7 +17,7 @@ import Foundation
 struct MoveReplay {
 
     /// Why a UCI string could not be applied.
-    enum ReplayFailure: Equatable {
+    enum ReplayFailure: Error, Equatable {
         case malformedUCI
         case illegal
         case missingPromotionPiece

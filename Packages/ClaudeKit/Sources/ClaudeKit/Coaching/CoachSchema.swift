@@ -25,8 +25,8 @@ public enum CoachSchema {
                 "san": JSONSchema.string(description: "Standard algebraic notation, copied exactly from the PV."),
                 "uci": JSONSchema.string(
                     description: "Long algebraic / UCI notation, e.g. g1f3 or e7e8q. Must match the PV entry at this ply exactly.",
-                    minLength: 4,
-                    maxLength: 5
+                    maxLength: 5,
+                    minLength: 4
                 ),
                 "plyFromRoot": JSONSchema.integer(
                     description: "0 for the first move of the line, counting up. Lines always start at 0.",

@@ -106,6 +106,21 @@ public struct MoveContext: Sendable {
         thinkTimeMs.map { ThinkBucket.classify(thinkTimeMs: $0, control: timeControl) }
     }
 
+    /// Lichess move accuracy (0...100) for this move.
+    ///
+    /// Both win percentages come from the mover-relative scores, which is the
+    /// only correct way to feed the accuracy curve — hence computing it here
+    /// rather than leaving each call site to remember the flip.
+    public var accuracy: Double {
+        EvalMath.accuracy(
+            winPctBefore: EvalMath.winPercent(score: evalBefore),
+            winPctAfter: EvalMath.winPercent(score: evalAfter)
+        )
+    }
+
+    /// Whether the player found the engine's move.
+    public var playedBestMove: Bool { bestLine.pv.first == playedUCI }
+
     /// The engine's best move for `positionBefore`, if it applies legally.
     public var bestMove: Move? { bestLineSteps.first?.move }
     /// The opponent's refutation move, if any.

@@ -204,6 +204,19 @@ public enum MomentBuilder {
     /// Clarity never drops below this: even a murky position is worth something.
     public static let clarityFloor = 0.3
 
+    /// Every move that cost something is a candidate for review.
+    public static func isMistakeCandidate(_ context: MoveContext) -> Bool {
+        context.judgment >= .inaccuracy
+    }
+
+    /// A move worth praising: the position genuinely branched and the player
+    /// found the engine's move anyway. Reinforcement is only meaningful where the
+    /// player could plausibly have gone wrong, which is why criticality — not a
+    /// low delta — is the gate.
+    public static func isReinforcementCandidate(_ context: MoveContext) -> Bool {
+        context.isCritical && context.playedBestMove && context.judgment == .ok
+    }
+
     public static func make(
         context: MoveContext,
         findings: [Finding],

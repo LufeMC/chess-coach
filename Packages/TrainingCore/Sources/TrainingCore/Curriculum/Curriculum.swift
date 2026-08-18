@@ -1,0 +1,537 @@
+//
+//  Curriculum.swift
+//  TrainingCore
+//
+
+import Foundation
+
+/// One rung of the ladder.
+public struct Rung: Sendable, Hashable, Codable, Identifiable {
+
+    /// 1...4. Also the sort order.
+    public var id: Int
+
+    public var title: String
+
+    /// The rating range this rung is aimed at. Used for the header UI and for
+    /// choosing a rung from a rating; it does *not* gate advancement, which is
+    /// driven entirely by ``skills``.
+    public var ratingBand: ClosedRange<Int>
+
+    public var skills: [Skill]
+
+    public init(id: Int, title: String, ratingBand: ClosedRange<Int>, skills: [Skill]) {
+        self.id = id
+        self.title = title
+        self.ratingBand = ratingBand
+        self.skills = skills
+    }
+
+    public var requiredSkills: [Skill] { skills.filter(\.isRequired) }
+
+    /// Habits the curriculum is actually measuring at this rung. The weekly
+    /// focus is restricted to these.
+    public var habits: Set<Habit> { Set(skills.compactMap(\.habit)) }
+}
+
+/// The four-rung curriculum, as data.
+///
+/// ## Where the numbers live
+///
+/// Cross-cutting constants that appear inside *logic* — the drill move budgets,
+/// the streak requirement, the minimum games and days at a rung, the opening
+/// composite's parameters — live in ``DomainTuning/Curriculum`` and are threaded
+/// into this table. The per-skill thresholds live here, in the table itself,
+/// because the table *is* their single place: a threshold and the metric it
+/// applies to are meaningless apart, and hoisting thirty of them into
+/// `DomainTuning` would produce two files to edit instead of one.
+///
+/// ## Why the ladder is short
+///
+/// Four rungs covering roughly 800-2000. Each is a genuine phase change in how
+/// a player thinks, not a rating bracket: stop hanging pieces, then see tactics,
+/// then calculate and plan, then convert and prevent. A finer ladder would be
+/// more precise and much less motivating — a rung the user cannot finish inside
+/// a couple of months is indistinguishable from no ladder at all.
+public enum Curriculum {
+
+    /// Builds the ladder for a given tuning.
+    public static func ladder(
+        tuning: DomainTuning.Curriculum = DomainTuning.default.curriculum
+    ) -> [Rung] {
+        [rung1(tuning), rung2(tuning), rung3(tuning), rung4(tuning)]
+    }
+
+    /// The shipping ladder.
+    public static var `default`: [Rung] { ladder() }
+
+    public static func rung(
+        _ id: Int,
+        tuning: DomainTuning.Curriculum = DomainTuning.default.curriculum
+    ) -> Rung? {
+        ladder(tuning: tuning).first { $0.id == id }
+    }
+
+    /// The rung whose band contains a rating. Ratings above the top band map to
+    /// the top rung — there is nothing above rung 4 to be promoted to.
+    public static func rung(
+        forRating rating: Int,
+        tuning: DomainTuning.Curriculum = DomainTuning.default.curriculum
+    ) -> Rung {
+        let rungs = ladder(tuning: tuning)
+        return rungs.first { $0.ratingBand.contains(rating) } ?? rungs[rungs.count - 1]
+    }
+
+    // MARK: - Rung 1
+
+    /// Below 1000. The whole rung is one idea: **stop giving material away.**
+    /// Nothing else a sub-1000 player learns survives contact with a game they
+    /// lose by hanging a rook on move 14.
+    private static func rung1(_ t: DomainTuning.Curriculum) -> Rung {
+        Rung(
+            id: 1,
+            title: "Board Vision",
+            ratingBand: 0...999,
+            skills: [
+                Skill(
+                    id: "r1.hangingPieces",
+                    title: "Stop hanging pieces",
+                    metricKey: .hangingPiecePer100,
+                    window: .lastGames(8),
+                    threshold: 1.0,
+                    comparison: .lessThan,
+                    isRequired: true,
+                    habit: .blunderCheck
+                ),
+                Skill(
+                    id: "r1.basicMates",
+                    title: "Basic mates: K+Q vs K in \(t.kqkMaxMoves), K+R vs K in \(t.krkMaxMoves)",
+                    criteria: [
+                        SkillCriterion(
+                            metricKey: .kqkDrillCleanStreak,
+                            window: .allTime,
+                            threshold: Double(t.drillCleanStreakRequired),
+                            comparison: .greaterThanOrEqual
+                        ),
+                        SkillCriterion(
+                            metricKey: .krkDrillCleanStreak,
+                            window: .allTime,
+                            threshold: Double(t.drillCleanStreakRequired),
+                            comparison: .greaterThanOrEqual
+                        )
+                    ],
+                    isRequired: true,
+                    habit: .endgameTechnique
+                ),
+                Skill(
+                    // Not required: a legitimate early queen trade or a forced
+                    // line can cost the composite through no fault of the user,
+                    // and gating on it would teach opening dogma over judgement.
+                    id: "r1.openingBasics",
+                    title: "Sound opening habits",
+                    metricKey: .openingCompositeRate,
+                    window: .lastGames(8),
+                    threshold: 0.75,
+                    comparison: .greaterThanOrEqual,
+                    isRequired: false,
+                    habit: .blunderCheck
+                ),
+                Skill(
+                    id: "r1.blunderControl",
+                    title: "Blunder control",
+                    criteria: [
+                        SkillCriterion(
+                            metricKey: .blundersPer100,
+                            window: .lastGames(8),
+                            threshold: 4.0,
+                            comparison: .lessThan
+                        ),
+                        SkillCriterion(
+                            metricKey: .cleanRetryRate,
+                            window: .lastGames(8),
+                            threshold: 0.55,
+                            comparison: .greaterThanOrEqual
+                        )
+                    ],
+                    isRequired: true,
+                    habit: .blunderCheck
+                ),
+                Skill(
+                    id: "r1.puzzleRating",
+                    title: "Puzzle rating 1000 with a settled deviation",
+                    criteria: [
+                        SkillCriterion(
+                            metricKey: .puzzleRating,
+                            window: .allTime,
+                            threshold: 1000,
+                            comparison: .greaterThanOrEqual
+                        ),
+                        // The RD condition is what stops a lucky streak from
+                        // clearing this gate: the rating must be *believed*,
+                        // not merely reached.
+                        SkillCriterion(
+                            metricKey: .puzzleRatingDeviation,
+                            window: .allTime,
+                            threshold: 100,
+                            comparison: .lessThan
+                        )
+                    ],
+                    isRequired: false,
+                    habit: .calcToQuiet
+                )
+            ]
+        )
+    }
+
+    // MARK: - Rung 2
+
+    /// 1000-1400. The player no longer drops pieces; now they have to *see*
+    /// the tactics that are there.
+    private static func rung2(_ t: DomainTuning.Curriculum) -> Rung {
+        Rung(
+            id: 2,
+            title: "Tactical Vision",
+            ratingBand: 1000...1399,
+            skills: [
+                Skill(
+                    id: "r2.themes",
+                    title: "Core tactical themes at \(t.themeRatingFloor)+",
+                    criteria: t.rung2Themes.map { theme in
+                        SkillCriterion(
+                            metricKey: .puzzleThemeSuccess(theme, ratingFloor: t.themeRatingFloor),
+                            window: .allTime,
+                            threshold: 0.70,
+                            comparison: .greaterThanOrEqual,
+                            minimumSamples: t.themeMinimumAttempts
+                        )
+                    },
+                    isRequired: true,
+                    habit: .calcToQuiet
+                ),
+                Skill(
+                    id: "r2.missedTactics",
+                    title: "Find the tactics on the board",
+                    metricKey: .missedTacticPer100,
+                    window: .lastGames(10),
+                    threshold: 2.5,
+                    comparison: .lessThan,
+                    isRequired: true,
+                    habit: .candidatesFirst
+                ),
+                Skill(
+                    id: "r2.kpk",
+                    title: "King and pawn endings",
+                    metricKey: .kpkDrillCleanSetStreak,
+                    window: .allTime,
+                    threshold: Double(t.drillCleanStreakRequired),
+                    comparison: .greaterThanOrEqual,
+                    isRequired: false,
+                    habit: .endgameTechnique
+                ),
+                Skill(
+                    id: "r2.threatAwareness",
+                    title: "See the opponent's threats",
+                    criteria: [
+                        SkillCriterion(
+                            metricKey: .ignoredThreatPer100,
+                            window: .lastGames(10),
+                            threshold: 1.5,
+                            comparison: .lessThan
+                        ),
+                        // The guided-mode hit rate is the *deliberate* half of
+                        // the same skill: the game metric says it happens, this
+                        // says the user can do it on demand when prompted.
+                        SkillCriterion(
+                            metricKey: .guidedScanThreatsHitRate,
+                            window: .lastGames(10),
+                            threshold: 0.60,
+                            comparison: .greaterThanOrEqual
+                        )
+                    ],
+                    isRequired: true,
+                    habit: .scanThreats
+                ),
+                Skill(
+                    id: "r2.ladderStrength",
+                    title: "Ladder rating 1350 and holding",
+                    criteria: [
+                        SkillCriterion(
+                            metricKey: .ladderRating,
+                            window: .allTime,
+                            threshold: 1350,
+                            comparison: .greaterThanOrEqual
+                        ),
+                        SkillCriterion(
+                            metricKey: .ladderPerformance,
+                            window: .lastGames(10),
+                            threshold: 1400,
+                            comparison: .greaterThanOrEqual
+                        )
+                    ],
+                    isRequired: false
+                )
+            ]
+        )
+    }
+
+    // MARK: - Rung 3
+
+    /// 1400-1800. Tactics are mostly seen; the errors move deeper — allowing
+    /// combinations two moves further out, missing quiet moves, drifting.
+    private static func rung3(_ t: DomainTuning.Curriculum) -> Rung {
+        Rung(
+            id: 3,
+            title: "Calculation & Structure",
+            ratingBand: 1400...1799,
+            skills: [
+                Skill(
+                    id: "r3.deepTactics",
+                    title: "Do not allow deep tactics",
+                    metricKey: .allowedDeepTacticPer100,
+                    window: .lastGames(12),
+                    threshold: 1.0,
+                    comparison: .lessThan,
+                    isRequired: true,
+                    habit: .calcToQuiet
+                ),
+                Skill(
+                    id: "r3.criticalMoments",
+                    title: "Get the critical moments right",
+                    metricKey: .criticalMomentHitRate,
+                    window: .lastGames(12),
+                    threshold: 0.55,
+                    comparison: .greaterThanOrEqual,
+                    isRequired: true,
+                    habit: .whatChanged,
+                    minimumSamples: t.criticalMomentMinimumSamples
+                ),
+                Skill(
+                    id: "r3.quietMoves",
+                    title: "Quiet moves and steady play",
+                    criteria: [
+                        SkillCriterion(
+                            metricKey: .missedQuietMovePer100,
+                            window: .lastGames(12),
+                            threshold: 2.0,
+                            comparison: .lessThan
+                        ),
+                        SkillCriterion(
+                            metricKey: .middlegameNonCriticalAccuracy,
+                            window: .lastGames(12),
+                            threshold: 82,
+                            comparison: .greaterThanOrEqual
+                        )
+                    ],
+                    isRequired: false,
+                    habit: .candidatesFirst
+                ),
+                Skill(
+                    id: "r3.rookEndings",
+                    title: "Rook endings: Lucena and Philidor",
+                    criteria: [
+                        SkillCriterion(
+                            metricKey: .lucenaDrillCleanStreak,
+                            window: .allTime,
+                            threshold: Double(t.drillCleanStreakRequired),
+                            comparison: .greaterThanOrEqual
+                        ),
+                        SkillCriterion(
+                            metricKey: .philidorDrillCleanStreak,
+                            window: .allTime,
+                            threshold: Double(t.drillCleanStreakRequired),
+                            comparison: .greaterThanOrEqual
+                        ),
+                        // Knowing the positions is not the same as not throwing
+                        // rook endings away, so the drill and the game evidence
+                        // are both required.
+                        SkillCriterion(
+                            metricKey: .rookEndingResultFlipsPer8,
+                            window: .lastGames(12),
+                            threshold: 1,
+                            comparison: .lessThanOrEqual
+                        )
+                    ],
+                    isRequired: false,
+                    habit: .endgameTechnique
+                ),
+                Skill(
+                    id: "r3.opening",
+                    title: "Accurate openings",
+                    criteria: [
+                        SkillCriterion(
+                            metricKey: .openingAccuracy,
+                            window: .lastGames(12),
+                            threshold: 85,
+                            comparison: .greaterThanOrEqual
+                        ),
+                        SkillCriterion(
+                            metricKey: .openingMistakesPerGame,
+                            window: .lastGames(12),
+                            threshold: 0.5,
+                            comparison: .lessThanOrEqual
+                        )
+                    ],
+                    isRequired: false,
+                    habit: .candidatesFirst
+                ),
+                Skill(
+                    id: "r3.ladderStrength",
+                    title: "Performing at 1750",
+                    metricKey: .ladderPerformance,
+                    window: .lastGames(10),
+                    threshold: 1750,
+                    comparison: .greaterThanOrEqual,
+                    isRequired: false
+                )
+            ]
+        )
+    }
+
+    // MARK: - Rung 4
+
+    /// 1800-2000. Nothing here is about finding moves. It is about not letting
+    /// won games get away and not letting the opponent get started.
+    private static func rung4(_ t: DomainTuning.Curriculum) -> Rung {
+        Rung(
+            id: 4,
+            title: "Conversion & Prophylaxis",
+            ratingBand: 1800...2000,
+            skills: [
+                Skill(
+                    id: "r4.prophylaxis",
+                    title: "Stop ideas before they start",
+                    criteria: [
+                        SkillCriterion(
+                            metricKey: .ignoredThreatPer100,
+                            window: .lastGames(12),
+                            threshold: 0.7,
+                            comparison: .lessThan
+                        ),
+                        SkillCriterion(
+                            metricKey: .prophylacticFindRate,
+                            window: .lastGames(12),
+                            threshold: 0.45,
+                            comparison: .greaterThanOrEqual
+                        )
+                    ],
+                    isRequired: false,
+                    habit: .scanThreats
+                ),
+                Skill(
+                    id: "r4.criticalMoments",
+                    title: "Own the critical moments",
+                    criteria: [
+                        SkillCriterion(
+                            metricKey: .criticalMomentHitRate,
+                            window: .lastGames(12),
+                            threshold: 0.65,
+                            comparison: .greaterThanOrEqual,
+                            minimumSamples: t.criticalMomentMinimumSamples
+                        ),
+                        // Zero, not "few". At this level an instant move in a
+                        // position the engine flags as critical is never
+                        // anything but a lapse of discipline.
+                        SkillCriterion(
+                            metricKey: .impulseAtCriticalCount,
+                            window: .lastGames(12),
+                            threshold: 0,
+                            comparison: .lessThanOrEqual
+                        )
+                    ],
+                    isRequired: false,
+                    habit: .whatChanged
+                ),
+                Skill(
+                    id: "r4.conversion",
+                    title: "Convert winning positions",
+                    criteria: [
+                        SkillCriterion(
+                            metricKey: .winRateFromWinningPosition,
+                            window: .lastGames(20),
+                            threshold: 0.85,
+                            comparison: .greaterThanOrEqual
+                        ),
+                        SkillCriterion(
+                            metricKey: .advantageSlipsPerWinningGame,
+                            window: .lastGames(20),
+                            threshold: 0.2,
+                            comparison: .lessThanOrEqual
+                        )
+                    ],
+                    isRequired: true,
+                    habit: .convertCleanly
+                ),
+                Skill(
+                    id: "r4.clock",
+                    title: "Spend the clock where it matters",
+                    criteria: [
+                        SkillCriterion(
+                            metricKey: .clockPressureGameRate,
+                            window: .lastGames(20),
+                            threshold: 0.10,
+                            comparison: .lessThanOrEqual
+                        ),
+                        SkillCriterion(
+                            metricKey: .criticalToNormalThinkTimeRatio,
+                            window: .lastGames(20),
+                            threshold: 2.0,
+                            comparison: .greaterThanOrEqual
+                        )
+                    ],
+                    isRequired: false,
+                    habit: .clockDiscipline
+                ),
+                Skill(
+                    id: "r4.ladderStrength",
+                    title: "Performing at 1950",
+                    metricKey: .ladderPerformance,
+                    window: .lastGames(15),
+                    threshold: 1950,
+                    comparison: .greaterThanOrEqual,
+                    isRequired: true
+                )
+            ]
+        )
+    }
+}
+
+// MARK: - Composite helpers
+
+extension Curriculum {
+
+    /// Whether a game passes the rung-1 opening composite.
+    ///
+    /// Three sub-conditions, two of which must hold. The "two of three" rule is
+    /// the point: each condition alone has legitimate exceptions (a forced line
+    /// delays castling; an early trade means there are no minors left to
+    /// develop), and requiring all three would fail good games and teach the
+    /// user to follow rules rather than play chess.
+    public static func openingCompositePasses(
+        castledByMoveLimit: Bool,
+        minorsDevelopedByMoveLimit: Bool,
+        noOpeningMistakes: Bool,
+        tuning: DomainTuning.Curriculum = DomainTuning.default.curriculum
+    ) -> Bool {
+        let passes = [castledByMoveLimit, minorsDevelopedByMoveLimit, noOpeningMistakes]
+            .filter { $0 }
+            .count
+        return passes >= tuning.openingCompositeSubConditionsRequired
+    }
+
+    /// Whether a basic-mate drill run counts as clean.
+    public static func basicMateDrillIsClean(
+        mate: BasicMate,
+        moves: Int,
+        tuning: DomainTuning.Curriculum = DomainTuning.default.curriculum
+    ) -> Bool {
+        switch mate {
+        case .kqk: return moves <= tuning.kqkMaxMoves
+        case .krk: return moves <= tuning.krkMaxMoves
+        }
+    }
+
+    public enum BasicMate: String, Sendable, Hashable, CaseIterable {
+        case kqk
+        case krk
+    }
+}

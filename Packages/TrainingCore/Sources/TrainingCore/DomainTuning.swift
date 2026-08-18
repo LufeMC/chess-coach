@@ -356,6 +356,23 @@ public struct DomainTuning: Sendable, Hashable {
         /// Centipawn loss that makes a hanging piece count for rung 1.
         public var hangingPieceThresholdCentipawns: Int = 300
 
+        /// Rung 2's per-theme gate only counts puzzles at or above this rating.
+        ///
+        /// Without a floor the gate is trivially passed on 800-rated forks,
+        /// which prove nothing about a user on their way to 1400.
+        public var themeRatingFloor: Int = 1200
+
+        /// Attempts needed per theme before the success rate is trusted.
+        public var themeMinimumAttempts: Int = 15
+
+        /// Critical moments needed before the hit rate is trusted.
+        public var criticalMomentMinimumSamples: Int = 25
+
+        /// Themes rung 2 gates on.
+        public var rung2Themes: [ThemeTag] = [
+            .fork, .pin, .skewer, .discoveredAttack, .backRankMate
+        ]
+
         public init() {}
     }
 
@@ -409,6 +426,12 @@ public struct DomainTuning: Sendable, Hashable {
         /// enough breadth that the SRS deck does not starve and the user does
         /// not spend a week on a single tactic shape.
         public var focusThemeShare: Double = 0.60
+
+        /// Ceiling on the focus share once the forced-switch multiplier is
+        /// applied. Without it, `0.60 × 2.0` would claim the entire session and
+        /// the SRS deck would get nothing — which is the exact starvation the
+        /// 60/40 split exists to prevent.
+        public var maximumFocusShare: Double = 0.80
 
         /// Weekday the focus rotates on, in `Calendar`'s numbering
         /// (1 = Sunday). 2 = Monday.

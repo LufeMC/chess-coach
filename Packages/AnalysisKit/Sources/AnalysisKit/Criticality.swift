@@ -83,11 +83,15 @@ public enum Criticality {
         let bestMove = best.pv.first.flatMap { LineReplay.apply(uci: $0, to: position)?.move }
 
         if let bestMove {
-            if isFreeCapture(bestMove, in: position) {
-                return CriticalityResult(isCritical: false, gap: gap, suppressedBy: .freeCapture)
-            }
+            // Recapture is checked first: when the opponent has just taken
+            // something, "you had to take back" is the better explanation than
+            // "there was a free piece", and every forced recapture also looks
+            // like a free capture.
             if let lastCaptureSquare, isForcedRecapture(bestMove, on: lastCaptureSquare, in: position) {
                 return CriticalityResult(isCritical: false, gap: gap, suppressedBy: .forcedRecapture)
+            }
+            if isFreeCapture(bestMove, in: position) {
+                return CriticalityResult(isCritical: false, gap: gap, suppressedBy: .freeCapture)
             }
         }
 
@@ -103,16 +107,21 @@ public enum Criticality {
     }
 
     /// Taking back on the square the opponent just captured on, when nothing else
-    /// holds material, is not a decision either.
+    /// recovers the material, is not a decision either.
     ///
-    /// "Only non-losing move by SEE" is measured with ``SEE/staticExchange(position:move:)``
-    /// over every legal move, so a quiet move that hangs a piece counts as losing
-    /// just as a bad capture does.
+    /// The spec calls this "the only non-losing move by SEE". Counting moves with
+    /// `staticExchange >= 0` literally does not work: a king step to a safe
+    /// square scores exactly 0 and would count as non-losing, so the count is
+    /// almost never 1. What the rule means is that the recapture is the only move
+    /// that *recovers material* — so the test is strict dominance: the recapture
+    /// wins something, and no other legal move comes close.
     static func isForcedRecapture(_ move: Move, on square: Square, in position: Position) -> Bool {
         guard move.end == square, case .capture = move.result else { return false }
-        let nonLosing = PositionUtilities.legalMoves(in: position).filter {
-            SEE.staticExchange(position: position, move: $0) >= 0
-        }
-        return nonLosing.count == 1
+        let recaptureValue = SEE.staticExchange(position: position, move: move)
+        guard recaptureValue > 0 else { return false }
+
+        return PositionUtilities.legalMoves(in: position)
+            .filter { $0.start != move.start || $0.end != move.end }
+            .allSatisfy { SEE.staticExchange(position: position, move: $0) < recaptureValue }
     }
 }
