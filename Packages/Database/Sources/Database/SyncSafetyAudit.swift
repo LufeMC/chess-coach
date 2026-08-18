@@ -35,6 +35,12 @@ public enum SyncSafetyAudit {
             case compoundPrimaryKey(columns: [String])
             /// A `NOT NULL` column with no default. A record synced from a build
             /// that predates the column arrives with `NULL` and is rejected.
+            ///
+            /// Foreign-key columns are exempt: a required relationship exists
+            /// from the moment the row is created, so no peer can ever send the
+            /// record without it, and there is no honest value to default it to.
+            /// SQLiteData's own schemas declare them `NOT NULL REFERENCES …`
+            /// with no default for the same reason.
             case notNullColumnWithoutDefault(column: String)
             /// A table named in the inventory but absent from the database.
             case missingTable
@@ -179,6 +185,7 @@ public enum SyncSafetyAudit {
 
     private static func auditColumns(_ db: Database, _ table: String) throws -> [Finding] {
         var findings: [Finding] = []
+        let foreignKeyColumns = Set(try foreignKeys(db, table).map(\.from))
 
         // `pk` is 0 for non-key columns, otherwise the 1-based position within
         // the key, so a compound key shows values > 1.
@@ -198,6 +205,8 @@ public enum SyncSafetyAudit {
             )
         }
 
+        // Foreign-key columns are skipped: see the doc on
+        // `Finding.Kind.notNullColumnWithoutDefault`.
         let undefaulted = try #sql(
             """
             SELECT "name" FROM pragma_table_info(\(bind: table))
@@ -207,9 +216,9 @@ public enum SyncSafetyAudit {
         )
         .fetchAll(db)
         findings.append(
-            contentsOf: undefaulted.map {
-                Finding(table: table, kind: .notNullColumnWithoutDefault(column: $0))
-            }
+            contentsOf: undefaulted
+                .filter { !foreignKeyColumns.contains($0) }
+                .map { Finding(table: table, kind: .notNullColumnWithoutDefault(column: $0)) }
         )
 
         return findings

@@ -22,6 +22,8 @@ final class BoardModel {
   private(set) var position: Position
   private(set) var board: Board
   private(set) var layout = PieceLayout()
+  /// Colour of the king currently in check, if any.
+  private(set) var checkedColor: Piece.Color?
 
   var orientation: Piece.Color
 
@@ -79,7 +81,35 @@ final class BoardModel {
     self.position = position
     self.orientation = orientation
     self.board = Board(position: position)
+    self.checkedColor = Self.checkedKing(in: position)
     self.layout.apply(position: position)
+  }
+
+  /// Which king, if either, is in check in `position`.
+  ///
+  /// `Board.state` is phrased relative to the side that just *moved*, so a board
+  /// built straight from a position answers about the wrong king — it reports on
+  /// the side **not** to move. Asking the same question with the turn flipped
+  /// puts it back the right way round and reuses ChessKit's own attack
+  /// detection rather than reimplementing it here.
+  ///
+  /// The clock and en-passant fields are neutralised because `Board` resolves
+  /// draw conditions *before* check, and a long shuffle would otherwise report a
+  /// fifty-move draw over the top of a real check.
+  private static func checkedKing(in position: Position) -> Piece.Color? {
+    var fields = position.fen.split(separator: " ", omittingEmptySubsequences: false).map(String.init)
+    guard fields.count >= 6 else { return nil }
+    fields[1] = fields[1] == "w" ? "b" : "w"
+    fields[3] = "-"
+    fields[4] = "0"
+    guard let flipped = Position(fen: fields.joined(separator: " ")) else { return nil }
+
+    switch Board(position: flipped).state {
+    case .check(let color), .checkmate(let color):
+      return color
+    default:
+      return nil
+    }
   }
 
   // MARK: - External updates
@@ -91,6 +121,7 @@ final class BoardModel {
     let previousPieceCount = position.pieces.count
     position = newPosition
     board = Board(position: newPosition)
+    checkedColor = Self.checkedKing(in: newPosition)
     layout.apply(position: newPosition)
 
     // Any external change ends the current interaction — the piece the user was
@@ -104,11 +135,8 @@ final class BoardModel {
     if newPosition.pieces.count < previousPieceCount {
       captureTicks += 1
     }
-    switch board.state {
-    case .check, .checkmate:
+    if checkedColor != nil {
       checkTicks += 1
-    default:
-      break
     }
   }
 
@@ -160,13 +188,8 @@ final class BoardModel {
 
   /// The square holding the king that is currently in check, if any.
   var checkedKingSquare: Square? {
-    let color: Piece.Color
-    switch board.state {
-    case let .check(checked): color = checked
-    case let .checkmate(checked): color = checked
-    default: return nil
-    }
-    return position.pieces.first { $0.kind == .king && $0.color == color }?.square
+    guard let checkedColor else { return nil }
+    return position.pieces.first { $0.kind == .king && $0.color == checkedColor }?.square
   }
 
   // MARK: - Move attempts
