@@ -1,0 +1,10 @@
+.DS_Store
+build/
+DerivedData/
+*.xcuserdatad
+xcuserdata/
+.swiftpm/
+*.nnue
+!nn-*small*.nnue
+App/Resources/puzzles.sqlite
+Tools/PuzzlePrep/data/
