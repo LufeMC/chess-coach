@@ -7,17 +7,23 @@ import Foundation
 import Testing
 @testable import ClaudeKit
 
-/// Probes once whether this process can use the data protection keychain.
+/// Works out, once, which keychain this process can actually reach.
 ///
-/// An unsigned `swift test` binary cannot: `SecItemAdd` returns -34018
-/// (`errSecMissingEntitlement`) because there is no application-identifier
-/// entitlement to scope the item to. Rather than fail the suite over a machine
-/// configuration issue, the tests below report as skipped there, and run for
-/// real wherever the keychain is genuinely available — Xcode's signed test
-/// host, simulators, devices, or CI with a signing identity.
+/// The app always uses the data protection keychain. An unsigned `swift test`
+/// binary cannot: `SecItemAdd` returns -34018 (`errSecMissingEntitlement`),
+/// because the data protection keychain requires an application-identifier
+/// entitlement backed by a provisioning profile. Signing the binary with a
+/// development certificate is not enough — this was verified rather than
+/// assumed.
+///
+/// So the round-trip tests run against the legacy keychain when that is all
+/// that is available, which exercises the same `SecItem` calls, the same
+/// attributes and the same error mapping — everything except which store the
+/// bytes land in. Under a signed Xcode test host they run against the real
+/// thing without changing.
 enum KeychainAvailability {
 
-    static let isAvailable: Bool = {
+    static let usesDataProtectionKeychain: Bool = {
         let store = KeychainStore(service: "com.usenivel.chesscoach.tests.probe", account: "probe")
         do {
             try store.store(key: "probe")
@@ -28,6 +34,26 @@ enum KeychainAvailability {
         }
     }()
 
+    static let isAvailable: Bool = {
+        guard !usesDataProtectionKeychain else { return true }
+        let store = makeStore(service: "com.usenivel.chesscoach.tests.probe.legacy")
+        do {
+            try store.store(key: "probe")
+            try? store.delete()
+            return true
+        } catch {
+            return false
+        }
+    }()
+
+    static func makeStore(service: String) -> KeychainStore {
+        KeychainStore(
+            service: service,
+            account: "api-key",
+            usesDataProtectionKeychain: usesDataProtectionKeychain
+        )
+    }
+
 }
 
 @Suite("Keychain storage", .enabled(if: KeychainAvailability.isAvailable))
@@ -36,7 +62,7 @@ struct KeychainStoreTests {
     /// A unique service per test so runs never collide with each other or with
     /// the app's real key.
     private func makeStore() -> KeychainStore {
-        KeychainStore(service: "com.usenivel.chesscoach.tests.\(UUID().uuidString)", account: "api-key")
+        KeychainAvailability.makeStore(service: "com.usenivel.chesscoach.tests.\(UUID().uuidString)")
     }
 
     @Test("Store, load and delete round-trip")
@@ -126,11 +152,13 @@ struct KeychainStoreConfigurationTests {
         #expect(KeychainStore.KeychainError.invalidData.isEntitlementFailure == false)
     }
 
-    @Test("The default service and account are the app's")
+    @Test("The default service and account are the app's, on the data protection keychain")
     func defaults() {
         let store = KeychainStore()
         #expect(store.service == "com.usenivel.chesscoach.anthropic")
         #expect(store.account == "api-key")
+        // The public initialiser must never produce a legacy-keychain store.
+        #expect(store.usesDataProtectionKeychain)
     }
 
 }

@@ -35,12 +35,26 @@ public struct KeychainStore: Sendable {
     public let service: String
     public let account: String
 
+    /// Whether to use the data protection keychain. Always `true` in the app.
+    ///
+    /// The seam exists because the data protection keychain refuses any process
+    /// without an application-identifier entitlement backed by a provisioning
+    /// profile (`errSecMissingEntitlement`, -34018) — which an unsigned
+    /// `swift test` binary is. Tests flip it off to exercise these exact
+    /// `SecItem` calls against the legacy keychain; nothing else should.
+    let usesDataProtectionKeychain: Bool
+
     public init(
         service: String = "com.usenivel.chesscoach.anthropic",
         account: String = "api-key"
     ) {
+        self.init(service: service, account: account, usesDataProtectionKeychain: true)
+    }
+
+    init(service: String, account: String, usesDataProtectionKeychain: Bool) {
         self.service = service
         self.account = account
+        self.usesDataProtectionKeychain = usesDataProtectionKeychain
     }
 
     /// Stores (or replaces) the key.
@@ -100,16 +114,21 @@ public struct KeychainStore: Sendable {
     }
 
     private var baseQuery: [String: Any] {
-        [
+        var query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: service,
-            kSecAttrAccount as String: account,
-            // Required on macOS: without it the item lands in the legacy file
-            // based keychain, which prompts the user and behaves differently
-            // from iOS. With it, both platforms use the same data protection
-            // keychain and the same code path.
-            kSecUseDataProtectionKeychain as String: true
+            kSecAttrAccount as String: account
         ]
+
+        // Required on macOS: without it the item lands in the legacy file based
+        // keychain, which prompts the user and behaves differently from iOS.
+        // With it, both platforms use the same data protection keychain and the
+        // same code path.
+        if usesDataProtectionKeychain {
+            query[kSecUseDataProtectionKeychain as String] = true
+        }
+
+        return query
     }
 
 }
