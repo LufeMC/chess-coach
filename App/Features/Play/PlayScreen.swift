@@ -2,16 +2,47 @@ import BoardUI
 import ChessKit
 import SwiftUI
 
-/// Board-first play surface.
+/// The play surface.
 ///
-/// Layout follows the design brief: three capsules on top (close, both clocks,
-/// eval), an edge-to-edge board, and the opponent/user chips above and below it.
-/// Training interruptions arrive as short bottom sheets so the board stays
-/// visible — the position is the thing being discussed, hiding it defeats the
-/// purpose.
+/// ## The shape
+///
+/// Exit, then one status pill, then the screen's title, then the opponent, then
+/// the board, then your own side of the table. Every one of those is a fixed
+/// slot: over forty moves the only things that change are the numbers inside the
+/// pill, one line of the opponent's text, and the pieces. Nothing resizes,
+/// nothing slides, nothing spins.
+///
+/// The board runs edge to edge and sits about a third of the way down, with the
+/// space beneath it deliberately empty — that space is where interruption sheets
+/// and the result banner arrive, which is what lets both of them appear *without
+/// the board moving or being covered*. It is not wasted space; it is the reason
+/// the rest of the design works.
+///
+/// ## Focus
+///
+/// During a game the tab bar and the navigation bar are gone and the exit is a
+/// grey glyph in the top-left corner: present, never prominent, never accented.
+/// Leaving mid-game resigns, so it asks first — from a sheet where the safe
+/// answer is the filled button.
 struct PlayScreen: View {
+
     @Environment(AppModel.self) private var model
+
     @State private var session: GameSession?
+    @State private var sequencer = GameEndSequencer()
+    @State private var manualSheet: PlaySheetKind?
+    @State private var summaryTarget: GameSummaryTarget?
+    @State private var boardFlipped = false
+    @State private var lowTimeWarned = false
+
+    /// Measured so a sheet can be sized to the space *below* the board.
+    @State private var boardFrame: CGRect = .zero
+    @State private var contentFrame: CGRect = .zero
+
+    /// How far the board shrinks on the rare screen where a sheet cannot
+    /// otherwise clear it. Scaling from the top raises the bottom edge without
+    /// moving the top one and without cropping a single square.
+    private static let compressedBoardScale: CGFloat = 0.92
 
     var body: some View {
         Group {
@@ -22,10 +53,12 @@ struct PlayScreen: View {
             }
         }
         .navigationTitle("Play")
-        #if os(iOS)
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbar(session == nil ? .visible : .hidden, for: .navigationBar)
-        #endif
+        .navigationBarTitleDisplayMode(.inline)
+        .toolbar(session == nil ? .visible : .hidden, for: .navigationBar)
+        .toolbar(session == nil ? .visible : .hidden, for: .tabBar)
+        .navigationDestination(item: $summaryTarget) { target in
+            GameSummaryScreen(target: target)
+        }
     }
 
     // MARK: - Start
@@ -62,8 +95,6 @@ struct PlayScreen: View {
     }
 
     private var opponentName: String {
-        // Opponents get names and traits rather than difficulty numbers — a
-        // level integer invites grinding, a personality invites playing.
         OpponentRoster.opponent(forRating: opponentRating).name
     }
 
@@ -77,89 +108,376 @@ struct PlayScreen: View {
             opponentRating: opponentRating
         )
         let newSession = GameSession(configuration: configuration, engineService: model.engineService)
+        sequencer.reset()
+        manualSheet = nil
+        summaryTarget = nil
+        boardFlipped = false
+        lowTimeWarned = false
         session = newSession
         Task { await newSession.start() }
+    }
+
+    private func leaveGame() {
+        session = nil
+        sequencer.reset()
+        manualSheet = nil
+        lowTimeWarned = false
     }
 
     // MARK: - Active game
 
     @ViewBuilder
     private func activeGame(_ session: GameSession) -> some View {
-        VStack(spacing: 12) {
-            topBar(session)
+        let opponent = OpponentRoster.opponent(forRating: session.configuration.opponentRating)
+        let sheetKind = currentSheet(session)
 
-            OpponentChip(
-                opponent: OpponentRoster.opponent(forRating: session.configuration.opponentRating),
-                isThinking: session.phase == .opponentThinking
-            )
+        VStack(spacing: 0) {
+            topRow(session)
+                .padding(.horizontal, 16)
+                .padding(.top, 4)
+
+            titleRow(session)
+                .padding(.horizontal, 16)
+                .padding(.top, 16)
+
+            OpponentPresenceView(opponent: opponent, line: opponentLine(session, opponent: opponent))
+                .padding(.horizontal, 16)
+                .padding(.top, 14)
 
             BoardView(
                 position: session.board.position,
-                orientation: session.configuration.userColor,
+                orientation: orientation(session),
                 interaction: interaction(for: session),
                 highlights: highlights(for: session),
                 arrows: arrows(for: session)
             )
+            .scaleEffect(boardScale(for: sheetKind), anchor: .top)
+            .animation(.spring(response: 0.6, dampingFraction: 0.9), value: boardScale(for: sheetKind))
+            .padding(.top, 16)
+            .onGeometryChange(for: CGRect.self) { $0.frame(in: .global) } action: { boardFrame = $0 }
+
+            bottomRow(session)
+                .padding(.horizontal, 16)
+                .padding(.top, 12)
 
             Spacer(minLength: 0)
-
-            bottomBar(session)
         }
-        .padding(.horizontal, 12)
-        .sheet(isPresented: .constant(isShowingSecondTry(session))) {
-            if case .secondTry(let state) = session.phase {
-                SecondTrySheet(state: state, session: session)
-                    .presentationDetents([.height(260)])
-                    .presentationBackgroundInteraction(.disabled)
-                    .interactiveDismissDisabled()
+        .onGeometryChange(for: CGRect.self) { $0.frame(in: .global) } action: { contentFrame = $0 }
+        .overlay(alignment: .bottom) {
+            endOverlay(session, opponent: opponent)
+        }
+        .animation(.spring(response: 0.42, dampingFraction: 0.82), value: sequencer.stage)
+        .task(id: session.gameID) { await tick(session) }
+        .onChange(of: finishedOutcome(session)) { _, outcome in
+            guard outcome != nil else { return }
+            Task { await sequencer.gameFinished() }
+        }
+        .sheet(item: sheetBinding(session)) { kind in
+            sheetContent(kind, session: session)
+                .presentationDetents([.height(detentHeight(for: kind))])
+                // Removes the system dimming layer, which is the whole point:
+                // the board stays visible *and* stays playable underneath.
+                .presentationBackgroundInteraction(.enabled)
+                .presentationDragIndicator(.visible)
+                .presentationCornerRadius(28)
+        }
+        .sensoryFeedback(trigger: lowTimeWarned) { _, warned in
+            warned ? .impact(flexibility: .soft) : nil
+        }
+        .sensoryFeedback(trigger: sequencer.stage) { _, stage in
+            guard stage == .banner, let outcome = finishedOutcome(session) else { return nil }
+            switch GameEndBanner.make(outcome: outcome, opponentName: opponent.name).kind {
+            case .win: return .success
+            case .loss: return .error
+            case .draw: return .impact(flexibility: .solid)
             }
         }
     }
 
-    private func isShowingSecondTry(_ session: GameSession) -> Bool {
-        if case .secondTry = session.phase { return true }
-        return false
-    }
+    // MARK: Rows
 
-    private func topBar(_ session: GameSession) -> some View {
-        HStack(spacing: 10) {
+    private func topRow(_ session: GameSession) -> some View {
+        HStack(spacing: 12) {
             Button {
-                session.resign()
-                self.session = nil
+                if session.isFinished {
+                    leaveGame()
+                } else {
+                    manualSheet = .leave
+                }
             } label: {
                 Image(systemName: "xmark")
-                    .font(.body.weight(.medium))
+                    .font(.system(size: 16, weight: .semibold))
+                    .frame(width: 30, height: 30)
+                    .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
             .foregroundStyle(.secondary)
+            .accessibilityLabel("Leave this game")
 
-            Spacer()
+            Spacer(minLength: 8)
 
-            ClockCapsule(milliseconds: session.opponentClockMs, isActive: !session.userToMove)
-            ClockCapsule(milliseconds: session.userClockMs, isActive: session.userToMove)
+            PlayStatusPill(
+                eval: evalReading(session),
+                opponentClock: clockState(session, isUser: false),
+                userClock: clockState(session, isUser: true),
+                clocksDimmed: session.isFinished
+            )
         }
-        .padding(.top, 4)
     }
 
-    private func bottomBar(_ session: GameSession) -> some View {
-        HStack {
+    private func titleRow(_ session: GameSession) -> some View {
+        HStack(alignment: .firstTextBaseline) {
+            Text(session.configuration.mode.capitalized)
+                .font(.title.bold())
+            Spacer(minLength: 12)
+            // The qualifier a section header carries: same small-caps style,
+            // dimmer, right-aligned.
+            Text(timeControl(session))
+                .font(.caption.weight(.semibold).monospacedDigit())
+                .tracking(0.6)
+                .foregroundStyle(.secondary)
+        }
+    }
+
+    private func bottomRow(_ session: GameSession) -> some View {
+        HStack(spacing: 12) {
             Text(session.configuration.userColor == .white ? "You · White" : "You · Black")
                 .font(.footnote.weight(.medium))
                 .foregroundStyle(.secondary)
-            Spacer()
-            if case .finished(let outcome) = session.phase {
-                Text(outcome.termination.capitalized)
-                    .font(.footnote.weight(.semibold))
+
+            Spacer(minLength: 0)
+
+            Button {
+                manualSheet = .options
+            } label: {
+                Image(systemName: "ellipsis")
+                    .font(.system(size: 15, weight: .semibold))
+                    .frame(width: 34, height: 30)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .foregroundStyle(.secondary)
+            .accessibilityLabel("Game options")
+        }
+    }
+
+    // MARK: Game end
+
+    @ViewBuilder
+    private func endOverlay(_ session: GameSession, opponent: OpponentRoster.Opponent) -> some View {
+        if let outcome = finishedOutcome(session) {
+            let banner = GameEndBanner.make(outcome: outcome, opponentName: opponent.name)
+
+            switch sequencer.stage {
+            case .banner:
+                GameResultBanner(
+                    banner: banner,
+                    onCollapse: { sequencer.collapse() },
+                    onContinue: { openSummary(session, outcome: outcome, opponent: opponent) }
+                )
+                .padding(.horizontal, 16)
+                .padding(.bottom, 12)
+                .transition(.move(edge: .bottom).combined(with: .opacity))
+
+            case .collapsed:
+                GameResultChip(title: "Summary") { sequencer.expand() }
+                    .padding(.bottom, 16)
+                    .transition(.opacity)
+
+            // `.holding` draws nothing on purpose: for 600ms after the last move
+            // the screen does not change at all.
+            case .none, .holding:
+                EmptyView()
             }
         }
-        .padding(.bottom, 8)
+    }
+
+    private func openSummary(
+        _ session: GameSession,
+        outcome: GameSession.Outcome,
+        opponent: OpponentRoster.Opponent
+    ) {
+        summaryTarget = GameSummaryTarget(
+            gameID: session.gameID,
+            outcome: outcome,
+            opponentName: opponent.name,
+            opponentRating: session.configuration.opponentRating,
+            plyCount: session.moves.count,
+            persistenceFailure: session.persistenceFailure
+        )
+    }
+
+    // MARK: Sheets
+
+    private func currentSheet(_ session: GameSession) -> PlaySheetKind? {
+        if case .secondTry = session.phase { return .secondTry }
+        return manualSheet
+    }
+
+    private func sheetBinding(_ session: GameSession) -> Binding<PlaySheetKind?> {
+        Binding(
+            get: { currentSheet(session) },
+            set: { newValue in
+                // Pulling the coaching card down is an answer, not an escape:
+                // it means "let me look at it again", so the move stays taken
+                // back and the board goes live.
+                if newValue == nil, case .secondTry = session.phase {
+                    session.resumeAfterSecondTry()
+                }
+                manualSheet = newValue
+            }
+        )
+    }
+
+    @ViewBuilder
+    private func sheetContent(_ kind: PlaySheetKind, session: GameSession) -> some View {
+        switch kind {
+        case .secondTry:
+            if case .secondTry(let state) = session.phase {
+                SecondTrySheet(state: state, session: session)
+            }
+        case .options:
+            GameOptionsSheet(
+                isFinished: session.isFinished,
+                onFlip: { boardFlipped.toggle() },
+                // Resigning from here keeps the player on the board and runs the
+                // normal end-of-game handoff; only the exit in the corner leaves.
+                onResign: { session.resign() },
+                onNewGame: { startGame() }
+            )
+        case .leave:
+            LeaveGameSheet(
+                onKeepPlaying: { manualSheet = nil },
+                onLeave: {
+                    session.resign()
+                    leaveGame()
+                }
+            )
+        }
+    }
+
+    /// The tallest this sheet may be without its top edge crossing the board.
+    private func detentHeight(for kind: PlaySheetKind) -> CGFloat {
+        max(180, min(kind.preferredHeight, spaceBelowBoard(for: kind)))
+    }
+
+    private func spaceBelowBoard(for kind: PlaySheetKind) -> CGFloat {
+        guard boardFrame.height > 0, contentFrame.maxY > boardFrame.maxY else {
+            return kind.preferredHeight
+        }
+        let atFullSize = contentFrame.maxY - boardFrame.maxY - 8
+        guard atFullSize < kind.preferredHeight else { return atFullSize }
+        // The board gives up 8% of its side rather than being covered or
+        // cropped, which is worth roughly another 30pt on a phone.
+        return atFullSize + boardFrame.height * (1 - Self.compressedBoardScale)
+    }
+
+    private func boardScale(for kind: PlaySheetKind?) -> CGFloat {
+        guard let kind, boardFrame.height > 0, contentFrame.maxY > boardFrame.maxY else { return 1 }
+        let atFullSize = contentFrame.maxY - boardFrame.maxY - 8
+        return atFullSize < kind.preferredHeight ? Self.compressedBoardScale : 1
+    }
+
+    // MARK: Clock
+
+    /// One loop for the whole game: charges elapsed time so a player who simply
+    /// stops moving still flags, and notices the ten-second crossing so it can
+    /// be felt once rather than watched for.
+    private func tick(_ session: GameSession) async {
+        while !Task.isCancelled, !session.isFinished {
+            session.checkClock()
+
+            let userMs = PlayClock.remainingMs(
+                chargedMs: session.userClockMs,
+                startedAt: session.moveStartedAt,
+                now: .now,
+                isRunning: isUserSideActive(session)
+            )
+            if !lowTimeWarned, userMs <= PlayClock.criticalThresholdMs {
+                lowTimeWarned = true
+            }
+
+            try? await Task.sleep(for: .milliseconds(400))
+        }
+    }
+
+    private func clockState(_ session: GameSession, isUser: Bool) -> PlayStatusPill.ClockState {
+        let active = isUser ? isUserSideActive(session) : isOpponentSideActive(session)
+        return PlayStatusPill.ClockState(
+            chargedMs: isUser ? session.userClockMs : session.opponentClockMs,
+            startedAt: session.moveStartedAt,
+            isRunning: active,
+            isActive: active,
+            widthSample: PlayClock.widthSample(baseSeconds: session.configuration.baseSeconds),
+            accessibilityName: isUser ? "Your clock" : "Their clock"
+        )
+    }
+
+    private func isUserSideActive(_ session: GameSession) -> Bool {
+        switch session.phase {
+        // Second-try and guided pauses still burn the user's clock — the session
+        // charges them the same way — so the pill must say so.
+        case .userToMove, .secondTry, .guidedPrompt: true
+        default: false
+        }
+    }
+
+    private func isOpponentSideActive(_ session: GameSession) -> Bool {
+        session.phase == .opponentThinking
+    }
+
+    private func timeControl(_ session: GameSession) -> String {
+        let minutes = session.configuration.baseSeconds / 60
+        return "\(minutes)+\(session.configuration.incrementSeconds)"
+    }
+
+    // MARK: Readings
+
+    private func evalReading(_ session: GameSession) -> PlayEvalReading {
+        // Guided mode is the one place the session sanctions showing the
+        // engine's own number, so it is the one place this segment does.
+        if session.configuration.guidedEnabled {
+            return .winPercent(session.currentEvaluation)
+        }
+        return .material(
+            PlayEvalReading.materialBalance(
+                in: session.board.position,
+                for: session.configuration.userColor
+            )
+        )
+    }
+
+    private func opponentLine(_ session: GameSession, opponent: OpponentRoster.Opponent) -> OpponentLine {
+        OpponentStatusLine.line(
+            for: OpponentStatusLine.Input(
+                trait: opponent.trait,
+                isThinking: session.phase == .opponentThinking,
+                ply: session.moves.count,
+                lastUserSAN: session.moves.last(where: \.byUser)?.san,
+                materialBalance: PlayEvalReading.materialBalance(
+                    in: session.board.position,
+                    for: session.configuration.userColor
+                )
+            )
+        )
+    }
+
+    private func finishedOutcome(_ session: GameSession) -> GameSession.Outcome? {
+        guard case .finished(let outcome) = session.phase else { return nil }
+        return outcome
+    }
+
+    // MARK: Board
+
+    private func orientation(_ session: GameSession) -> Piece.Color {
+        boardFlipped ? session.configuration.userColor.opposite : session.configuration.userColor
     }
 
     private func interaction(for session: GameSession) -> BoardInteraction {
         guard case .userToMove = session.phase else { return .replay }
         return .userMove { from, to in
             // The board asks; GameSession decides. Returning `.rejected` here is
-            // exactly how an illegal move snaps back — and later, how second-try
+            // exactly how an illegal move snaps back — and how second-try
             // retracts a blunder.
             guard session.board.canMove(pieceAt: from, to: to) else {
                 return .rejected
@@ -185,141 +503,5 @@ struct PlayScreen: View {
             let arrow = state.refutationArrow
         else { return [] }
         return [BoardArrow(from: arrow.from, to: arrow.to, style: .threat)]
-    }
-}
-
-/// Monospaced clock so the digits don't jitter — the single most visible tell of
-/// an unpolished chess app.
-private struct ClockCapsule: View {
-    let milliseconds: Int
-    let isActive: Bool
-
-    var body: some View {
-        Text(formatted)
-            .font(.system(.body, design: .rounded).weight(.medium).monospacedDigit())
-            .padding(.horizontal, 12)
-            .padding(.vertical, 6)
-            .background(Capsule().fill(.quaternary))
-            // Dimming the inactive side reads faster than a border or a color
-            // change, and costs no extra chrome.
-            .opacity(isActive ? 1.0 : 0.35)
-    }
-
-    private var formatted: String {
-        let totalSeconds = max(0, milliseconds / 1000)
-        return String(format: "%d:%02d", totalSeconds / 60, totalSeconds % 60)
-    }
-}
-
-private struct OpponentChip: View {
-    let opponent: OpponentRoster.Opponent
-    let isThinking: Bool
-
-    var body: some View {
-        HStack(spacing: 8) {
-            Circle()
-                .fill(.quaternary)
-                .frame(width: 28, height: 28)
-                .overlay {
-                    Text(opponent.name.prefix(1))
-                        .font(.caption.weight(.semibold))
-                }
-
-            VStack(alignment: .leading, spacing: 1) {
-                Text(opponent.name)
-                    .font(.subheadline.weight(.medium))
-                Text(opponent.trait)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-            }
-
-            Spacer()
-
-            if isThinking {
-                ProgressView()
-                    .controlSize(.small)
-            }
-        }
-        .padding(.horizontal, 4)
-    }
-}
-
-/// Second-try sheet.
-///
-/// Tone is deliberate: "Almost there" and a `Try again` primary, never a red
-/// "Incorrect" flood — the point is to send the user back to the position, not
-/// to train flinching.
-private struct SecondTrySheet: View {
-    let state: GameSession.SecondTryState
-    let session: GameSession
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 16) {
-            Text("Almost there")
-                .font(.title2.bold())
-
-            Text(prompt)
-                .font(.subheadline)
-                .foregroundStyle(.secondary)
-                .fixedSize(horizontal: false, vertical: true)
-
-            Spacer(minLength: 0)
-
-            HStack(spacing: 12) {
-                if state.hintLevel < 2 {
-                    Button {
-                        session.requestHint()
-                    } label: {
-                        Label("Get help", systemImage: "sparkles")
-                            .font(.subheadline)
-                    }
-                    .buttonStyle(.plain)
-                    .foregroundStyle(.secondary)
-                }
-
-                Spacer()
-
-                Button("Try again") {
-                    // Dismissing returns the user to the board with the move
-                    // already retracted by GameSession.
-                }
-                .buttonStyle(.borderedProminent)
-            }
-        }
-        .padding(20)
-    }
-
-    private var prompt: String {
-        switch state.hintLevel {
-        case 0: "That move gives something away. Take another look before you commit."
-        case 1: "Look at the highlighted square. What does it let them do?"
-        default: "That was their idea. Find a move that deals with it."
-        }
-    }
-}
-
-/// Named opponents with traits instead of numbered difficulty levels.
-enum OpponentRoster {
-    struct Opponent: Sendable, Hashable {
-        var name: String
-        var trait: String
-        var rating: Int
-    }
-
-    private static let roster: [Opponent] = [
-        Opponent(name: "Mira", trait: "grabs material, forgets her king", rating: 850),
-        Opponent(name: "Oscar", trait: "trades early, hates pressure", rating: 1050),
-        Opponent(name: "Petra", trait: "solid, punishes loose pieces", rating: 1250),
-        Opponent(name: "Dane", trait: "sharp openings, drifts later", rating: 1450),
-        Opponent(name: "Ines", trait: "positional, squeezes endgames", rating: 1650),
-        Opponent(name: "Kolya", trait: "tactical, rarely misses a shot", rating: 1900),
-        Opponent(name: "Vera", trait: "no weaknesses to speak of", rating: 2150),
-    ]
-
-    static func opponent(forRating rating: Int) -> Opponent {
-        let nearest = roster.min { abs($0.rating - rating) < abs($1.rating - rating) }
-        var result = nearest ?? roster[1]
-        result.rating = rating
-        return result
     }
 }

@@ -47,14 +47,16 @@ struct BoardSquaresLayer: View {
       }
 
       guard style.showsCoordinates, side > 12 else { return }
-      let coordinateColor = style.coordinateColor(contrast).color(colorScheme)
-      let fontSize = min(side * 0.34, max(7, side * 0.17 * typeScale))
+      let fontSize = BoardMetrics.coordinateFontSize(squareSide: side, typeScale: typeScale)
 
+      // Inside the edge squares, never in a gutter: a gutter steals width from
+      // the surface the user looks at more than any other, and it does it on
+      // every screen for the sake of a label most players never read.
       for column in 0..<8 {
         guard let square = geometry.square(column: column, row: 7) else { continue }
         let text = Text(square.file.rawValue)
           .font(.system(size: fontSize, weight: .semibold))
-          .foregroundStyle(coordinateColor)
+          .foregroundStyle(style.coordinateColor(on: square.color, contrast: contrast).color(colorScheme))
         let frame = geometry.frame(of: square)
         context.draw(
           context.resolve(text),
@@ -67,7 +69,7 @@ struct BoardSquaresLayer: View {
         guard let square = geometry.square(column: 0, row: row) else { continue }
         let text = Text(verbatim: "\(square.rank.value)")
           .font(.system(size: fontSize, weight: .semibold).monospacedDigit())
-          .foregroundStyle(coordinateColor)
+          .foregroundStyle(style.coordinateColor(on: square.color, contrast: contrast).color(colorScheme))
         let frame = geometry.frame(of: square)
         context.draw(
           context.resolve(text),

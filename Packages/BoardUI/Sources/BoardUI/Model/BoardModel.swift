@@ -51,14 +51,36 @@ final class BoardModel {
   /// Set when the position changes under a press that is still in flight.
   private var pressInvalidated = false
 
+  /// The rings and the material number thrown off by the last capture.
+  private(set) var captureFlourish: CaptureFlourish?
+  private var flourishToken = 0
+
+  /// Whether captures announce what they were worth. Off unless the board is
+  /// one the user is actually playing on — see ``BoardView``.
+  var emitsMaterialFeedback = false
+
   // MARK: Feedback counters
   //
   // `.sensoryFeedback` fires on a value *change*, so each event needs its own
   // monotonically increasing trigger rather than a shared enum.
+  //
+  // There are more counters than there are haptics on purpose. The board
+  // records everything that happened; ``BoardView`` decides which of them are
+  // worth a buzz. A 40-move game that vibrates twice a move feels defective, so
+  // the ones that fire are the ones the *user* caused.
 
+  /// Any position change at all, the engine's replies included.
   private(set) var placementTicks = 0
+  /// A move the user played and the caller accepted.
+  private(set) var moveTicks = 0
+  /// A piece was picked up.
+  private(set) var liftTicks = 0
+  /// Something came off the board.
   private(set) var captureTicks = 0
+  /// Check was newly delivered — not merely still standing.
   private(set) var checkTicks = 0
+  /// A move was refused.
+  private(set) var rejectionTicks = 0
 
   struct DragState: Equatable {
     var origin: Square
@@ -87,6 +109,18 @@ final class BoardModel {
   struct Rejection: Equatable {
     var square: Square
     var reason: String?
+    var token: Int
+  }
+
+  /// A capture worth marking: where it happened and what it was worth.
+  ///
+  /// `token` rather than the square alone gives the view a fresh identity for
+  /// every capture, so two captures on the same square in a row each get their
+  /// own rings instead of the second one being diffed away as "no change".
+  struct CaptureFlourish: Equatable, Identifiable {
+    var id: Int { token }
+    var square: Square
+    var delta: MaterialDelta
     var token: Int
   }
 
@@ -147,8 +181,10 @@ final class BoardModel {
   func update(position newPosition: Position) {
     guard newPosition != position else { return }
 
+    let previousPosition = position
     let previousPieceCount = position.pieces.count
     let previousTokens = layout.tokens
+    let previousCheck = checkedColor
     position = newPosition
     board = Board(position: newPosition)
     checkedColor = Self.checkedKing(in: newPosition)
@@ -176,9 +212,33 @@ final class BoardModel {
     placementTicks += 1
     if newPosition.pieces.count < previousPieceCount {
       captureTicks += 1
+      raiseCaptureFlourish(from: previousPosition, to: newPosition)
     }
-    if checkedColor != nil {
+    // On the transition only. A check that is still standing three moves later
+    // is not news, and buzzing about it every ply is how a haptic budget gets
+    // spent on nothing.
+    if let checkedColor, checkedColor != previousCheck {
       checkTicks += 1
+    }
+  }
+
+  /// Marks a capture with the material it moved, if this board does that.
+  ///
+  /// The square is the one the piece came *off*, which for every capture except
+  /// en passant is also the square the capturer landed on. En passant is the
+  /// more interesting case anyway: the rings appear where the pawn actually
+  /// went, which is the half of en passant people get wrong.
+  private func raiseCaptureFlourish(from previous: Position, to current: Position) {
+    guard emitsMaterialFeedback, let square = departing.first?.square else { return }
+    let delta = MaterialDelta.between(previous, current, for: orientation)
+    guard !delta.isZero else { return }
+
+    flourishToken += 1
+    let token = flourishToken
+    captureFlourish = CaptureFlourish(square: square, delta: delta, token: token)
+    Task { @MainActor in
+      try? await Task.sleep(for: .milliseconds(900))
+      if self.captureFlourish?.token == token { self.captureFlourish = nil }
     }
   }
 
@@ -192,9 +252,10 @@ final class BoardModel {
     departureToken += 1
     let token = departureToken
     Task { @MainActor in
-      // Slightly longer than the piece slide so the capture never uncovers an
-      // empty square, short enough that it is never noticed as a delay.
-      try? await Task.sleep(for: .milliseconds(220))
+      // Long enough to cover the piece slide *and* the scale-and-fade the
+      // captured piece leaves on, short enough that it is never noticed as a
+      // delay.
+      try? await Task.sleep(for: .milliseconds(280))
       if self.departureToken == token { self.departing = [] }
     }
   }
@@ -239,10 +300,21 @@ final class BoardModel {
     if let occupant = position.piece(at: square) {
       return occupant.color != position.sideToMove
     }
-    guard let selection, let piece = position.piece(at: selection), piece.kind == .pawn else {
-      return false
+    guard let selection else { return false }
+    return wouldCapture(from: selection, to: square)
+  }
+
+  /// Whether playing `from`→`to` in the current position takes something.
+  ///
+  /// Spelled without reference to the selection so it can be asked about a move
+  /// that is being resolved rather than composed — which is how the haptics
+  /// avoid firing "piece landed" and "piece taken" back to back for one capture.
+  func wouldCapture(from: Square, to: Square) -> Bool {
+    if let occupant = position.piece(at: to) {
+      return occupant.color != position.sideToMove
     }
-    return selection.fileNumber != square.fileNumber
+    guard let piece = position.piece(at: from), piece.kind == .pawn else { return false }
+    return from.fileNumber != to.fileNumber
   }
 
   /// The square holding the king that is currently in check, if any.
@@ -349,7 +421,11 @@ final class BoardModel {
       select(square)
       record.selectedOnPress = true
     }
-    beginDrag(at: square, location: point)
+    // The piece lifts at the *centre* of its square, not at the touch point. A
+    // press near a square's edge would otherwise yank the piece sideways under
+    // the finger before the drag had even begun, which reads as the board
+    // having mis-registered the touch.
+    beginDrag(at: square, location: geometry.center(of: square))
   }
 
   /// What a press that never travelled means, expressed purely in squares.
@@ -488,6 +564,11 @@ final class BoardModel {
     case .accepted:
       // The caller will publish a new position; clear local state now so the
       // board does not show a stale selection for a frame.
+      // A capture raises its own, heavier tap when the position arrives. Firing
+      // "landed" here as well would give one capture two buzzes in 200ms, which
+      // is the difference between a board that responds and a board that
+      // rattles.
+      if !wouldCapture(from: from, to: to) { moveTicks += 1 }
       clearSelection()
       endDrag()
       // A move that lands answers the refusal that came before it. Leaving the
@@ -547,13 +628,18 @@ final class BoardModel {
       target: square,
       isActive: false
     )
+    liftTicks += 1
   }
 
   func updateDrag(location: CGPoint, target: Square, isActive: Bool) {
     guard var current = drag, !current.isReturning else { return }
-    current.location = location
-    current.target = target
     current.isActive = current.isActive || isActive
+    // Until the press has actually travelled, the piece stays where it was
+    // lifted — the centre of its square. Tracking a stationary finger's exact
+    // pixel would slide the piece by however far from the middle the tap landed,
+    // and a piece that shifts when you touch it reads as a mis-registered touch.
+    if current.isActive { current.location = location }
+    current.target = target
     drag = current
   }
 
@@ -573,6 +659,7 @@ final class BoardModel {
   /// travels back reads as "no, not that one".
   func snapBack(to square: Square, reason: String?, in geometry: BoardGeometry? = nil) {
     rejectionToken += 1
+    rejectionTicks += 1
     rejection = Rejection(square: square, reason: reason, token: rejectionToken)
 
     if var current = drag {
@@ -584,7 +671,9 @@ final class BoardModel {
       drag = current
       let token = rejectionToken
       Task { @MainActor in
-        try? await Task.sleep(for: .milliseconds(180))
+        // Long enough for the `.gentle` spring to land and settle its
+        // overshoot; cutting it short strands the piece mid-flight.
+        try? await Task.sleep(for: .seconds(BoardMetrics.snapBackFlight))
         if self.drag?.isReturning == true { self.drag = nil }
         try? await Task.sleep(for: .milliseconds(1_600))
         if self.rejection?.token == token { self.rejection = nil }

@@ -123,7 +123,13 @@ final class GameSession {
     private let humanizer: Humanizer
     private let persistence: GamePersistence?
     private let startedAt = Date()
-    private var moveStartedAt = Date()
+    /// When the side to move started thinking.
+    ///
+    /// Readable so the play surface can tick the clocks down between moves:
+    /// `userClockMs` and `opponentClockMs` only change when a move *completes*,
+    /// so a view that reads them directly draws a frozen clock — and the running
+    /// clock is what this app shows instead of a "thinking" spinner.
+    private(set) var moveStartedAt = Date()
     private var opponentTask: Task<Void, Never>?
     /// Retained so the save is not cancelled by the view going away when the
     /// user leaves the finished-game screen.
@@ -248,9 +254,26 @@ final class GameSession {
             return true
         }
 
+        // The opponent's think time starts now, not when the user picked the
+        // piece up: `checkClock` measures the side on move against
+        // `moveStartedAt`, so leaving it at the user's start would charge the
+        // opponent for the user's thinking and flag them early.
+        moveStartedAt = Date()
         phase = .opponentThinking
         await playOpponentMove()
         return true
+    }
+
+    /// Returns to the position the blunder was retracted from so the user can
+    /// try again.
+    ///
+    /// Without this, `.secondTry` has no exit but playing the bad move: the
+    /// board only accepts moves in `.userToMove`, so a retracted blunder would
+    /// leave the game unplayable.
+    func resumeAfterSecondTry() {
+        guard case .secondTry = phase else { return }
+        phase = .userToMove
+        moveStartedAt = Date()
     }
 
     /// Advances the second-try hint ladder one rung. Never skips and never resets.
@@ -271,6 +294,7 @@ final class GameSession {
             return
         }
         lastMove = (move.start, move.end)
+        moveStartedAt = Date()
         phase = .opponentThinking
         await playOpponentMove()
     }

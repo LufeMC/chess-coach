@@ -16,8 +16,13 @@ import SwiftUI
 ///
 /// Layers, back to front:
 /// 1. squares (`Canvas`) 2. highlights below pieces 3. arrows 4. pieces
-/// 5. highlights above pieces 6. the dragged piece 7. input, which carries the
-/// per-square accessibility grid with it 8. promotion picker.
+/// 5. highlights above pieces 6. the dragged piece 7. the capture flourish
+/// 8. input, which carries the per-square accessibility grid with it
+/// 9. promotion picker.
+///
+/// Only the grid is fixed. Layer 1 is a `Canvas` with nothing animatable in it
+/// and sits outside every animation context in this file, because the one rule
+/// the board never breaks is that the squares themselves do not move.
 public struct BoardView: View {
 
   private let position: Position
@@ -59,6 +64,8 @@ public struct BoardView: View {
     // The board is always square; letting it stretch would put the pieces on an
     // oval grid, and every drop target would be wrong.
     .aspectRatio(1, contentMode: .fit)
+    .onAppear { model.emitsMaterialFeedback = emitsMaterialFeedback }
+    .onChange(of: emitsMaterialFeedback) { _, newValue in model.emitsMaterialFeedback = newValue }
     .onChange(of: position) { _, newValue in model.update(position: newValue) }
     .onChange(of: orientation) { _, newValue in model.orientation = newValue }
     .modifier(BoardFeedback(model: model))
@@ -71,17 +78,20 @@ public struct BoardView: View {
   @ViewBuilder
   private func board(_ geometry: BoardGeometry) -> some View {
     ZStack(alignment: .topLeading) {
+      // The grid, and only the grid. It is a `Canvas` with no animatable state
+      // by design: the board itself never moves, ever.
       BoardSquaresLayer(geometry: geometry, style: style)
 
       BoardHighlightLayer(
         highlights: allHighlights,
         geometry: geometry,
         style: style,
-        abovePieces: false
+        abovePieces: false,
+        staggerOrigin: model.selection
       )
 
       #if os(macOS)
-        // Pointer feedback belongs under the pieces: a ring drawn over a piece
+        // Pointer feedback belongs under the pieces: a mark drawn over a piece
         // reads as a selection, which it is not.
         hoverMark(geometry)
       #endif
@@ -93,22 +103,31 @@ public struct BoardView: View {
         departing: model.departing,
         geometry: geometry,
         style: style,
-        // Hidden for the whole drag, the snap-back included: while the ghost is
-        // travelling home there must not be a second copy already sitting there.
-        draggingTokenID: model.drag?.tokenID
+        draggingTokenID: model.drag?.tokenID,
+        // A quarter-strength ghost once the piece is genuinely travelling, and
+        // nothing at all while it is merely pressed or flying home — in both of
+        // those cases the lifted piece is sitting directly over its own square
+        // and a ghost underneath would just look like a rendering fault.
+        ghostOpacity: ghostOpacity
       )
 
       BoardHighlightLayer(
         highlights: allHighlights,
         geometry: geometry,
         style: style,
-        abovePieces: true
+        abovePieces: true,
+        staggerOrigin: model.selection
       )
 
       rejectionMark(geometry)
 
       if let drag = model.drag, let token = model.layout.tokens.first(where: { $0.id == drag.tokenID }) {
         BoardDragLayer(drag: drag, token: token, geometry: geometry, style: style)
+      }
+
+      if let flourish = model.captureFlourish {
+        CaptureFlourishLayer(flourish: flourish, geometry: geometry, style: style)
+          .id(flourish.id)
       }
 
       inputSurface(geometry)
@@ -121,19 +140,23 @@ public struct BoardView: View {
           onChoose: { model.choosePromotion($0, geometry: geometry) },
           onCancel: { model.cancelPromotion() }
         )
+        .transition(.opacity.combined(with: .scale(scale: 0.92)))
+        .animation(.boardSnappy, value: model.pendingPromotion)
       }
 
       rejectionReason(geometry)
     }
-    .animation(.snappy(duration: 0.2), value: model.pendingPromotion)
   }
 
   /// Caller highlights, plus the ones the board owns: selection, legal
-  /// destinations and check. The board's own marks come last so a caller can
-  /// never accidentally suppress "your king is in check".
+  /// destinations, the live drop target and check. The board's own marks come
+  /// last so a caller can never accidentally suppress "your king is in check".
   private var allHighlights: [SquareHighlight] {
     var result = highlights
     result.append(contentsOf: model.interactionHighlights())
+    if let drag = model.drag, drag.isActive, !drag.isReturning, drag.target != drag.origin {
+      result.append(SquareHighlight(drag.target, .dropTarget))
+    }
     if let checked = model.checkedKingSquare {
       result.append(SquareHighlight(checked, .check))
     }
@@ -143,18 +166,41 @@ public struct BoardView: View {
     return result.filter { seen.insert($0.id).inserted }
   }
 
+  /// What is left on the origin square while a piece is in the air.
+  private var ghostOpacity: Double {
+    guard let drag = model.drag, drag.isActive, !drag.isReturning else { return 0 }
+    return BoardMetrics.dragGhost
+  }
+
+  /// Whether captures on this board announce what they were worth.
+  ///
+  /// Two gates, and both have to open. The style flag is the caller's switch;
+  /// the interaction mode is the board's own, because a review scrubber and a
+  /// 150pt filmstrip thumbnail both replay captures constantly and neither
+  /// wants rings thrown across it every time the reader drags the scrubber.
+  /// Material feedback is for a board somebody is playing on.
+  private var emitsMaterialFeedback: Bool {
+    style.showsMaterialFeedback && interaction.allowsMoves
+  }
+
   @ViewBuilder
   private func rejectionMark(_ geometry: BoardGeometry) -> some View {
     if let rejection = model.rejection {
+      // Inset and thinner than it used to be. The square already has the
+      // selection wash on it and the piece has just flown back to it under the
+      // finger — the ring only has to say *which* square was refused, and a
+      // heavy red border reads as an error state the board is stuck in.
+      let ring = BoardMetrics.dropTargetRing(squareSide: geometry.squareSide)
       Rectangle()
         .strokeBorder(
-          style.danger.color(colorScheme).opacity(0.85),
-          lineWidth: geometry.squareSide * 0.07
+          style.danger.color(colorScheme).opacity(0.7),
+          lineWidth: ring.lineWidth
         )
+        .padding(ring.inset)
         .frame(width: geometry.squareSide, height: geometry.squareSide)
         .position(geometry.center(of: rejection.square))
         .frame(width: geometry.side, height: geometry.side, alignment: .topLeading)
-        .transition(.opacity)
+        .transition(.asymmetric(insertion: .identity, removal: .opacity))
         .allowsHitTesting(false)
         .animation(.easeOut(duration: 0.18), value: rejection.token)
     }
@@ -184,8 +230,12 @@ public struct BoardView: View {
     @ViewBuilder
     private func hoverMark(_ geometry: BoardGeometry) -> some View {
       if let hovered = model.hoveredSquare, interaction.allowsPieceSelection {
+        // A ring, not a wash: a wash at pointer strength is indistinguishable
+        // from a weak selection, and the pointer is not a selection.
+        let ring = BoardMetrics.dropTargetRing(squareSide: geometry.squareSide)
         Rectangle()
-          .fill(style.accent.color(colorScheme).opacity(0.12))
+          .strokeBorder(style.accent.color(colorScheme).opacity(0.35), lineWidth: ring.lineWidth)
+          .padding(ring.inset)
           .frame(width: geometry.squareSide, height: geometry.squareSide)
           .position(geometry.center(of: hovered))
           .frame(width: geometry.side, height: geometry.side, alignment: .topLeading)
@@ -252,6 +302,22 @@ public struct BoardView: View {
 // MARK: - Haptics
 
 /// Sensory feedback, isolated so `BoardView.body` does not sprout `#if os` forks.
+///
+/// The budget is the design. A 40-move game that buzzes twice a move feels
+/// defective, so the board records far more events than it plays, and this is
+/// where the choosing happens:
+///
+/// - **Lift** and **legal drop** are the two ends of the user's own gesture.
+/// - **Rigid** on a refusal, because "no" has to feel different from "yes" in
+///   the hand, not only on the screen.
+/// - **Heavy** on a capture, whoever made it — losing a rook to a move you did
+///   not see is the moment you most need to be told about.
+/// - **Warning** on check being newly delivered, the one event a player must
+///   never miss.
+///
+/// Notably absent: the opponent's ordinary moves. `placementTicks` counts them
+/// and nothing listens. Marking a state change the *app* decided on is how a
+/// board ends up buzzing in someone's pocket while an engine thinks.
 private struct BoardFeedback: ViewModifier {
 
   let model: BoardModel
@@ -259,10 +325,9 @@ private struct BoardFeedback: ViewModifier {
   func body(content: Content) -> some View {
     #if os(iOS)
       content
-        // Three distinguishable taps: a quiet click when a piece lands, a
-        // heavier one when something comes off the board, and a warning pulse
-        // for check — the one event a player must never miss.
-        .sensoryFeedback(.impact(weight: .light, intensity: 0.6), trigger: model.placementTicks)
+        .sensoryFeedback(.impact(weight: .light, intensity: 0.5), trigger: model.liftTicks)
+        .sensoryFeedback(.impact(weight: .medium, intensity: 0.7), trigger: model.moveTicks)
+        .sensoryFeedback(.impact(flexibility: .rigid, intensity: 0.8), trigger: model.rejectionTicks)
         .sensoryFeedback(.impact(weight: .heavy, intensity: 0.9), trigger: model.captureTicks)
         .sensoryFeedback(.warning, trigger: model.checkTicks)
     #else
@@ -402,5 +467,58 @@ private let checkFEN = "rnb1kbnr/pppp1ppp/8/4p3/6Pq/5P2/PPPPP2P/RNBQKBNR w KQkq 
         .frame(height: 170)
     }
   }
+  .padding()
+}
+
+#Preview("Overlay ladder") {
+  // The one preview that has to be checked after any palette change. Reading
+  // top to bottom, the last-move wash must be plainly quieter than the
+  // selection, the dots must be legible on both square tones, and the check
+  // glow must not be mistakable for either wash.
+  BoardView(
+    position: Position(fen: checkFEN)!,
+    interaction: .replay,
+    highlights: SquareHighlight.lastMove(from: .g2, to: .g4)
+  )
+  .padding()
+}
+
+#Preview("Capture · material delta") {
+  @Previewable @State var position = Position(fen: midgameFEN)!
+
+  // Take on e5 or f7 and watch what it was worth. Green when White gains, red
+  // when White loses — the board is oriented for White, and the number is from
+  // the reader's side of the table rather than the mover's.
+  VStack {
+    BoardView(
+      position: position,
+      interaction: .userMove { from, to in
+        var board = Board(position: position)
+        guard board.move(pieceAt: from, to: to) != nil else { return .rejected }
+        position = board.position
+        return .accepted
+      }
+    )
+    Button("Reset") { position = Position(fen: midgameFEN)! }
+      .buttonStyle(.bordered)
+  }
+  .padding()
+}
+
+#Preview("Capture · feedback off") {
+  @Previewable @State var position = Position(fen: midgameFEN)!
+
+  // What Review and the filmstrip get: the capture still animates out, but no
+  // rings and no number.
+  BoardView(
+    position: position,
+    interaction: .userMove { from, to in
+      var board = Board(position: position)
+      guard board.move(pieceAt: from, to: to) != nil else { return .rejected }
+      position = board.position
+      return .accepted
+    },
+    style: .default.showingMaterialFeedback(false)
+  )
   .padding()
 }

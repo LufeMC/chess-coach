@@ -428,7 +428,10 @@ struct BoardInputTests {
       interaction: .userMove { _, _ in .rejected }
     )
 
-    try? await Task.sleep(for: .milliseconds(300))
+    // The refused piece flies home on `.gentle`, which takes longer than a
+    // snappy dismissal would; the board only lets go of the drag once the
+    // spring has landed, or the piece would jump the last of the way.
+    try? await Task.sleep(for: .seconds(BoardMetrics.snapBackFlight + 0.15))
     #expect(model.drag == nil)
 
     var played = 0

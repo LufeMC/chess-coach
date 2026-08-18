@@ -68,12 +68,26 @@ public struct PieceRenderer: Hashable, Sendable, Identifiable {
     self.outlineWidth = outlineWidth
   }
 
-  /// Cburnett — the Lichess default, bundled with this package.
+  /// Staunty — the default set, bundled with this package.
   ///
-  /// The artwork carries its own fills and outlines, so the body/outline
-  /// colours below are unused for this set. It is the default because the
-  /// built-in vector silhouettes read as placeholder art next to it, and the
-  /// board is the surface the user looks at more than any other.
+  /// Chunky, soft-edged and subtly shaded, which is what makes it survive at
+  /// phone size: at a 45pt square, thin classic line art loses its outline to
+  /// the pixel grid and the pieces flatten into symbols. Staunty's weight is
+  /// also what lets the board underneath go as quiet as it does — low-contrast
+  /// board, high-contrast pieces only works if the pieces hold up their end.
+  ///
+  /// The artwork carries its own fills, outlines and shading, so the
+  /// body/outline colours below are unused for this set.
+  public static let staunty = PieceRenderer(
+    name: "Staunty",
+    source: .bundledImages(prefix: "staunty-")
+  )
+
+  /// Cburnett — the Lichess default, also bundled.
+  ///
+  /// Kept as the traditional alternative for players who read positions faster
+  /// in the set they have used for twenty years, which is a real thing and not
+  /// worth arguing with.
   public static let cburnett = PieceRenderer(
     name: "Cburnett",
     source: .bundledImages(prefix: "cburnett-")
@@ -84,6 +98,13 @@ public struct PieceRenderer: Hashable, Sendable, Identifiable {
 
   /// System glyph set.
   public static let unicode = PieceRenderer(name: "Unicode", source: .unicode)
+
+  /// Every set that ships with the package, in presentation order.
+  ///
+  /// The two bundled artwork sets first; the vector and glyph fallbacks are
+  /// listed after them because they exist for previews and thumbnails, not as
+  /// something anyone would choose.
+  public static let builtIn: [PieceRenderer] = [.staunty, .cburnett, .vector, .unicode]
 
   /// An image-backed set. Falls back to vectors for any missing asset.
   public static func images(
@@ -173,7 +194,7 @@ public struct PieceView: View {
   public init(
     kind: Piece.Kind,
     color: Piece.Color,
-    renderer: PieceRenderer = .cburnett,
+    renderer: PieceRenderer = .staunty,
     size: CGFloat
   ) {
     self.kind = kind
@@ -182,13 +203,24 @@ public struct PieceView: View {
     self.size = size
   }
 
-  public init(piece: Piece, renderer: PieceRenderer = .cburnett, size: CGFloat) {
+  public init(piece: Piece, renderer: PieceRenderer = .staunty, size: CGFloat) {
     self.init(kind: piece.kind, color: piece.color, renderer: renderer, size: size)
   }
 
   public var body: some View {
     content
+      // Every set is inset to the same fraction of the square, whatever it
+      // draws inside that box. A piece that touches the square edges makes a
+      // dense middlegame read as one solid block and leaves a capture ring
+      // nowhere to go.
+      .padding(BoardMetrics.pieceInset(squareSide: size))
       .frame(width: size, height: size)
+      // A soft contact shadow, not an elevation shadow — very tight, almost no
+      // offset. On a board this pale it is what makes a piece read as an object
+      // resting on a surface rather than a sticker printed on it, and it is the
+      // last line of separation for a near-white piece on a near-white square.
+      .compositingGroup()
+      .shadow(color: .black.opacity(0.20), radius: size * 0.022, x: 0, y: size * 0.018)
       .accessibilityLabel(Text("\(color.description) \(kind.description)"))
   }
 
@@ -217,9 +249,6 @@ public struct PieceView: View {
   }
 
   private var vector: some View {
-    // The piece is inset inside its square: a piece that touches the square
-    // edges makes a dense middlegame look like a solid block of pieces.
-    let inset = size * 0.06
     let body = renderer.body(for: color).color(colorScheme)
     let outline = renderer.outline(for: color, contrast: contrast).color(colorScheme)
 
@@ -233,16 +262,13 @@ public struct PieceView: View {
       PieceDetailShape(kind: kind)
         .fill(outline)
     }
-    .padding(inset)
-    .compositingGroup()
-    .shadow(color: .black.opacity(0.28), radius: size * 0.02, x: 0, y: size * 0.012)
   }
 
   private var glyph: some View {
     // The solid glyphs are used for both colours — the outline glyphs (♔♕♖)
     // render inconsistently across system fonts and vanish on light squares.
     Text(solidGlyph)
-      .font(.system(size: size * 0.82))
+      .font(.system(size: size * 0.92))
       .foregroundStyle(renderer.body(for: color).color(colorScheme))
       .shadow(color: renderer.outline(for: color, contrast: contrast).color(colorScheme), radius: 0.5)
       .minimumScaleFactor(0.5)

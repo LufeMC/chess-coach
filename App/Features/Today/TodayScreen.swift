@@ -1,36 +1,57 @@
+//
+//  TodayScreen.swift
+//  ChessCoach
+//
+
 import SwiftUI
 
 /// The daily loop: 1 game → 3 moments → 10 puzzles.
 ///
-/// One filled button on the screen, and it names the *next incomplete step*
-/// rather than offering a menu. The three steps are status, not buttons.
+/// ## Four states, one screen
+///
+/// First run, mid-progress, complete and returned-after-a-gap are all the *same
+/// screen* with different content. Nothing is swapped out for a trophy, a
+/// mascot, or a marketing empty state. That continuity is what makes the
+/// checklist satisfying to finish and survivable to miss: the user always
+/// recognises where they are, and the rung card and the week strip are still
+/// exactly where they left them.
+///
+/// One filled button, and it names the next incomplete step and its cost rather
+/// than offering a menu. The three steps are status, not buttons.
 struct TodayScreen: View {
-    @Environment(AppModel.self) private var model
 
-    // Placeholder progress until the training services are wired in.
-    @State private var gamePlayed = false
-    @State private var momentsReviewed = 0
-    @State private var puzzlesDone = 0
+    @Environment(AppModel.self) private var model
+    @State private var todayModel = TodayModel()
 
     var body: some View {
+        let plan = todayModel.plan
+
         ScrollView {
-            VStack(spacing: 16) {
-                RungCard(
-                    rung: 2,
-                    title: "Tactical Vision",
-                    progress: 0.35,
-                    focusHabit: "check opponent threats"
+            VStack(alignment: .leading, spacing: 16) {
+                // Lead with the present. On a return, "Good to see you." is the
+                // first thing read — before any accounting of the absence.
+                returnBanner(plan)
+
+                RungCard(rung: todayModel.rung, isMeasuring: todayModel.isRungProgressPending)
+
+                StreakStrip(
+                    slots: todayModel.daySlots,
+                    streak: todayModel.streak,
+                    todayStarted: !(todayModel.snapshot?.progress ?? .zero).isUntouched
                 )
-                StreakStrip(completedDays: [0, 1, 2, 4], today: 5, streak: 4)
-                stepList
+
+                completionBanner(plan)
+
+                checklist(plan)
             }
             .padding(.horizontal)
             .padding(.top, 8)
+            .padding(.bottom, 8)
+            .animation(Motion.standard, value: plan)
         }
+        .background(Palette.surfaceGround.dynamic.ignoresSafeArea())
         .navigationTitle("Today")
         #if os(iOS)
-            // Settings lives behind a gear rather than a fifth tab: it is
-            // configuration, not part of the daily loop.
             .toolbar {
                 // Past games live behind the history glyph rather than a fifth
                 // tab: reviewing is something you do after a game, not a
@@ -43,6 +64,8 @@ struct TodayScreen: View {
                     }
                     .accessibilityLabel("Past games")
                 }
+                // Settings lives behind a gear rather than a fifth tab: it is
+                // configuration, not part of the daily loop.
                 ToolbarItem(placement: .topBarTrailing) {
                     NavigationLink {
                         SettingsScreen()
@@ -54,213 +77,207 @@ struct TodayScreen: View {
             }
         #endif
         .safeAreaInset(edge: .bottom) {
-            primaryAction
-                .padding(.horizontal)
-                .padding(.vertical, 12)
-                .background(.regularMaterial)
+            actionBar(plan)
+        }
+        .task { await todayModel.load() }
+    }
+
+    // MARK: Banners
+
+    @ViewBuilder
+    private func returnBanner(_ plan: TodayPlan) -> some View {
+        if plan.greeting != nil || plan.streakNote != nil {
+            VStack(alignment: .leading, spacing: 4) {
+                if let greeting = plan.greeting {
+                    Text(greeting)
+                        .typeRole(.title)
+                }
+                if let note = plan.streakNote {
+                    // Said once, without a number. The count of what was lost
+                    // has exactly one effect, and it is not returning tomorrow.
+                    Text(note)
+                        .typeRole(.body, appliesForeground: false)
+                        .foregroundStyle(.secondary)
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .accessibilityElement(children: .combine)
         }
     }
 
-    private var stepList: some View {
-        VStack(spacing: 12) {
-            StepRow(
-                index: 1,
-                title: "1 game",
-                detail: gamePlayed ? "done" : "0/1",
-                state: gamePlayed ? .done : .current
-            )
-            StepRow(
-                index: 2,
-                title: "3 moments",
-                detail: "\(momentsReviewed)/3",
-                state: stepState(done: momentsReviewed >= 3, unlocked: gamePlayed)
-            )
-            StepRow(
-                index: 3,
-                title: "10 puzzles",
-                detail: "\(puzzlesDone)/10",
-                state: stepState(done: puzzlesDone >= 10, unlocked: momentsReviewed >= 3)
-            )
-        }
-        .padding(.vertical, 4)
-    }
-
-    private func stepState(done: Bool, unlocked: Bool) -> StepRow.State {
-        if done { return .done }
-        return unlocked ? .current : .pending
-    }
-
-    private var primaryAction: some View {
-        Button {
-            model.navigate(to: nextRoute)
-        } label: {
-            Text(nextActionTitle)
-                .frame(maxWidth: .infinity)
-        }
-        .buttonStyle(.borderedProminent)
-        .controlSize(.large)
-    }
-
-    private var nextActionTitle: String {
-        if !gamePlayed { return "Play Oscar" }
-        if momentsReviewed < 3 { return "Review 3 moments" }
-        if puzzlesDone < 10 { return "Train 10 puzzles" }
-        return "Done for today"
-    }
-
-    private var nextRoute: AppModel.Route {
-        if !gamePlayed { return .play }
-        if momentsReviewed < 3 { return .play }
-        return .train
-    }
-}
-
-/// Rung + weekly focus in a single card — the habit rides as a chip rather than
-/// claiming a card of its own, so the screen keeps one clear hierarchy.
-private struct RungCard: View {
-    let rung: Int
-    let title: String
-    let progress: Double
-    let focusHabit: String
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            HStack {
-                Text("RUNG \(rung)")
-                    .font(.caption.weight(.semibold))
-                    .textCase(.uppercase)
-                    .tracking(0.6)
+    @ViewBuilder
+    private func completionBanner(_ plan: TodayPlan) -> some View {
+        if let note = plan.completionNote {
+            VStack(alignment: .leading, spacing: 4) {
+                Text(TodayPlanner.completionHeadline)
+                    .typeRole(.title)
+                // Identity, not praise. "You're on fire" is a claim about a
+                // mood that has expired by morning; a vote toward the player
+                // you are becoming is as true on day 400 as on day 4.
+                Text(note)
+                    .typeRole(.body, appliesForeground: false)
                     .foregroundStyle(.secondary)
-                Spacer()
-                Text("Focus: \(focusHabit)")
-                    .font(.caption2.weight(.medium))
-                    .padding(.horizontal, 8)
-                    .padding(.vertical, 4)
-                    .background(Capsule().fill(.quaternary))
+                    .fixedSize(horizontal: false, vertical: true)
             }
-
-            Text(title)
-                .font(.title3.bold())
-
-            Capsule()
-                .fill(.quaternary)
-                .frame(height: 6)
-                .overlay(alignment: .leading) {
-                    GeometryReader { proxy in
-                        Capsule()
-                            .fill(Color.accentColor)
-                            .frame(width: proxy.size.width * progress)
-                    }
-                }
-                .frame(height: 6)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.top, 4)
+            .accessibilityElement(children: .combine)
         }
-        .padding(16)
-        .background(RoundedRectangle(cornerRadius: 16, style: .continuous).fill(.quaternary))
+    }
+
+    // MARK: Checklist
+
+    private func checklist(_ plan: TodayPlan) -> some View {
+        VStack(alignment: .leading, spacing: 12) {
+            // The tally lives here — small caps, right-aligned, dimmer — and
+            // not inside the button. A button carrying "1 of 3" is promising a
+            // tally it can only move by one.
+            SectionHeader(title: "Today", qualifier: plan.headerQualifier.accessibilityText)
+
+            VStack(spacing: 14) {
+                ForEach(Array(plan.steps.enumerated()), id: \.element.id) { index, step in
+                    TodayStepRow(state: step)
+                        .transition(
+                            .opacity.animation(Motion.staggered(index: index))
+                        )
+                }
+            }
+            .padding(16)
+            .elevation(.raised, cornerRadius: CornerRadius.card)
+        }
+        .padding(.top, 4)
+    }
+
+    // MARK: Action bar
+
+    private func actionBar(_ plan: TodayPlan) -> some View {
+        VStack(spacing: 4) {
+            TodayActionButton(action: plan.primary) { perform(plan.primary) }
+
+            if let alternative = plan.alternative {
+                TodayActionButton(action: alternative) { perform(alternative) }
+            }
+        }
+        .padding(.horizontal)
+        .padding(.top, 10)
+        .padding(.bottom, 6)
+        .background(.regularMaterial)
+    }
+
+    private func perform(_ action: TodayAction) {
+        model.navigate(to: todayModel.route(for: action.destination))
     }
 }
 
-/// A training log, not a game streak: seven small day marks, count at
-/// `.subheadline` rather than a 48pt hero.
-private struct StreakStrip: View {
-    let completedDays: Set<Int>
-    let today: Int
-    let streak: Int
+// MARK: - Previews
 
-    private let labels = ["S", "M", "T", "W", "T", "F", "S"]
+#Preview("First run") {
+    TodayPreview(progress: .zero, hasHistory: false, streakBroken: false)
+}
+
+#Preview("In progress") {
+    TodayPreview(
+        progress: DailyProgress(gamePlayed: true, momentsReviewed: 1, puzzlesDone: 0),
+        hasHistory: true,
+        streakBroken: false
+    )
+}
+
+#Preview("Complete") {
+    TodayPreview(
+        progress: DailyProgress(gamePlayed: true, momentsReviewed: 3, puzzlesDone: 10),
+        hasHistory: true,
+        streakBroken: false
+    )
+}
+
+#Preview("Streak restarted") {
+    TodayPreview(progress: .zero, hasHistory: true, streakBroken: true)
+}
+
+/// A database-free rendering of one state, so all four can be inspected in
+/// Xcode without contriving a day's worth of rows.
+private struct TodayPreview: View {
+    let progress: DailyProgress
+    let hasHistory: Bool
+    let streakBroken: Bool
 
     var body: some View {
-        HStack {
-            HStack(spacing: 10) {
-                ForEach(0..<7, id: \.self) { day in
-                    VStack(spacing: 5) {
-                        Text(labels[day])
-                            .font(.caption2)
+        let plan = TodayPlanner.plan(
+            progress: progress,
+            hasHistory: hasHistory,
+            streakBroken: streakBroken
+        )
+
+        ScrollView {
+            VStack(alignment: .leading, spacing: 16) {
+                if let greeting = plan.greeting {
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text(greeting).typeRole(.title)
+                        if let note = plan.streakNote {
+                            Text(note)
+                                .typeRole(.body, appliesForeground: false)
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+                }
+
+                RungCard(
+                    rung: RungPresentation(
+                        rung: 2,
+                        title: "Tactical Vision",
+                        progress: hasHistory ? 0.35 : nil,
+                        focusHabit: hasHistory ? "Check opponent threats" : nil,
+                        unmeasuredNote: RungPresentation.firstRunNote
+                    ),
+                    isMeasuring: false
+                )
+
+                StreakStrip(
+                    slots: previewSlots,
+                    streak: hasHistory && !streakBroken ? .streak(4) : nil,
+                    todayStarted: !progress.isUntouched
+                )
+
+                if let note = plan.completionNote {
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text(TodayPlanner.completionHeadline).typeRole(.title)
+                        Text(note)
+                            .typeRole(.body, appliesForeground: false)
                             .foregroundStyle(.secondary)
-                        marker(for: day)
                     }
-                    .frame(width: 24)
                 }
+
+                SectionHeader(title: "Today", qualifier: plan.headerQualifier.accessibilityText)
+
+                VStack(spacing: 14) {
+                    ForEach(plan.steps) { TodayStepRow(state: $0) }
+                }
+                .padding(16)
+                .elevation(.raised, cornerRadius: CornerRadius.card)
+
+                VStack(spacing: 4) {
+                    TodayActionButton(action: plan.primary) {}
+                    if let alternative = plan.alternative {
+                        TodayActionButton(action: alternative) {}
+                    }
+                }
+                .padding(.top, 8)
             }
-
-            Spacer()
-
-            HStack(spacing: 4) {
-                Image(systemName: "flame.fill")
-                Text("\(streak)")
-                    .monospacedDigit()
-            }
-            .font(.subheadline.weight(.medium))
-            .foregroundStyle(.secondary)
+            .padding()
         }
-        .padding(14)
-        .background(RoundedRectangle(cornerRadius: 14, style: .continuous).fill(.quaternary))
+        .background(Palette.surfaceGround.dynamic.ignoresSafeArea())
     }
 
-    @ViewBuilder
-    private func marker(for day: Int) -> some View {
-        if completedDays.contains(day) {
-            Circle()
-                .fill(Color.accentColor)
-                .frame(width: 18, height: 18)
-                .overlay {
-                    Image(systemName: "checkmark")
-                        .font(.system(size: 9, weight: .bold))
-                        .foregroundStyle(.background)
-                }
-        } else if day == today {
-            Circle()
-                .strokeBorder(Color.accentColor, lineWidth: 2)
-                .frame(width: 18, height: 18)
-        } else {
-            Circle()
-                .fill(.quaternary)
-                .frame(width: 18, height: 18)
-        }
-    }
-}
-
-private struct StepRow: View {
-    enum State { case done, current, pending }
-
-    let index: Int
-    let title: String
-    let detail: String
-    let state: State
-
-    var body: some View {
-        HStack(spacing: 12) {
-            glyph
-                .frame(width: 24, height: 24)
-
-            Text(title)
-                .font(.body.weight(.medium))
-                .strikethrough(state == .done)
-                .foregroundStyle(state == .done ? .secondary : .primary)
-
-            Spacer()
-
-            Text(detail)
-                .font(.footnote.monospacedDigit())
-                .foregroundStyle(.secondary)
-        }
-    }
-
-    @ViewBuilder
-    private var glyph: some View {
-        switch state {
-        case .done:
-            Image(systemName: "checkmark.circle.fill")
-                .foregroundStyle(Color.accentColor)
-                .font(.title3)
-        case .current:
-            Circle()
-                .strokeBorder(Color.accentColor, lineWidth: 2)
-                .overlay {
-                    Text("\(index)")
-                        .font(.caption2.weight(.bold))
-                }
-        case .pending:
-            Circle().fill(.quaternary)
+    private var previewSlots: [DaySlot] {
+        let initials = ["S", "M", "T", "W", "T", "F", "S"]
+        let markers: [DayMarker] = hasHistory
+            ? (streakBroken
+                ? [.done, .done, .missed, .missed, .today, .tomorrow, .upcoming]
+                : [.done, .done, .done, .done, .today, .tomorrow, .upcoming])
+            : [.upcoming, .upcoming, .upcoming, .upcoming, .today, .tomorrow, .upcoming]
+        return zip(initials.indices, markers).map { index, marker in
+            DaySlot(dayKey: "d\(index)", initial: initials[index], marker: marker)
         }
     }
 }

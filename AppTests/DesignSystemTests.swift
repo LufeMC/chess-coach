@@ -1,0 +1,248 @@
+//
+//  DesignSystemTests.swift
+//  ChessCoachTests
+//
+
+import Foundation
+import SwiftUI
+import Testing
+
+@testable import ChessCoach
+
+@Suite("Design system — denominator composition")
+struct DenominatorTests {
+
+    @Test("The prose form reads as a step tally")
+    func prose() {
+        let denominator = Denominator.of(1, 3)
+        #expect(denominator.value == "1")
+        #expect(denominator.denominator == "of 3")
+        #expect(denominator.accessibilityText == "1 of 3")
+    }
+
+    @Test("The slash form keeps the separator on the demoted half")
+    func slash() {
+        let denominator = Denominator.over(72, 100)
+        #expect(denominator.value == "72")
+        #expect(denominator.denominator == "/100")
+        // VoiceOver gets a phrase, not two numbers with a slash between them.
+        #expect(denominator.accessibilityText == "72 out of 100")
+    }
+
+    @Test("The noun form pluralises")
+    func nounPluralises() {
+        #expect(Denominator.count(1, singular: "moment").denominator == "moment")
+        #expect(Denominator.count(3, singular: "moment").denominator == "moments")
+        #expect(Denominator.count(0, singular: "moment").denominator == "moments")
+    }
+
+    @Test("An irregular plural can be supplied")
+    func irregularPlural() {
+        #expect(Denominator.count(2, singular: "loss", plural: "losses").denominator == "losses")
+    }
+
+    @Test("A zero streak is unrepresentable, not rendered as zero")
+    func zeroStreakIsSuppressed() {
+        // `0 day streak` on first run is a score for a game the user has not
+        // been allowed to play yet. Returning nil makes it impossible to draw.
+        #expect(Denominator.streak(0) == nil)
+        #expect(Denominator.streak(-1) == nil)
+    }
+
+    @Test("A real streak reads in days")
+    func streakReadsInDays() {
+        #expect(Denominator.streak(1)?.accessibilityText == "1 day")
+        #expect(Denominator.streak(12)?.accessibilityText == "12 days")
+    }
+}
+
+@Suite("Design system — typography")
+struct TypographyTests {
+
+    @Test("There are exactly six roles")
+    func sixRoles() {
+        #expect(TypeRole.allCases.count == 6)
+    }
+
+    @Test("The denominator always lands on a smaller role")
+    func demotionShrinks() {
+        for role in TypeRole.allCases where role != .label {
+            let shrinks = role.demoted.size < role.size
+            #expect(shrinks, "\(role) should demote to something smaller")
+        }
+        // Label is already the floor; there is nowhere below it.
+        #expect(TypeRole.label.demoted == .label)
+    }
+
+    @Test("Labels are uppercase with positive tracking")
+    func labelTreatment() {
+        #expect(TypeRole.label.isUppercase)
+        #expect(TypeRole.label.tracking == 0.6)
+        #expect(TypeRole.label.prefersSecondaryForeground)
+    }
+
+    @Test("Only labels are uppercased")
+    func onlyLabelsAreUppercased() {
+        let uppercased = TypeRole.allCases.filter { $0.isUppercase }
+        #expect(uppercased == [TypeRole.label])
+    }
+
+    @Test("Display sets tighter, as large bold text must")
+    func displayTracking() {
+        #expect(TypeRole.display.tracking == -0.5)
+        #expect(TypeRole.display.design == .rounded)
+    }
+
+    @Test("Metadata roles default to secondary; content roles do not")
+    func secondaryScope() {
+        #expect(TypeRole.caption.prefersSecondaryForeground)
+        #expect(!TypeRole.body.prefersSecondaryForeground)
+        #expect(!TypeRole.headline.prefersSecondaryForeground)
+        #expect(!TypeRole.title.prefersSecondaryForeground)
+    }
+
+    @Test("Sizes match the specification")
+    func sizes() {
+        #expect(TypeRole.display.size == 44)
+        #expect(TypeRole.title.size == 28)
+        #expect(TypeRole.headline.size == 17)
+        #expect(TypeRole.body.size == 17)
+        #expect(TypeRole.caption.size == 13)
+        #expect(TypeRole.label.size == 11)
+    }
+
+    @Test("Headline and body share a size but not a weight")
+    func headlineVsBody() {
+        #expect(TypeRole.headline.size == TypeRole.body.size)
+        #expect(TypeRole.headline.weight != TypeRole.body.weight)
+    }
+}
+
+@Suite("Design system — motion")
+struct MotionTests {
+
+    @Test("Stagger adds 40ms a row")
+    func staggerStep() {
+        #expect(Motion.staggerDelay(index: 0) == 0)
+        #expect(abs(Motion.staggerDelay(index: 1) - 0.040) < 0.0001)
+        #expect(abs(Motion.staggerDelay(index: 3) - 0.120) < 0.0001)
+    }
+
+    @Test("Stagger caps at six rows")
+    func staggerCaps() {
+        let cap = Motion.staggerDelay(index: Motion.staggerCap)
+        #expect(Motion.staggerDelay(index: 7) == cap)
+        #expect(Motion.staggerDelay(index: 40) == cap)
+        #expect(abs(cap - 0.240) < 0.0001)
+    }
+
+    @Test("A negative index is clamped rather than producing a negative delay")
+    func staggerClampsLow() {
+        #expect(Motion.staggerDelay(index: -3) == 0)
+    }
+
+    @Test("The non-spring durations are the three specified")
+    func durations() {
+        #expect(Motion.crossfadeDuration == 0.15)
+        #expect(Motion.colorShiftDuration == 0.25)
+        #expect(Motion.contentSwapDuration == 0.35)
+    }
+}
+
+@Suite("Design system — haptics budget")
+struct HapticsTests {
+
+    @Test("The event map matches the standards table")
+    func eventMap() {
+        #expect(Haptics.feedback(for: .pieceLifted) == .impact(.light))
+        #expect(Haptics.feedback(for: .legalDrop) == .impact(.medium))
+        #expect(Haptics.feedback(for: .illegalDrop) == .impact(.rigid))
+        #expect(Haptics.feedback(for: .capture) == .impact(.heavy))
+        #expect(Haptics.feedback(for: .checkDelivered) == .notification(.warning))
+        #expect(Haptics.feedback(for: .stepCompleted) == .notification(.success))
+        #expect(Haptics.feedback(for: .clockWarning) == .impact(.soft))
+    }
+
+    @Test("Game end is routed by result")
+    func gameEndByResult() {
+        #expect(Haptics.feedback(for: .gameEnd(won: true)) == .notification(.success))
+        #expect(Haptics.feedback(for: .gameEnd(won: false)) == .notification(.error))
+    }
+
+    @Test("A capture is felt more than a legal drop")
+    func captureOutweighsDrop() {
+        #expect(Haptics.feedback(for: .capture) != Haptics.feedback(for: .legalDrop))
+    }
+}
+
+@Suite("Design system — loading and depth")
+struct LoadingAndDepthTests {
+
+    @Test("Nothing is shown under the 200ms threshold")
+    func skeletonThreshold() {
+        #expect(SkeletonPolicy.minimumVisibleDelay == .milliseconds(200))
+        #expect(!SkeletonPolicy.shouldShow(isLoading: true, elapsed: .milliseconds(120)))
+        #expect(SkeletonPolicy.shouldShow(isLoading: true, elapsed: .milliseconds(200)))
+        #expect(SkeletonPolicy.shouldShow(isLoading: true, elapsed: .seconds(1)))
+    }
+
+    @Test("A finished load never shows a skeleton, however long it took")
+    func loadedNeverSkeletons() {
+        #expect(!SkeletonPolicy.shouldShow(isLoading: false, elapsed: .seconds(5)))
+    }
+
+    @Test("Three corner radii, and they are the three")
+    func cornerRadii() {
+        #expect(CornerRadius.chip == 10)
+        #expect(CornerRadius.card == 16)
+        #expect(CornerRadius.sheet == 22)
+    }
+
+    @Test("Elevation has three levels")
+    func threeLevels() {
+        let levels: [Elevation] = [.ground, .raised, .floating]
+        #expect(levels.count == 3)
+    }
+}
+
+@Suite("Design system — colour tokens")
+struct PaletteTests {
+
+    @Test("Dark is designed, never a copy of light")
+    func darkIsIndependent() {
+        // If any token's two halves are equal, somebody computed one from the
+        // other or forgot to tune it — which is exactly how dark mode becomes
+        // an inversion.
+        let tokens = [
+            Palette.accent,
+            Palette.evalPositive,
+            Palette.evalNegative,
+            Palette.caution,
+            Palette.surfaceGround,
+            Palette.surfaceRaised,
+            Palette.surfaceSunken,
+            Palette.hairline,
+            Palette.hairlinePending,
+            Palette.inactiveMark,
+            Palette.skeleton
+        ]
+        for token in tokens {
+            let isIdentical = token.light == token.dark
+            #expect(!isIdentical)
+        }
+    }
+
+    @Test("Advantage colours are distinct from the accent and from each other")
+    func semanticColoursDoNotCollide() {
+        #expect(Palette.evalPositive != Palette.evalNegative)
+        #expect(Palette.evalNegative != Palette.caution)
+        #expect(Palette.evalNegative != Palette.accent)
+        #expect(Palette.caution != Palette.accent)
+    }
+
+    @Test("Ground, raised and sunken are three distinct dark surfaces")
+    func darkSurfacesAreDistinct() {
+        #expect(Palette.surfaceRaised.dark != Palette.surfaceGround.dark)
+        #expect(Palette.surfaceSunken.dark != Palette.surfaceRaised.dark)
+    }
+}

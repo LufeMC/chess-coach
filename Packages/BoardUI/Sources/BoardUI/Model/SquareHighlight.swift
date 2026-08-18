@@ -24,6 +24,9 @@ public enum HighlightKind: String, CaseIterable, Hashable, Sendable, Identifiabl
   case legalMove
   /// A legal destination that captures. Ring around the target piece.
   case legalCapture
+  /// The square a piece being dragged would land on. Ring inset from the edge —
+  /// never a fill, which would be hidden under the lifted piece anyway.
+  case dropTarget
   /// Coach hint. Solid ring, the loudest non-destructive mark.
   case hint
   /// A square implicated in a review "moment". Dashed border, neutral.
@@ -39,7 +42,7 @@ public enum HighlightKind: String, CaseIterable, Hashable, Sendable, Identifiabl
   /// capture target reads as circled rather than smudged.
   var drawsAbovePieces: Bool {
     switch self {
-    case .legalCapture, .hint, .correctAnswer, .momentSquare: true
+    case .legalCapture, .dropTarget, .hint, .correctAnswer, .momentSquare: true
     case .lastMoveFrom, .lastMoveTo, .check, .selected, .legalMove: false
     }
   }
