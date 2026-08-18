@@ -10,7 +10,9 @@ import SwiftUI
 // the "what makes an app feel cheap" list for exactly that reason.
 //
 // The sheets are also sized by the caller, from the board's measured bottom
-// edge, so the sheet top always lands below the board rather than over it.
+// edge, so the sheet's top always lands below the board rather than over it.
+// That is why the content here is short: the space below the board is the
+// budget, and the budget is not negotiable.
 
 /// Which sheet the play surface is showing.
 enum PlaySheetKind: Identifiable, Equatable {
@@ -31,9 +33,9 @@ enum PlaySheetKind: Identifiable, Equatable {
     /// board.
     var preferredHeight: CGFloat {
         switch self {
-        case .secondTry: 268
-        case .options: 250
-        case .leave: 236
+        case .secondTry: 236
+        case .options: 208
+        case .leave: 224
         }
     }
 }
@@ -56,7 +58,7 @@ struct SecondTrySheet: View {
     let session: GameSession
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 14) {
+        VStack(alignment: .leading, spacing: 12) {
             SheetHeader(
                 title: "Almost there",
                 // Every coaching sheet gets a way out that is not an answer.
@@ -64,50 +66,51 @@ struct SecondTrySheet: View {
             )
 
             Text(prompt)
-                .font(.subheadline)
+                .typeRole(.caption, appliesForeground: false)
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
-                .lineLimit(3, reservesSpace: true)
-
-            if state.hintLevel < 2 {
-                Button {
-                    session.requestHint()
-                } label: {
-                    Label("Show me why", systemImage: "sparkles")
-                        .font(.subheadline.weight(.medium))
-                }
-                .buttonStyle(.plain)
-                .foregroundStyle(.secondary)
-            }
+                .lineLimit(2, reservesSpace: true)
 
             Spacer(minLength: 0)
 
-            Button {
+            Button("Take it back") {
                 session.resumeAfterSecondTry()
-            } label: {
-                Text("Take it back")
-                    .frame(maxWidth: .infinity)
             }
-            .buttonStyle(.borderedProminent)
-            .controlSize(.large)
+            .buttonStyle(.primaryAction)
 
-            Button {
-                Task { await session.keepOriginalMove() }
-            } label: {
-                Text("Play it anyway")
-                    .font(.subheadline.weight(.medium))
-                    .frame(maxWidth: .infinity)
+            // Both quiet actions share one row: the sheet's whole height budget
+            // is the space below the board, and a third stacked button would
+            // spend it on the two things the user is least likely to want.
+            HStack(spacing: 16) {
+                if state.hintLevel < 2 {
+                    Button {
+                        session.requestHint()
+                    } label: {
+                        Label("Show me why", systemImage: "sparkles")
+                            .typeRole(.caption, appliesForeground: false)
+                            .foregroundStyle(.secondary)
+                    }
+                    .buttonStyle(.pressable)
+                }
+
+                Spacer(minLength: 0)
+
+                Button("Play it anyway") {
+                    Task { await session.keepOriginalMove() }
+                }
+                .buttonStyle(.pressable)
+                .typeRole(.caption, appliesForeground: false)
+                .foregroundStyle(.secondary)
             }
-            .buttonStyle(.plain)
-            .foregroundStyle(.secondary)
-            .padding(.bottom, 4)
+            .padding(.vertical, 6)
         }
-        .padding(20)
+        .padding(.horizontal, 20)
+        .padding(.top, 16)
     }
 
     private var prompt: String {
         switch state.hintLevel {
-        case 0: "That move gives something away. The board is still live — take another look before you commit."
+        case 0: "That move gives something away. Look again — the board is still live."
         case 1: "Look at the highlighted square. What does it let them do?"
         default: "That was their idea. Find a move that deals with it."
         }
@@ -118,7 +121,7 @@ struct SecondTrySheet: View {
 
 /// Everything that is not "make a move".
 ///
-/// The top row never grows past its four elements, so resign, flip and start
+/// The status row never grows past its three segments, so resign, flip and start
 /// again live behind one `•••`. Resigning is two taps from the board and is a
 /// tinted row rather than a filled button — a destructive action that is the
 /// most prominent thing in the sheet is a trap.
@@ -132,7 +135,7 @@ struct GameOptionsSheet: View {
     @Environment(\.dismiss) private var dismiss
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 14) {
+        VStack(alignment: .leading, spacing: 12) {
             SheetHeader(title: isFinished ? "Game over" : "This game")
 
             VStack(spacing: 0) {
@@ -141,7 +144,7 @@ struct GameOptionsSheet: View {
                     dismiss()
                 }
 
-                Divider().padding(.leading, 42)
+                Divider().padding(.leading, 34)
 
                 if isFinished {
                     SheetRow(title: "New game", systemImage: "plus.circle") {
@@ -149,7 +152,9 @@ struct GameOptionsSheet: View {
                         dismiss()
                     }
                 } else {
-                    SheetRow(title: "Resign", systemImage: "flag", tint: .orange) {
+                    // Amber rather than red: red means "advantage lost" in this
+                    // app, and a red row here would teach it a second meaning.
+                    SheetRow(title: "Resign", systemImage: "flag", tint: Palette.caution.dynamic) {
                         onResign()
                         dismiss()
                     }
@@ -158,7 +163,8 @@ struct GameOptionsSheet: View {
 
             Spacer(minLength: 0)
         }
-        .padding(20)
+        .padding(.horizontal, 20)
+        .padding(.top, 18)
     }
 }
 
@@ -168,40 +174,32 @@ struct GameOptionsSheet: View {
 ///
 /// Leaving mid-game is a resignation, and a resignation should never be one tap
 /// from the board. The safe path — keep playing — is the filled button; leaving
-/// is a tinted row underneath it.
+/// is a quiet row underneath it.
 struct LeaveGameSheet: View {
 
     let onKeepPlaying: () -> Void
     let onLeave: () -> Void
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 14) {
+        VStack(alignment: .leading, spacing: 12) {
             SheetHeader(title: "Leave this game?")
 
             Text("Leaving counts as a resignation. The game is still saved, and still analysed.")
-                .font(.subheadline)
+                .typeRole(.caption, appliesForeground: false)
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
 
             Spacer(minLength: 0)
 
-            Button(action: onKeepPlaying) {
-                Text("Keep playing")
-                    .frame(maxWidth: .infinity)
-            }
-            .buttonStyle(.borderedProminent)
-            .controlSize(.large)
+            Button("Keep playing", action: onKeepPlaying)
+                .buttonStyle(.primaryAction)
 
-            Button(action: onLeave) {
-                Text("Resign and leave")
-                    .font(.subheadline.weight(.medium))
-                    .frame(maxWidth: .infinity)
-            }
-            .buttonStyle(.plain)
-            .foregroundStyle(.orange)
-            .padding(.bottom, 4)
+            Button("Resign and leave", action: onLeave)
+                .buttonStyle(.tertiaryAction)
+                .foregroundStyle(Palette.caution.dynamic)
         }
-        .padding(20)
+        .padding(.horizontal, 20)
+        .padding(.top, 18)
     }
 }
 
@@ -226,20 +224,20 @@ struct SheetHeader: View {
     var body: some View {
         HStack(alignment: .firstTextBaseline) {
             Text(title)
-                .font(.title3.bold())
+                .typeRole(.headline)
 
             Spacer(minLength: 12)
 
             if let skip {
                 Button(action: skip.action) {
                     Text(skip.title)
-                        .font(.footnote.weight(.semibold))
+                        .typeRole(.caption, appliesForeground: false)
+                        .foregroundStyle(.secondary)
                         .padding(.horizontal, 12)
                         .padding(.vertical, 6)
-                        .background(Capsule().fill(.quaternary))
+                        .background(Capsule().fill(Palette.surfaceSunken.dynamic))
                 }
-                .buttonStyle(.plain)
-                .foregroundStyle(.secondary)
+                .buttonStyle(.pressable)
             }
         }
     }
@@ -264,16 +262,15 @@ struct SheetRow: View {
         Button(action: action) {
             HStack(spacing: 12) {
                 Image(systemName: systemImage)
-                    .font(.body)
                     .frame(width: 22)
                 Text(title)
-                    .font(.body)
                 Spacer(minLength: 0)
             }
+            .typeRole(.body, appliesForeground: false)
+            .foregroundStyle(tint ?? .primary)
             .contentShape(Rectangle())
-            .padding(.vertical, 12)
+            .padding(.vertical, 11)
         }
-        .buttonStyle(.plain)
-        .foregroundStyle(tint ?? .primary)
+        .buttonStyle(.pressable)
     }
 }

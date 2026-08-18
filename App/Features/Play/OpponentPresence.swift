@@ -36,12 +36,13 @@ struct OpponentPresenceView: View {
             monogram
 
             VStack(alignment: .leading, spacing: 6) {
-                HStack(spacing: 6) {
+                HStack(alignment: .firstTextBaseline, spacing: 6) {
                     Text(opponent.name)
-                        .font(.headline)
-                    Text("\(opponent.rating)")
-                        .font(.caption.weight(.semibold).monospacedDigit())
-                        .foregroundStyle(.secondary)
+                        .typeRole(.headline)
+                    // Verbatim: a rating is an identifier, not a quantity, and
+                    // localised grouping would print "1,150".
+                    Text(verbatim: "\(opponent.rating)")
+                        .typeRole(.caption, monospacedDigits: true)
                 }
 
                 bubble
@@ -53,47 +54,52 @@ struct OpponentPresenceView: View {
     }
 
     private var monogram: some View {
-        RoundedRectangle(cornerRadius: 16, style: .continuous)
-            .fill(.quaternary)
+        Color.clear
             .frame(width: 52, height: 52)
             .overlay {
                 Text(opponent.name.prefix(1))
-                    .font(.system(size: 22, weight: .semibold, design: .rounded))
+                    .font(.system(.title2, design: .rounded, weight: .semibold))
                     .foregroundStyle(.secondary)
             }
-            .overlay {
-                RoundedRectangle(cornerRadius: 16, style: .continuous)
-                    .strokeBorder(Color.primary.opacity(0.09), lineWidth: 1)
-            }
+            .elevation(.raised, cornerRadius: CornerRadius.card)
     }
 
     private var bubble: some View {
-        Text(displayText)
-            .font(.callout)
-            .foregroundStyle(isSpeaking ? .primary : .secondary)
-            .contentTransition(.opacity)
-            // Two lines of room, always: a long line and a short one must not
-            // change the height of anything above the board.
-            .lineLimit(2, reservesSpace: true)
-            .fixedSize(horizontal: false, vertical: true)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .padding(.horizontal, 12)
-            .padding(.vertical, 9)
-            .background(SpeechBubbleShape().fill(.quaternary))
-            .overlay(SpeechBubbleShape().stroke(Color.primary.opacity(0.09), lineWidth: 1))
-            // A slow breath on the line while they think, and nothing else on
-            // the screen moving. Not a spinner, not a shimmer, not a loop the
-            // eye can lock on to.
-            .opacity(isSpeaking && pulse ? 0.68 : 1)
-            .animation(
-                isSpeaking
-                    ? .easeInOut(duration: 1.2).repeatForever(autoreverses: true)
-                    : .easeInOut(duration: 0.2),
-                value: pulse
-            )
-            .animation(.easeInOut(duration: 0.15), value: line.text)
-            .onChange(of: isSpeaking) { _, speaking in pulse = speaking }
-            .onAppear { pulse = isSpeaking }
+        ZStack(alignment: .leading) {
+            // A two-line box, always, with the line centred in it. Reserving the
+            // space is what stops the block — and therefore the board — from
+            // moving when a short line replaces a long one; centring is what
+            // stops the reserved space from reading as a hole.
+            Text(verbatim: "\n")
+                .typeRole(.body)
+                .hidden()
+                .accessibilityHidden(true)
+
+            Text(displayText)
+                .typeRole(.body, appliesForeground: false)
+                .foregroundStyle(isSpeaking ? AnyShapeStyle(.primary) : AnyShapeStyle(.secondary))
+                .contentTransition(.opacity)
+                .lineLimit(2)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(.horizontal, 12)
+        .padding(.vertical, 8)
+        .background(SpeechBubbleShape().fill(Palette.surfaceRaised.dynamic))
+        .overlay(SpeechBubbleShape().stroke(Palette.hairline.dynamic, lineWidth: 1))
+        // A slow breath on the line while they think, and nothing else on the
+        // screen moving. Not a spinner, not a shimmer, not a loop the eye can
+        // lock on to.
+        .opacity(isSpeaking && pulse ? 0.68 : 1)
+        .animation(
+            isSpeaking
+                ? .easeInOut(duration: 1.2).repeatForever(autoreverses: true)
+                : Motion.crossfade,
+            value: pulse
+        )
+        .animation(Motion.crossfade, value: line.text)
+        .onChange(of: isSpeaking) { _, speaking in pulse = speaking }
+        .onAppear { pulse = isSpeaking }
     }
 
     private var displayText: String {
@@ -106,8 +112,8 @@ struct OpponentPresenceView: View {
 private struct SpeechBubbleShape: Shape {
 
     var caretWidth: CGFloat = 7
-    var caretCentre: CGFloat = 20
-    var cornerRadius: CGFloat = 14
+    var caretCentre: CGFloat = 22
+    var cornerRadius: CGFloat = CornerRadius.card
 
     func path(in rect: CGRect) -> Path {
         var path = Path(

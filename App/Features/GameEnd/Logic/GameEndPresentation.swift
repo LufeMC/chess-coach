@@ -217,10 +217,15 @@ struct GameSummaryPresentation: Equatable, Sendable {
         let analysisFailed = input.analysisState == .failed
 
         let moveCount = (input.plyCount + 1) / 2
+        // A skeleton means "still coming". Once the pass has landed — completed
+        // or failed — a missing number is missing for good, and leaving a
+        // placeholder pulsing at a number that will never arrive is worse than
+        // saying so.
+        let analysisSettled = analysisFailed || input.analysisState == .complete
         let accuracy: String? =
             if let value = input.accuracy {
                 "\(Int(value.rounded()))%"
-            } else if analysisFailed {
+            } else if analysisSettled {
                 "—"
             } else {
                 nil
@@ -228,7 +233,7 @@ struct GameSummaryPresentation: Equatable, Sendable {
         let moments: String? =
             if let count = input.momentCount {
                 "\(count)"
-            } else if analysisFailed {
+            } else if analysisSettled {
                 "—"
             } else {
                 nil
@@ -258,7 +263,11 @@ struct GameSummaryPresentation: Equatable, Sendable {
         guard count > 0 else {
             return .review(title: "Open the review")
         }
-        // Matches the Today checklist's "3 moments" so the loop visibly closes.
-        return .review(title: "Review \(count) moment\(count == 1 ? "" : "s")")
+        // Word for word the Today checklist's CTA — verb, object, price —
+        // because this is the same step, and the loop only visibly closes if
+        // the two screens call it the same thing. The estimate comes from the
+        // same place too, so they cannot drift.
+        let minutes = TodayPlanner.estimatedMinutes(for: .moments, remaining: count)
+        return .review(title: "Review \(count) moment\(count == 1 ? "" : "s") · ~\(minutes) min")
     }
 }

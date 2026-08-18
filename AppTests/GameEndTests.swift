@@ -220,6 +220,18 @@ struct GameSummaryPresentationTests {
         #expect(summary.stats[2].value == "3")
     }
 
+    @Test("A finished pass with no numbers in it says so rather than skeletoning forever")
+    func settledButEmpty() {
+        // A game resigned on move one is analysed instantly and has no accuracy
+        // to report. A skeleton there would pulse at a number that is never
+        // coming.
+        let summary = GameSummaryPresentation.make(
+            input(plyCount: 0, momentCount: 0, analysisState: .complete)
+        )
+        #expect(summary.stats[1].value == "—")
+        #expect(summary.stats[2].value == "0")
+    }
+
     @Test("Failed analysis says so with a dash instead of waiting forever")
     func failedAnalysis() {
         let summary = GameSummaryPresentation.make(input(analysisState: .failed))
@@ -228,15 +240,25 @@ struct GameSummaryPresentationTests {
         #expect(summary.action == .review(title: "Open the review"))
     }
 
-    @Test("The CTA names the step and its size, matching the Today checklist")
+    @Test("The CTA names the step and its price, in the Today checklist's words")
     func ctaNamesTheStep() {
+        let three = GameSummaryPresentation.make(input(momentCount: 3, analysisState: .complete)).action
         #expect(
-            GameSummaryPresentation.make(input(momentCount: 3, analysisState: .complete)).action
-                == .review(title: "Review 3 moments")
+            three
+                == .review(
+                    title: TodayPlanner.actionTitle(
+                        for: .moments,
+                        progress: DailyProgress(gamePlayed: true),
+                        firstRun: false
+                    )
+                )
         )
+        #expect(three == .review(title: "Review 3 moments · ~5 min"))
+
+        // Singular, and a price scaled to what is actually left.
         #expect(
             GameSummaryPresentation.make(input(momentCount: 1, analysisState: .complete)).action
-                == .review(title: "Review 1 moment")
+                == .review(title: "Review 1 moment · ~2 min")
         )
     }
 

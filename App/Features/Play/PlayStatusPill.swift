@@ -16,8 +16,8 @@ import SwiftUI
 /// recolours or slides on that boundary is eighty pieces of motion the user did
 /// not ask for. So the active side is signalled by *contrast only* — full
 /// foreground versus secondary, a filled clock glyph versus an outline one —
-/// crossfaded over 0.2s, and every glyph keeps its position and its weight. The
-/// widest string the clock can ever print is reserved up front so `10:00`
+/// crossfaded over ``Motion/colorShift``, and every glyph keeps its position.
+/// The widest string the clock can ever print is reserved up front so `10:00`
 /// becoming `9:59` does not shift the segment either.
 struct PlayStatusPill: View {
 
@@ -38,8 +38,6 @@ struct PlayStatusPill: View {
     /// back, while the eval — the final material count — stays legible.
     var clocksDimmed: Bool = false
 
-    private let height: CGFloat = 36
-
     var body: some View {
         HStack(spacing: 0) {
             EvalSegment(reading: eval)
@@ -57,23 +55,17 @@ struct PlayStatusPill: View {
                 .frame(maxHeight: .infinity)
                 .opacity(clocksDimmed ? 0.4 : 1)
         }
-        .frame(height: height)
-        .background(
-            RoundedRectangle(cornerRadius: 10, style: .continuous)
-                .fill(.quaternary)
-        )
-        .overlay(
-            // Hairline, never a shadow: shadows on small chrome are the most
-            // reliable tell of a mid-tier app.
-            RoundedRectangle(cornerRadius: 10, style: .continuous)
-                .strokeBorder(Color.primary.opacity(0.09), lineWidth: 1)
-        )
-        .animation(.easeInOut(duration: 0.25), value: clocksDimmed)
+        .frame(height: 36)
+        // Level 1: solid fill and a hairline. Never a shadow — on chrome this
+        // small a shadow is the clearest tell there is.
+        .elevation(.raised, cornerRadius: CornerRadius.chip)
+        .clipShape(RoundedRectangle(cornerRadius: CornerRadius.chip, style: .continuous))
+        .animation(Motion.colorShift, value: clocksDimmed)
     }
 
     private var rule: some View {
         Rectangle()
-            .fill(Color.primary.opacity(0.09))
+            .fill(Palette.hairline.dynamic)
             .frame(width: 1)
             .frame(maxHeight: .infinity)
     }
@@ -85,32 +77,35 @@ struct PlayStatusPill: View {
 ///
 /// The arrow is not decoration: colour alone would leave the reading invisible
 /// to a red/green colourblind player, and this is the one number on the screen
-/// that has to be readable in a glance.
+/// that has to be readable in a glance. Weight is heavier than the surrounding
+/// chrome on purpose — a timid eval reads as a footnote, and this is the
+/// highest-value number the screen shows.
 private struct EvalSegment: View {
     let reading: PlayEvalReading
 
     var body: some View {
         HStack(spacing: 5) {
             Image(systemName: reading.symbolName)
-                .font(.system(size: 10, weight: .bold))
+                .font(.caption2.weight(.bold))
             Text(reading.text)
-                .font(.system(size: 13, weight: .heavy, design: .rounded).monospacedDigit())
+                .typeRole(.caption, monospacedDigits: true, appliesForeground: false)
+                .fontWeight(.heavy)
                 .tracking(0.6)
         }
         .foregroundStyle(tint)
         .padding(.horizontal, 11)
         .contentTransition(.opacity)
-        .animation(.easeInOut(duration: 0.15), value: reading)
+        .animation(Motion.crossfade, value: reading)
         .accessibilityElement(children: .ignore)
         .accessibilityLabel(Text(reading.accessibilityText))
     }
 
     private var tint: Color {
         switch reading.direction {
-        case .ahead: .green
+        case .ahead: Palette.evalPositive.dynamic
         // Red here and nowhere else on this screen: it means "advantage lost",
-        // full stop. Time pressure goes amber instead.
-        case .behind: .red
+        // full stop. Time pressure goes through amber instead.
+        case .behind: Palette.evalNegative.dynamic
         case .level: .secondary
         }
     }
@@ -138,19 +133,20 @@ private struct ClockSegment: View {
                 Image(systemName: "clock.fill").opacity(state.isActive ? 1 : 0)
                 Image(systemName: "clock").opacity(state.isActive ? 0 : 1)
             }
-            .font(.system(size: 11, weight: .semibold))
+            .font(.caption2.weight(.semibold))
 
             Text(state.widthSample)
                 .hidden()
                 .overlay(alignment: .trailing) {
                     Text(reading.text)
                 }
-                .font(.system(size: 15, weight: weight(for: reading.pressure), design: .rounded).monospacedDigit())
+                .typeRole(.caption, monospacedDigits: true, appliesForeground: false)
+                .fontWeight(weight(for: reading.pressure))
         }
         .foregroundStyle(foreground(for: reading.pressure))
         .padding(.horizontal, 11)
-        .animation(.easeInOut(duration: 0.2), value: state.isActive)
-        .animation(.easeInOut(duration: 0.2), value: reading.pressure)
+        .animation(Motion.colorShift, value: state.isActive)
+        .animation(Motion.colorShift, value: reading.pressure)
         .accessibilityElement(children: .ignore)
         .accessibilityLabel(Text("\(state.accessibilityName): \(reading.accessibilityText)"))
     }
@@ -183,13 +179,15 @@ private struct ClockSegment: View {
     private func foreground(for pressure: ClockPressure) -> Color {
         // Amber, never red. Red is spoken for by the eval segment two inches to
         // the left, and a colour that means two things means neither.
-        if pressure == .critical { return .orange }
+        if pressure == .critical { return Palette.caution.dynamic }
         return state.isActive ? .primary : .secondary
     }
 }
 
 #Preview("Status pill") {
-    VStack(spacing: 16) {
+    let sample = PlayClock.widthSample(baseSeconds: 600)
+
+    return VStack(spacing: 16) {
         PlayStatusPill(
             eval: .material(3),
             opponentClock: .init(
@@ -197,15 +195,15 @@ private struct ClockSegment: View {
                 startedAt: .now,
                 isRunning: false,
                 isActive: false,
-                widthSample: PlayClock.widthSample(baseSeconds: 600),
-                accessibilityName: "Opponent clock"
+                widthSample: sample,
+                accessibilityName: "Their clock"
             ),
             userClock: .init(
                 chargedMs: 8_400,
                 startedAt: .now,
                 isRunning: true,
                 isActive: true,
-                widthSample: PlayClock.widthSample(baseSeconds: 600),
+                widthSample: sample,
                 accessibilityName: "Your clock"
             )
         )
@@ -216,15 +214,15 @@ private struct ClockSegment: View {
                 startedAt: .now,
                 isRunning: true,
                 isActive: true,
-                widthSample: PlayClock.widthSample(baseSeconds: 600),
-                accessibilityName: "Opponent clock"
+                widthSample: sample,
+                accessibilityName: "Their clock"
             ),
             userClock: .init(
                 chargedMs: 121_000,
                 startedAt: .now,
                 isRunning: false,
                 isActive: false,
-                widthSample: PlayClock.widthSample(baseSeconds: 600),
+                widthSample: sample,
                 accessibilityName: "Your clock"
             )
         )
@@ -235,15 +233,15 @@ private struct ClockSegment: View {
                 startedAt: .now,
                 isRunning: false,
                 isActive: false,
-                widthSample: PlayClock.widthSample(baseSeconds: 600),
-                accessibilityName: "Opponent clock"
+                widthSample: sample,
+                accessibilityName: "Their clock"
             ),
             userClock: .init(
                 chargedMs: 310_000,
                 startedAt: .now,
-                isRunning: true,
-                isActive: true,
-                widthSample: PlayClock.widthSample(baseSeconds: 600),
+                isRunning: false,
+                isActive: false,
+                widthSample: sample,
                 accessibilityName: "Your clock"
             ),
             clocksDimmed: true

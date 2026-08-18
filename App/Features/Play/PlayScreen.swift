@@ -37,12 +37,17 @@ struct PlayScreen: View {
 
     /// Measured so a sheet can be sized to the space *below* the board.
     @State private var boardFrame: CGRect = .zero
-    @State private var contentFrame: CGRect = .zero
+    /// The window's bottom edge and the safe area's. Both are needed: the gap
+    /// between them is the home-indicator strip, which a sheet consumes on top
+    /// of its detent height, and budgeting for it is the difference between a
+    /// sheet that clears the board and one that clips its last rank.
+    @State private var screenBottom: CGFloat = 0
+    @State private var safeAreaBottom: CGFloat = 0
 
-    /// How far the board shrinks on the rare screen where a sheet cannot
-    /// otherwise clear it. Scaling from the top raises the bottom edge without
-    /// moving the top one and without cropping a single square.
-    private static let compressedBoardScale: CGFloat = 0.92
+    /// How far the board shrinks on a screen where a sheet cannot otherwise
+    /// clear it. Scaling from the top raises the bottom edge without moving the
+    /// top one and without cropping a single square.
+    private static let compressedBoardScale: CGFloat = 0.90
 
     var body: some View {
         Group {
@@ -73,25 +78,21 @@ struct PlayScreen: View {
 
             VStack(spacing: 6) {
                 Text("Sparring")
-                    .font(.title2.bold())
+                    .typeRole(.title)
                 Text("One game, then three moments to study.")
-                    .font(.subheadline)
-                    .foregroundStyle(.secondary)
+                    .typeRole(.caption)
             }
 
             Spacer()
 
-            Button {
+            Button("Play \(opponentName)") {
                 startGame()
-            } label: {
-                Text("Play \(opponentName)")
-                    .frame(maxWidth: .infinity)
             }
-            .buttonStyle(.borderedProminent)
-            .controlSize(.large)
+            .buttonStyle(.primaryAction)
             .padding(.horizontal)
         }
         .padding(.bottom)
+        .background(Palette.surfaceGround.dynamic.ignoresSafeArea())
     }
 
     private var opponentName: String {
@@ -138,11 +139,11 @@ struct PlayScreen: View {
 
             titleRow(session)
                 .padding(.horizontal, 16)
-                .padding(.top, 16)
+                .padding(.top, 10)
 
             OpponentPresenceView(opponent: opponent, line: opponentLine(session, opponent: opponent))
                 .padding(.horizontal, 16)
-                .padding(.top, 14)
+                .padding(.top, 10)
 
             BoardView(
                 position: session.board.position,
@@ -152,25 +153,46 @@ struct PlayScreen: View {
                 arrows: arrows(for: session)
             )
             .scaleEffect(boardScale(for: sheetKind), anchor: .top)
-            .animation(.spring(response: 0.6, dampingFraction: 0.9), value: boardScale(for: sheetKind))
-            .padding(.top, 16)
+            .animation(Motion.gentle, value: boardScale(for: sheetKind))
+            .padding(.top, 12)
             .onGeometryChange(for: CGRect.self) { $0.frame(in: .global) } action: { boardFrame = $0 }
 
             bottomRow(session)
                 .padding(.horizontal, 16)
-                .padding(.top, 12)
+                .padding(.top, 10)
 
             Spacer(minLength: 0)
         }
-        .onGeometryChange(for: CGRect.self) { $0.frame(in: .global) } action: { contentFrame = $0 }
+        .onGeometryChange(for: CGFloat.self) { $0.frame(in: .global).maxY } action: { safeAreaBottom = $0 }
+        .background(Palette.surfaceGround.dynamic.ignoresSafeArea())
+        .background {
+            // Ignores the safe area so its own bottom edge *is* the window's,
+            // which is the measurement the sheet detents need.
+            Color.clear
+                .ignoresSafeArea()
+                .onGeometryChange(for: CGFloat.self) { $0.frame(in: .global).maxY } action: { screenBottom = $0 }
+        }
         .overlay(alignment: .bottom) {
             endOverlay(session, opponent: opponent)
         }
-        .animation(.spring(response: 0.42, dampingFraction: 0.82), value: sequencer.stage)
+        .animation(Motion.standard, value: sequencer.stage)
         .task(id: session.gameID) { await tick(session) }
         .onChange(of: finishedOutcome(session)) { _, outcome in
-            guard outcome != nil else { return }
-            Task { await sequencer.gameFinished() }
+            guard let outcome else { return }
+            Task {
+                await sequencer.gameFinished()
+                // Fired as the banner rises rather than on the final move: the
+                // 600ms hold is meant to be quiet, and a buzz during it is a
+                // chrome change by another route.
+                //
+                // A draw gets nothing. The haptic vocabulary has success and
+                // error and no third thing, and a draw is neither — buzzing
+                // "error" at somebody who held a worse position is a small lie
+                // told in the one channel that cannot be ignored.
+                if let won = outcome.userWon {
+                    Haptics.play(.gameEnd(won: won))
+                }
+            }
         }
         .sheet(item: sheetBinding(session)) { kind in
             sheetContent(kind, session: session)
@@ -179,18 +201,7 @@ struct PlayScreen: View {
                 // the board stays visible *and* stays playable underneath.
                 .presentationBackgroundInteraction(.enabled)
                 .presentationDragIndicator(.visible)
-                .presentationCornerRadius(28)
-        }
-        .sensoryFeedback(trigger: lowTimeWarned) { _, warned in
-            warned ? .impact(flexibility: .soft) : nil
-        }
-        .sensoryFeedback(trigger: sequencer.stage) { _, stage in
-            guard stage == .banner, let outcome = finishedOutcome(session) else { return nil }
-            switch GameEndBanner.make(outcome: outcome, opponentName: opponent.name).kind {
-            case .win: return .success
-            case .loss: return .error
-            case .draw: return .impact(flexibility: .solid)
-            }
+                .presentationCornerRadius(CornerRadius.sheet)
         }
     }
 
@@ -210,7 +221,7 @@ struct PlayScreen: View {
                     .frame(width: 30, height: 30)
                     .contentShape(Rectangle())
             }
-            .buttonStyle(.plain)
+            .buttonStyle(.pressable)
             .foregroundStyle(.secondary)
             .accessibilityLabel("Leave this game")
 
@@ -228,22 +239,19 @@ struct PlayScreen: View {
     private func titleRow(_ session: GameSession) -> some View {
         HStack(alignment: .firstTextBaseline) {
             Text(session.configuration.mode.capitalized)
-                .font(.title.bold())
+                .typeRole(.title)
             Spacer(minLength: 12)
             // The qualifier a section header carries: same small-caps style,
             // dimmer, right-aligned.
             Text(timeControl(session))
-                .font(.caption.weight(.semibold).monospacedDigit())
-                .tracking(0.6)
-                .foregroundStyle(.secondary)
+                .typeRole(.label, monospacedDigits: true)
         }
     }
 
     private func bottomRow(_ session: GameSession) -> some View {
         HStack(spacing: 12) {
             Text(session.configuration.userColor == .white ? "You · White" : "You · Black")
-                .font(.footnote.weight(.medium))
-                .foregroundStyle(.secondary)
+                .typeRole(.caption)
 
             Spacer(minLength: 0)
 
@@ -255,7 +263,7 @@ struct PlayScreen: View {
                     .frame(width: 34, height: 30)
                     .contentShape(Rectangle())
             }
-            .buttonStyle(.plain)
+            .buttonStyle(.pressable)
             .foregroundStyle(.secondary)
             .accessibilityLabel("Game options")
         }
@@ -357,25 +365,41 @@ struct PlayScreen: View {
     }
 
     /// The tallest this sheet may be without its top edge crossing the board.
+    ///
+    /// Never rounded up past the space available. The rule that the board stays
+    /// visible is absolute, so when the content does not fit, the *content*
+    /// gives — its spacer collapses — and the board keeps its ground.
     private func detentHeight(for kind: PlaySheetKind) -> CGFloat {
-        max(180, min(kind.preferredHeight, spaceBelowBoard(for: kind)))
+        min(kind.preferredHeight, spaceBelowBoard(for: kind))
     }
 
     private func spaceBelowBoard(for kind: PlaySheetKind) -> CGFloat {
-        guard boardFrame.height > 0, contentFrame.maxY > boardFrame.maxY else {
+        guard boardFrame.height > 0, screenBottom > boardFrame.maxY else {
             return kind.preferredHeight
         }
-        let atFullSize = contentFrame.maxY - boardFrame.maxY - 8
+        let atFullSize = clearance
         guard atFullSize < kind.preferredHeight else { return atFullSize }
-        // The board gives up 8% of its side rather than being covered or
-        // cropped, which is worth roughly another 30pt on a phone.
+        // The board gives up a tenth of its side rather than being covered or
+        // cropped — worth about another 40pt on a phone, and the last resort
+        // before a sheet would have to sit over the position.
         return atFullSize + boardFrame.height * (1 - Self.compressedBoardScale)
     }
 
+    /// Space between the board's bottom edge and the top a sheet may occupy.
+    ///
+    /// Two subtractions, both deliberate. The 10pt gap keeps the sheet from
+    /// kissing the board's last rank. The home-indicator strip comes off
+    /// because a detent height and the strip are *added* by the system on some
+    /// devices — budgeting for it costs a little sheet height and guarantees
+    /// the one rule that cannot bend: the board stays whole.
+    private var clearance: CGFloat {
+        let homeIndicator = max(0, screenBottom - safeAreaBottom)
+        return screenBottom - boardFrame.maxY - 10 - homeIndicator
+    }
+
     private func boardScale(for kind: PlaySheetKind?) -> CGFloat {
-        guard let kind, boardFrame.height > 0, contentFrame.maxY > boardFrame.maxY else { return 1 }
-        let atFullSize = contentFrame.maxY - boardFrame.maxY - 8
-        return atFullSize < kind.preferredHeight ? Self.compressedBoardScale : 1
+        guard let kind, boardFrame.height > 0, screenBottom > boardFrame.maxY else { return 1 }
+        return clearance < kind.preferredHeight ? Self.compressedBoardScale : 1
     }
 
     // MARK: Clock
@@ -384,6 +408,8 @@ struct PlayScreen: View {
     /// stops moving still flags, and notices the ten-second crossing so it can
     /// be felt once rather than watched for.
     private func tick(_ session: GameSession) async {
+        var previousUserMs = session.userClockMs
+
         while !Task.isCancelled, !session.isFinished {
             session.checkClock()
 
@@ -393,9 +419,13 @@ struct PlayScreen: View {
                 now: .now,
                 isRunning: isUserSideActive(session)
             )
-            if !lowTimeWarned, userMs <= PlayClock.criticalThresholdMs {
+            // Once, on the way past ten seconds, and only for the clock the user
+            // is actually burning.
+            if !lowTimeWarned, PlayClock.crossedCritical(previousMs: previousUserMs, currentMs: userMs) {
                 lowTimeWarned = true
+                Haptics.play(.clockWarning)
             }
+            previousUserMs = userMs
 
             try? await Task.sleep(for: .milliseconds(400))
         }

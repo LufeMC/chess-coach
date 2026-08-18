@@ -25,37 +25,32 @@ struct GameResultBanner: View {
                     .frame(width: 26, height: 26)
 
                 Text(banner.headline)
-                    .font(.subheadline.weight(.semibold))
+                    .typeRole(.headline)
                     .fixedSize(horizontal: false, vertical: true)
                     .frame(maxWidth: .infinity, alignment: .leading)
 
                 Button(action: onCollapse) {
                     Image(systemName: "chevron.down")
                         .font(.footnote.weight(.semibold))
+                        .foregroundStyle(.secondary)
                         .frame(width: 26, height: 26)
                         .contentShape(Rectangle())
                 }
-                .buttonStyle(.plain)
-                .foregroundStyle(.secondary)
-                .accessibilityLabel("Hide this and look at the final position")
+                .buttonStyle(.pressable)
+                .accessibilityLabel("Put this away and look at the final position")
             }
 
-            Button(action: onContinue) {
-                Text(banner.ctaTitle)
-                    .frame(maxWidth: .infinity)
-            }
-            .buttonStyle(.borderedProminent)
-            .controlSize(.large)
-            .tint(buttonTint)
+            Button(banner.ctaTitle, action: onContinue)
+                .buttonStyle(.primaryAction)
         }
         .padding(14)
         .background(
-            RoundedRectangle(cornerRadius: 20, style: .continuous)
-                .fill(iconTint.opacity(0.10))
+            RoundedRectangle(cornerRadius: CornerRadius.sheet, style: .continuous)
+                .fill(backgroundTint)
         )
         .overlay(
-            RoundedRectangle(cornerRadius: 20, style: .continuous)
-                .strokeBorder(iconTint.opacity(0.22), lineWidth: 1)
+            RoundedRectangle(cornerRadius: CornerRadius.sheet, style: .continuous)
+                .strokeBorder(borderTint, lineWidth: 1)
         )
     }
 
@@ -64,15 +59,22 @@ struct GameResultBanner: View {
     /// defeat is on the list of things that make an app feel cheap.
     private var iconTint: Color {
         switch banner.kind {
-        case .win: .green
+        case .win: Palette.evalPositive.dynamic
         case .loss, .draw: .secondary
         }
     }
 
-    private var buttonTint: Color {
+    private var backgroundTint: Color {
         switch banner.kind {
-        case .win: .green
-        case .loss, .draw: .accentColor
+        case .win: Palette.evalPositive.dynamic.opacity(0.10)
+        case .loss, .draw: Palette.surfaceRaised.dynamic
+        }
+    }
+
+    private var borderTint: Color {
+        switch banner.kind {
+        case .win: Palette.evalPositive.dynamic.opacity(0.22)
+        case .loss, .draw: Palette.hairline.dynamic
         }
     }
 }
@@ -90,15 +92,16 @@ struct GameResultChip: View {
                 Image(systemName: "chevron.up")
                     .font(.caption2.weight(.bold))
                 Text(title)
-                    .font(.footnote.weight(.semibold))
+                    .typeRole(.caption, appliesForeground: false)
+                    .fontWeight(.semibold)
             }
+            .foregroundStyle(.secondary)
             .padding(.horizontal, 14)
             .padding(.vertical, 9)
-            .background(Capsule().fill(.quaternary))
-            .overlay(Capsule().strokeBorder(Color.primary.opacity(0.09), lineWidth: 1))
+            .background(Capsule().fill(Palette.surfaceRaised.dynamic))
+            .overlay(Capsule().strokeBorder(Palette.hairline.dynamic, lineWidth: 1))
         }
-        .buttonStyle(.plain)
-        .foregroundStyle(.secondary)
+        .buttonStyle(.pressable)
     }
 }
 
@@ -123,4 +126,5 @@ struct GameResultChip: View {
         GameResultChip(title: "Summary", action: {})
     }
     .padding()
+    .background(Palette.surfaceGround.dynamic)
 }

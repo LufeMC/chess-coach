@@ -67,28 +67,28 @@ struct GameSummaryScreen: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             Text(presentation.headline)
-                .font(.title.bold())
+                .typeRole(.title)
                 .fixedSize(horizontal: false, vertical: true)
 
             Text(presentation.detail)
-                .font(.subheadline)
-                .foregroundStyle(.secondary)
+                .typeRole(.caption)
                 .padding(.top, 6)
 
-            Spacer(minLength: 32)
-
+            // A deliberate, fixed distance rather than a spacer: the numbers
+            // belong to the sentence above them, and floating them in the middle
+            // of the screen makes the page read as two unrelated halves.
             HStack(alignment: .top, spacing: 0) {
                 ForEach(presentation.stats) { stat in
                     StatColumn(stat: stat)
                         .frame(maxWidth: .infinity, alignment: .leading)
                 }
             }
+            .padding(.top, 40)
 
             if model.analysisState == nil || model.analysisState == .pending || model.analysisState == .running {
                 // Names the work rather than bouncing a dot at the user.
                 Text("Analysing the game — accuracy and moments fill in here.")
-                    .font(.footnote)
-                    .foregroundStyle(.secondary)
+                    .typeRole(.caption)
                     .padding(.top, 18)
             }
 
@@ -97,11 +97,12 @@ struct GameSummaryScreen: View {
                     .padding(.top, 18)
             }
 
-            Spacer(minLength: 24)
+            Spacer(minLength: 0)
         }
-        .frame(maxWidth: .infinity, alignment: .leading)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .padding(.horizontal, 24)
         .padding(.top, 24)
+        .background(Palette.surfaceGround.dynamic.ignoresSafeArea())
         .safeAreaInset(edge: .bottom) {
             action
                 .padding(.horizontal, 24)
@@ -120,15 +121,12 @@ struct GameSummaryScreen: View {
                 ReviewScreen(gameID: target.gameID)
             } label: {
                 Text(title)
-                    .frame(maxWidth: .infinity)
             }
-            .buttonStyle(.borderedProminent)
-            .controlSize(.large)
+            .buttonStyle(.primaryAction)
 
         case .unavailable(let note):
             Text(note)
-                .font(.footnote)
-                .foregroundStyle(.secondary)
+                .typeRole(.caption)
                 .frame(maxWidth: .infinity, alignment: .leading)
         }
     }
@@ -143,23 +141,19 @@ private struct StatColumn: View {
         VStack(alignment: .leading, spacing: 6) {
             if let value = stat.value {
                 Text(value)
-                    .font(.system(size: 34, weight: .bold, design: .rounded).monospacedDigit())
+                    .typeRole(.title, monospacedDigits: true)
                     .contentTransition(.numericText())
             } else {
-                // Skeleton at the value's exact geometry, so nothing jumps when
+                // Skeleton at the value's own geometry, so nothing jumps when
                 // the real number lands.
-                RoundedRectangle(cornerRadius: 6, style: .continuous)
-                    .fill(Color.secondary.opacity(0.12))
-                    .frame(width: 46, height: 30)
-                    .padding(.vertical, 3)
+                SkeletonView(width: 46, height: 30)
+                    .padding(.vertical, 2)
             }
 
-            Text(stat.label.uppercased())
-                .font(.caption2.weight(.semibold))
-                .tracking(0.6)
-                .foregroundStyle(.secondary)
+            Text(stat.label)
+                .typeRole(.label)
         }
-        .animation(.easeInOut(duration: 0.25), value: stat.value)
+        .animation(Motion.colorShift, value: stat.value)
         .accessibilityElement(children: .combine)
         .accessibilityLabel(Text("\(stat.label): \(stat.value ?? "still being worked out")"))
     }
@@ -173,13 +167,12 @@ private struct SummaryNotice: View {
             Image(systemName: "exclamationmark.triangle")
                 .foregroundStyle(.secondary)
             Text(text)
-                .font(.footnote)
-                .foregroundStyle(.secondary)
+                .typeRole(.caption)
                 .fixedSize(horizontal: false, vertical: true)
             Spacer(minLength: 0)
         }
         .padding(12)
-        .background(RoundedRectangle(cornerRadius: 14, style: .continuous).fill(.quaternary))
+        .elevation(.raised, cornerRadius: CornerRadius.card)
     }
 }
 
