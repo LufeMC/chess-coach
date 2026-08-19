@@ -38,7 +38,8 @@ Requires Xcode 26 or later and an iPhone (or simulator) on iOS 18+.
 
 Two build inputs are **not** in git, because one is 71MB and the other is
 derived from a 900MB dump. Both are reproducible; neither is a blob you have to
-take on trust.
+take on trust — but **both are required**, and steps 1 and 2 have to happen
+before the first build.
 
 ### 1. The neural networks
 
@@ -87,13 +88,17 @@ xcodebuild build -scheme ChessCoach -skipMacroValidation \
 `-skipMacroValidation` is required because the build uses Swift macros that
 Xcode otherwise prompts to trust interactively.
 
-**If you skip steps 1 or 2:** the app builds and launches. Both resources are
-declared `optional:` in `project.yml` precisely so a fresh clone compiles. The
-engine then refuses to boot with a `missingNetwork` error, surfaced on screen
-rather than crashing — `EngineService.boot` checks both nets exist before any
-UCI command, because Stockfish calls `exit(EXIT_FAILURE)` from `Network::load`
-when a net is missing, and in-process that takes the whole app down with no
-crash report.
+**If you skip steps 1 or 2** the build fails at the resource-copy phase, and a
+pre-build check tells you which script to run. (`optional: true` in
+`project.yml` only keeps *project generation* from failing on a missing file; it
+does not make the resource optional at build time.)
+
+Separately, if a net goes missing at *runtime* — the app also looks in
+Application Support, so a build can outlive its assets — the engine refuses to
+boot with a `missingNetwork` error surfaced on screen. `EngineService.boot`
+checks both nets exist before sending any UCI command, because Stockfish calls
+`exit(EXIT_FAILURE)` from `Network::load` when a net is missing, and in-process
+that takes the whole app down with no crash report.
 
 ## Tests
 

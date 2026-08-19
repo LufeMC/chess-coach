@@ -93,6 +93,28 @@ targets:
     #     - iCloud.com.usenivel.chesscoach
     #   com.apple.developer.icloud-services: [CloudKit]
     #   com.apple.developer.ubiquity-kvstore-identifier: $(TeamIdentifierPrefix)$(CFBundleIdentifier)
+    preBuildScripts:
+      # Fails with the command to run, instead of three "no such file" errors
+      # from the resource-copy phase naming files a newcomer has no reason to
+      # recognise. The assets are deliberately not in git (71MB, and a derived
+      # database), so a fresh clone hitting this is the normal path, not a
+      # broken checkout — and this is the one place that can say so.
+      - name: Check generated assets
+        basedOnDependencyAnalysis: false
+        script: |
+          missing=0
+          for net in nn-37f18f62d772 nn-1c0000000000; do
+            if [ ! -f "$SRCROOT/App/Resources/Networks/$net.nnue" ]; then
+              echo "error: missing $net.nnue — run ./Scripts/fetch-nnue.sh"
+              missing=1
+            fi
+          done
+          if [ ! -f "$SRCROOT/App/Resources/puzzles.sqlite" ]; then
+            echo "error: missing puzzles.sqlite — see README.md step 2 (Tools/PuzzlePrep)"
+            missing=1
+          fi
+          exit $missing
+
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.usenivel.chesscoach
