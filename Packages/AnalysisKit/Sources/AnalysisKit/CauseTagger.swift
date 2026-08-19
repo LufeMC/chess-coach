@@ -101,8 +101,7 @@ public enum CauseTagger {
         findings: [Finding],
         context: MoveContext
     ) -> Mistake {
-        let ordered = findings.sorted { priority(of: $0) < priority(of: $1) }
-        let primary = ordered.first { baseMapping(for: $0) != nil }
+        let primary = primary(of: findings)
 
         let base: (cause: CauseTag, step: StepTag)
         if let primary, let mapped = baseMapping(for: primary) {
@@ -152,6 +151,20 @@ public enum CauseTagger {
         )
     }
 
+    /// The finding the diagnosis is built from.
+    ///
+    /// Everything that describes the move to the student — the cause tag, the
+    /// thinking step, the sentence, the squares carried into the moment — is
+    /// taken from this one finding, so they cannot be about different halves of
+    /// the position. A finding with no row in the table is never chosen: it has
+    /// nothing to say about *why* the move failed, and letting it win would
+    /// silence the finding underneath it that does.
+    public static func primary(of findings: [Finding]) -> Finding? {
+        findings
+            .sorted { priority(of: $0) < priority(of: $1) }
+            .first { baseMapping(for: $0) != nil }
+    }
+
     // MARK: Priority
 
     /// Lower is higher priority. `timeError` is deliberately unranked: it never
@@ -176,6 +189,11 @@ public enum CauseTagger {
 
     /// The published detector → cause/step table.
     ///
+    /// One projection of ``DiagnosisTable``; the coaching sentence for the same
+    /// finding is the other. A tag and a sentence sourced from separate tables
+    /// drift the first time a subtype is added to one of them, and a note that
+    /// contradicts the label above it is worse than no note.
+    ///
     /// - note: Two rows in the spec carry an extra condition — "refutation
     ///   captures it" for `hangingPiece(.moved)` and "refutation is check or
     ///   capture" for `allowedTactic(.shallow)`. Those conditions are already
@@ -184,40 +202,7 @@ public enum CauseTagger {
     ///   by the evaluation drop instead) it maps the same way, because the cause
     ///   is identical from the player's side of the board.
     public static func baseMapping(for finding: Finding) -> (cause: CauseTag, step: StepTag)? {
-        switch (finding.detector, finding.subtype) {
-        case (.ignoredThreat, .newThreat):
-            (.missedNewThreat, .s1WhatChanged)
-        case (.ignoredThreat, .standingThreat):
-            (.ignoredStandingThreat, .s2ChecksCapturesThreats)
-        case (.hangingPiece, .moved):
-            (.hungMovedPiece, .s5BlunderCheck)
-        case (.hangingPiece, .left):
-            (.hungLeftPiece, .s5BlunderCheck)
-        case (.allowedTactic, .shallow):
-            (.allowedShallowTactic, .s5BlunderCheck)
-        case (.allowedTactic, .deep):
-            (.allowedDeepTactic, .s4Calculate)
-        case (.missedTactic, .playedForcing):
-            (.miscalculatedTactic, .s4Calculate)
-        case (.missedTactic, .playedQuiet):
-            (.missedForcingIdea, .s2ChecksCapturesThreats)
-        case (.missedQuietMove, _):
-            (.forcingBias, .s3Candidates)
-        case (.wrongTrade, .losesMaterial):
-            (.miscountedExchange, .s4Calculate)
-        case (.wrongTrade, .badSimplification):
-            (.planlessTrade, .s3Candidates)
-        case (.kingWeakeningPawnMove, .tacticalPunish):
-            (.kingExposure, .s2ChecksCapturesThreats)
-        case (.kingWeakeningPawnMove, .positional):
-            (.kingExposure, .s3Candidates)
-        case (.endgameTechnique, _):
-            (.endgameTechnique, .kKnowledge)
-        case (.openingPrinciple, _):
-            (.openingPrinciple, .kKnowledge)
-        default:
-            nil
-        }
+        DiagnosisTable.row(for: finding).map { ($0.cause, $0.step) }
     }
 
     /// What to say when no detector explains the move.

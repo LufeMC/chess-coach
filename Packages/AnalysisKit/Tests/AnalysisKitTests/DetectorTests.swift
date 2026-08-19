@@ -468,17 +468,38 @@ struct OpeningPrincipleDetectorTests {
         #expect(findings.map(\.subtype) == [.repeatedPieceMove])
     }
 
-    @Test("A king still in the middle on move 15 with an open e-file is flagged")
+    /// A king still in the middle on move 15 with an open d-file, on a move that
+    /// cost something.
+    private let uncastled = "r2q1rk1/ppp2ppp/2n5/3p4/3P4/2N5/PPP2PPP/R2QK2R w KQ - 0 15"
+
+    @Test("A king still in the middle on move 15 with an open central file is flagged")
     func delayedCastling() throws {
         let context = try Fixture.context(
-            fen: "r2q1rk1/ppp2ppp/2n5/3p4/3P4/2N5/PPP2PPP/R2QK2R w KQ - 0 15",
+            fen: uncastled,
+            ply: 29,
+            played: "a2a3",
+            bestScore: .centipawns(-30),
+            refutationScore: .centipawns(200)
+        )
+        #expect(context.judgment >= .inaccuracy)
+        let findings = OpeningPrincipleDetector().detect(context)
+        #expect(findings.map(\.subtype) == [.delayedCastling])
+    }
+
+    /// The king does not move for ten more moves, so an ungated rule fires on
+    /// every one of those moves — including the good ones. A finding is a
+    /// diagnosis of the move that was played, and this move was fine.
+    @Test("The same uncastled king does not flag a move that cost nothing")
+    func delayedCastlingNeedsAnError() throws {
+        let context = try Fixture.context(
+            fen: uncastled,
             ply: 29,
             played: "a2a3",
             bestScore: .centipawns(-30),
             refutationScore: .centipawns(30)
         )
-        let findings = OpeningPrincipleDetector().detect(context)
-        #expect(findings.map(\.subtype) == [.delayedCastling])
+        #expect(context.judgment == .ok)
+        #expect(OpeningPrincipleDetector().detect(context).isEmpty)
     }
 
     @Test("Good moves break no principles")
@@ -516,6 +537,44 @@ struct EndgameTechniqueDetectorTests {
         #expect(finding.subtype == .kpk)
         #expect(finding.flags.contains(.exactBitbase))
         #expect(finding.flags.contains(.resultClassFlip))
+    }
+
+    /// The defending half of the same idea, and the half a score-based rule can
+    /// never see: Black holds the draw with 1...Kd5, and 1...Kb4 — stepping off
+    /// the pawn's file and behind it — loses. White's advantage is a few
+    /// centipawns either way, so the ±200cp result-class boundary is nowhere
+    /// near it.
+    @Test("A KPK draw walked into a loss is caught from the defending side")
+    func kpkDefenderRegression() throws {
+        let context = try Fixture.context(
+            fen: "8/8/8/2k5/3P4/8/3K4/8 b - - 0 60",
+            ply: 120,
+            played: "c5b4",
+            best: ["c5d5"],
+            bestScore: .centipawns(-20),
+            refutationScore: .centipawns(20)
+        )
+        #expect(context.phase == .endgame)
+        #expect(context.judgment == .ok)
+        #expect(ResultClass.classify(context.evalBefore) == ResultClass.classify(context.evalAfter))
+
+        let finding = try #require(EndgameTechniqueDetector().detect(context).first)
+        #expect(finding.subtype == .kpk)
+        #expect(finding.flags.contains(.exactBitbase))
+        #expect(finding.flags.contains(.resultClassFlip))
+    }
+
+    @Test("The defender holding the draw produces no finding")
+    func kpkDefenderCorrect() throws {
+        let context = try Fixture.context(
+            fen: "8/8/8/2k5/3P4/8/3K4/8 b - - 0 60",
+            ply: 120,
+            played: "c5d5",
+            best: ["c5d5"],
+            bestScore: .centipawns(-20),
+            refutationScore: .centipawns(20)
+        )
+        #expect(EndgameTechniqueDetector().detect(context).isEmpty)
     }
 
     @Test("Playing the winning move produces no finding")

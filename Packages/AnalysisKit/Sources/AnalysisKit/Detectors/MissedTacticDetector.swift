@@ -34,7 +34,7 @@ public struct MissedTacticDetector: Detector, Sendable {
         let isMate = isMateScore(context.bestLine.score) || steps.last?.move.checkState == .checkmate
         guard swing >= Self.materialThreshold || isMate else { return [] }
 
-        let theme = TacticThemeClassifier.classify(
+        let theme = TacticThemeClassifier.detail(
             steps: steps,
             from: context.positionBefore,
             score: context.bestLine.score,
@@ -49,8 +49,8 @@ public struct MissedTacticDetector: Detector, Sendable {
             Finding(
                 detector: id,
                 subtype: context.playedMoveIsForcing ? .playedForcing : .playedQuiet,
-                squares: [steps[0].move.start, steps[0].move.end],
-                themes: [theme],
+                squares: [steps[0].move.start, steps[0].move.end] + theme.squares,
+                themes: [theme.theme],
                 flags: flags,
                 magnitude: isMate ? Double(PieceValues.queen) : Double(swing),
                 detail: "Best line \(steps.map(\.uci).joined(separator: " ")) nets \(swing)cp"

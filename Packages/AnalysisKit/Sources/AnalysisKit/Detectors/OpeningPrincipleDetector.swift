@@ -74,7 +74,20 @@ public struct OpeningPrincipleDetector: Detector, Sendable {
         )
     }
 
+    /// The judgment gate matters more here than for the other two rules.
+    ///
+    /// `earlyQueen` and `repeatedPieceMove` describe the *move*, so they can only
+    /// fire on the move that broke the principle. This one describes the
+    /// *position*, and an uncastled king next to an open central file is still
+    /// there on the following move, and the one after that. Ungated it fires on
+    /// every move from move 14 until the king finds a home, which costs three
+    /// separate things: findings bypass ``CauseTagger/fallbackMapping(_:)``, so a
+    /// perfectly sound move ends up with a primary cause of `openingPrinciple`; a
+    /// reinforcement moment in that span carries a mistake-flavoured tag; and
+    /// every real mistake in between collects a knowledge tag it did not earn in
+    /// its secondary tags.
     private func delayedCastling(_ context: MoveContext) -> Finding? {
+        guard context.judgment >= .inaccuracy else { return nil }
         guard context.positionBefore.clock.fullmoves >= Self.castlingLimit else { return nil }
         guard !hasCastled(context) else { return nil }
         guard EvalMath.expectedPoints(score: context.evalBefore) <= 0.5 else { return nil }

@@ -109,14 +109,6 @@ public enum EvalMath {
         1 - ep
     }
 
-    /// Lichess's "winning chances" scale, -1 (lost) ... +1 (won).
-    ///
-    /// The puzzle miner's thresholds are published on this scale, so it gets a
-    /// first-class conversion rather than being open-coded at the call site.
-    public static func winChance(score: UCIScore) -> Double {
-        2 * expectedPoints(score: score) - 1
-    }
-
     // MARK: Accuracy
 
     /// Move accuracy (0...100) from the win percentages before and after a move.

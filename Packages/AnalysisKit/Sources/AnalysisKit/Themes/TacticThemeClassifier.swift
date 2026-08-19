@@ -20,6 +20,21 @@ public enum TacticTheme: String, Sendable, Codable, Hashable, CaseIterable {
     case unknownTactic
 }
 
+/// A motif together with the squares it turns on.
+public struct TacticThemeDetail: Sendable, Equatable, Hashable, Codable {
+    public let theme: TacticTheme
+    /// Most-relevant first: the forked targets in descending value, the front
+    /// and back of a pin or skewer, the mating square then the mated king, the
+    /// exposed piece then the defender that was removed, the trapped piece.
+    /// Empty when the motif has no geometry to point at.
+    public let squares: [Square]
+
+    public init(theme: TacticTheme, squares: [Square] = []) {
+        self.theme = theme
+        self.squares = squares
+    }
+}
+
 /// Names the motif behind a principal variation.
 ///
 /// Strictly first-match-wins in the order mate → fork → discovered attack →
@@ -50,7 +65,34 @@ public enum TacticThemeClassifier {
         score: UCIScore?,
         maxPlies: Int = defaultHorizon
     ) -> TacticTheme {
-        guard let key = steps.first else { return .unknownTactic }
+        detail(steps: steps, from: position, score: score, maxPlies: maxPlies).theme
+    }
+
+    /// The motif *and* the squares it turns on.
+    ///
+    /// The geometry is found either way — the fork test builds the target list,
+    /// the alignment test knows which piece is in front — so the only reason the
+    /// plain ``classify(pv:from:score:maxPlies:)`` throws it away is that a
+    /// theme tag is all a filter needs. Coaching copy needs the rest of it: a
+    /// note that says which two pieces the knight hit is worth several that say
+    /// "a fork was available".
+    public static func classifyDetailed(
+        pv: [String],
+        from position: Position,
+        score: UCIScore? = nil,
+        maxPlies: Int = defaultHorizon
+    ) -> TacticThemeDetail {
+        let steps = LineReplay.replay(uci: pv, from: position, maxPlies: maxPlies)
+        return detail(steps: steps, from: position, score: score, maxPlies: maxPlies)
+    }
+
+    static func detail(
+        steps: [ReplayStep],
+        from position: Position,
+        score: UCIScore?,
+        maxPlies: Int = defaultHorizon
+    ) -> TacticThemeDetail {
+        guard let key = steps.first else { return TacticThemeDetail(theme: .unknownTactic, squares: []) }
         let mover = key.mover
 
         if let mate = mateTheme(steps: steps, score: score, maxPlies: maxPlies, mover: mover) {
@@ -60,15 +102,26 @@ public enum TacticThemeClassifier {
         let before = Occupancy(key.positionBefore)
         let after = Occupancy(key.positionAfter)
 
-        if isFork(after: after, keyMove: key.move, mover: mover) { return .fork }
-        if isDiscoveredAttack(before: before, after: after, keyMove: key.move, mover: mover) {
-            return .discoveredAttack
-        }
-        if let alignment = alignmentTheme(before: before, after: after, mover: mover) { return alignment }
-        if isRemovalOfDefender(steps: steps, mover: mover) { return .removalOfDefender }
-        if isTrappedPiece(steps: steps, mover: mover) { return .trappedPiece }
+        let forked = forkTargets(after: after, keyMove: key.move, mover: mover)
+        if !forked.isEmpty { return TacticThemeDetail(theme: .fork, squares: forked) }
 
-        return .unknownTactic
+        if let target = discoveredTarget(before: before, after: after, keyMove: key.move, mover: mover) {
+            return TacticThemeDetail(theme: .discoveredAttack, squares: [target])
+        }
+        if let alignment = alignment(before: before, after: after, mover: mover) {
+            return TacticThemeDetail(
+                theme: alignment.theme,
+                squares: [alignment.frontSquare, alignment.backSquare]
+            )
+        }
+        if let removal = removalOfDefender(steps: steps, mover: mover) {
+            return TacticThemeDetail(theme: .removalOfDefender, squares: [removal.guarded, removal.defender])
+        }
+        if let trapped = trappedPiece(steps: steps, mover: mover) {
+            return TacticThemeDetail(theme: .trappedPiece, squares: [trapped])
+        }
+
+        return TacticThemeDetail(theme: .unknownTactic, squares: [])
     }
 
     // MARK: Mate
@@ -78,7 +131,7 @@ public enum TacticThemeClassifier {
         score: UCIScore?,
         maxPlies: Int,
         mover: Piece.Color
-    ) -> TacticTheme? {
+    ) -> TacticThemeDetail? {
         var matingStep: ReplayStep?
 
         if let last = steps.last, last.move.checkState == .checkmate, last.mover == mover {
@@ -95,9 +148,17 @@ public enum TacticThemeClassifier {
         }
 
         guard matingStep != nil || scoreSaysMate else { return nil }
-        guard let mate = matingStep else { return .mateThreat }
+        guard let mate = matingStep else {
+            return TacticThemeDetail(theme: .mateThreat, squares: [])
+        }
 
-        return isBackRankMate(mate, mover: mover) ? .backRankMate : .mateThreat
+        // The mating square first, the mated king second: a note names where the
+        // blow landed before it names what it landed on.
+        let king = Occupancy(mate.positionAfter).kingSquare(of: mover.opposite)
+        return TacticThemeDetail(
+            theme: isBackRankMate(mate, mover: mover) ? .backRankMate : .mateThreat,
+            squares: [mate.move.end] + [king].compactMap { $0 }
+        )
     }
 
     /// Back rank: the mate lands on the defender's own first rank and the king's
@@ -124,30 +185,40 @@ public enum TacticThemeClassifier {
 
     /// The moved piece now attacks two or more valuable targets, at least one of
     /// which can actually be taken without losing material.
-    static func isFork(after: Occupancy, keyMove: Move, mover: Piece.Color) -> Bool {
+    ///
+    /// - returns: The forked squares, most valuable first, or an empty list when
+    ///   the position is not a fork. The king sorts above the queen: "the king
+    ///   and the rook" is how the fork is taught, whatever the point count says.
+    static func forkTargets(after: Occupancy, keyMove: Move, mover: Piece.Color) -> [Square] {
+        var seen: Set<Square> = []
         let targets = after.attackedSquares(from: keyMove.end)
             .compactMap { square -> Square? in
                 guard let piece = after[square], piece.color == mover.opposite else { return nil }
                 guard PieceValues.value(of: piece) >= materialFloor || piece.kind == .king else { return nil }
-                return square
+                return seen.insert(square).inserted ? square : nil
             }
-        guard Set(targets).count >= 2 else { return false }
+        guard targets.count >= 2 else { return [] }
 
-        return targets.contains { target in
+        let takeable = targets.contains { target in
             guard after[target]?.kind != .king else { return true }
             return SEE.exchangeValue(occupancy: after, from: keyMove.end, to: target) >= 0
         }
+        guard takeable else { return [] }
+
+        return targets.sorted { PieceValues.value(of: after[$0]!) > PieceValues.value(of: after[$1]!) }
     }
 
     // MARK: Discovered attack
 
     /// The key move vacated a square a friendly slider was firing through.
-    static func isDiscoveredAttack(
+    ///
+    /// - returns: The square the unmasked slider now hits, or `nil`.
+    static func discoveredTarget(
         before: Occupancy,
         after: Occupancy,
         keyMove: Move,
         mover: Piece.Color
-    ) -> Bool {
+    ) -> Square? {
         let vacated = keyMove.start
 
         for slider in after.pieces(of: mover) where isSlider(slider.kind) {
@@ -161,10 +232,10 @@ public enum TacticThemeClassifier {
                 continue
             }
             guard targetSquare != vacated, target.color == mover.opposite else { continue }
-            if target.kind == .king || PieceValues.value(of: target) >= materialFloor { return true }
+            if target.kind == .king || PieceValues.value(of: target) >= materialFloor { return targetSquare }
         }
 
-        return false
+        return nil
     }
 
     // MARK: Pin and skewer
@@ -174,14 +245,19 @@ public enum TacticThemeClassifier {
     /// Pin when the piece behind is worth more (the front piece dare not move),
     /// skewer when the piece in front is worth more (it must move and exposes the
     /// one behind).
-    static func alignmentTheme(before: Occupancy, after: Occupancy, mover: Piece.Color) -> TacticTheme? {
+    static func alignment(
+        before: Occupancy,
+        after: Occupancy,
+        mover: Piece.Color
+    ) -> (theme: TacticTheme, frontSquare: Square, backSquare: Square)? {
         let existing = alignments(in: before, mover: mover)
-        for alignment in alignments(in: after, mover: mover) where !existing.contains(alignment) {
+        for alignment in alignments(in: after, mover: mover).sorted(by: { $0.order < $1.order })
+        where !existing.contains(alignment) {
             let front = PieceValues.value(of: alignment.front)
             let back = PieceValues.value(of: alignment.back)
             guard max(front, back) >= materialFloor else { continue }
-            if back > front { return .pin }
-            if front > back { return .skewer }
+            if back > front { return (.pin, alignment.frontSquare, alignment.backSquare) }
+            if front > back { return (.skewer, alignment.frontSquare, alignment.backSquare) }
         }
         return nil
     }
@@ -192,6 +268,11 @@ public enum TacticThemeClassifier {
         let backSquare: Square
         let front: Piece.Kind
         let back: Piece.Kind
+
+        /// A `Set` has no order, and which of two simultaneous alignments a note
+        /// names must not depend on hash seeding — the same position has to
+        /// produce the same sentence on every run.
+        var order: Int { slider.rawValue << 12 | frontSquare.rawValue << 6 | backSquare.rawValue }
     }
 
     private static func alignments(in occupancy: Occupancy, mover: Piece.Color) -> Set<Alignment> {
@@ -222,32 +303,36 @@ public enum TacticThemeClassifier {
 
     /// The key move captures a defender, and once the dust settles the piece it
     /// was protecting can be taken for profit.
-    static func isRemovalOfDefender(steps: [ReplayStep], mover: Piece.Color) -> Bool {
-        guard let key = steps.first, case .capture(let defender) = key.move.result else { return false }
+    static func removalOfDefender(
+        steps: [ReplayStep],
+        mover: Piece.Color
+    ) -> (defender: Square, guarded: Square)? {
+        guard let key = steps.first, case .capture(let defender) = key.move.result else { return nil }
 
         let before = Occupancy(key.positionBefore)
         let guarded = before.attackedSquares(from: defender.square).filter { square in
             guard let piece = before[square] else { return false }
             return piece.color == defender.color && PieceValues.value(of: piece) >= PieceValues.pawn
         }
-        guard !guarded.isEmpty else { return false }
+        guard !guarded.isEmpty else { return nil }
 
         // Look at the position after the opponent has had their reply; a defender
         // removal that the opponent simply repairs is not the theme.
         let settled = steps.count >= 2 ? steps[1].positionAfter : key.positionAfter
         let occupancy = Occupancy(settled)
 
-        return guarded.contains { square in
+        let exposed = guarded.first { square in
             guard let piece = occupancy[square], piece.color == mover.opposite else { return false }
             return SEE.see(occupancy, target: square, side: mover) > 0
         }
+        return exposed.map { (defender.square, $0) }
     }
 
     // MARK: Trapped piece
 
     /// An enemy piece is attacked and every square it can run to loses material.
-    static func isTrappedPiece(steps: [ReplayStep], mover: Piece.Color) -> Bool {
-        guard let key = steps.first else { return false }
+    static func trappedPiece(steps: [ReplayStep], mover: Piece.Color) -> Square? {
+        guard let key = steps.first else { return nil }
         let position = key.positionAfter
         let occupancy = Occupancy(position)
         let board = Board(position: position)
@@ -261,10 +346,10 @@ public enum TacticThemeClassifier {
             let allEscapesLose = escapes.allSatisfy {
                 SEE.exchangeValue(occupancy: occupancy, from: target.square, to: $0) < 0
             }
-            if allEscapesLose { return true }
+            if allEscapesLose { return target.square }
         }
 
-        return false
+        return nil
     }
 
     // MARK: Helpers
