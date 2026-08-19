@@ -23,7 +23,7 @@
 	<key>ITSAppUsesNonExemptEncryption</key>
 	<false/>
 	<key>NSHumanReadableCopyright</key>
-	<string>Embeds Stockfish (GPL v3) and ChessKit (MIT). See Settings › Acknowledgements.</string>
+	<string>ChessCoach is free software under the GNU GPL v3. Embeds Stockfish (GPL v3) and ChessKit (MIT). Source and notices: Settings › Acknowledgements.</string>
 	<key>UILaunchScreen</key>
 	<dict/>
 </dict>

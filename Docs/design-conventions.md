@@ -25,7 +25,10 @@ or the row loses its anchor.
 then the summary paragraph inside a filled rounded rect. That separation is the
 rule for coach text vs engine numbers.
 
-## Streaming AI text without layout jump
+## Coach text that arrives late without a layout jump
+
+The note is written while the game is analysed, so the card exists before its
+sentence does.
 
 1. **Reserve space first.** Wabi renders the finished card's skeleton while
    generating — avatar placeholder, title bar, three rows of grey capsules at

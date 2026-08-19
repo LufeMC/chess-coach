@@ -14,9 +14,55 @@ import SwiftUI
 /// app first leaves this machine is a bad day to discover it is missing.
 struct AcknowledgementsScreen: View {
 
+    /// Where the corresponding source is published.
+    ///
+    /// GPL v3 requires that everyone who receives the app can get the source it
+    /// was built from — TestFlight testers included — so this is not a courtesy
+    /// link, it is the compliance mechanism. It has to keep pointing at source
+    /// that actually corresponds to the shipped build.
+    static let sourceRepository = URL(string: "https://github.com/LufeMC/chess-coach")!
+
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 24) {
+                // ChessCoach's own licence comes first. The rest of this screen
+                // is notices *owed to* other projects; this card is the app
+                // stating its own terms, which is the thing GPL v3 obliges and
+                // the thing a list of third-party notices does not cover.
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("ChessCoach")
+                        .typeRole(.headline)
+
+                    Text("GNU GPL v3")
+                        .typeRole(.label)
+
+                    Text("This app is free software. You may use, study, share and modify it under the terms of the GNU General Public License, version 3 or later.")
+                        .typeRole(.body, appliesForeground: false)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+
+                    Text("""
+                        ChessCoach embeds Stockfish, which is licensed under the \
+                        GNU General Public License v3. Linking it into this app \
+                        makes the combined program a derivative work, so \
+                        ChessCoach is distributed under the same licence, and \
+                        its complete corresponding source is published.
+
+                        This program comes with ABSOLUTELY NO WARRANTY.
+                        """)
+                        .font(.system(.caption, design: .monospaced))
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .padding(.top, 2)
+
+                    Link("Source code", destination: Self.sourceRepository)
+                        .typeRole(.caption)
+                        .padding(.top, 2)
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(16)
+                .elevation(.raised, cornerRadius: CornerRadius.card)
+
                 ForEach(Acknowledgement.all) { entry in
                     VStack(alignment: .leading, spacing: 6) {
                         Text(entry.name)
