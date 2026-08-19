@@ -73,13 +73,58 @@ struct EngineSmokeTests {
     @Test("Reports no move in a terminal position")
     func terminalPosition() async throws {
         let engine = try await Self.bootedEngine()
-        // Black is already checkmated (back-rank mate delivered).
-        let result = try await engine.search(.fen("6k1/5ppp/8/8/8/8/8/R5K1 b - - 0 1", moves: []), limit: .depth(4))
-        // Position is not actually mate here — black is fine; assert we get a move.
-        #expect(result.bestMove != nil)
 
-        let mated = try await engine.search(.fen("6k1/5ppp/8/8/8/8/5PPP/R5K1 b - - 0 1", moves: []), limit: .depth(4))
-        #expect(mated.bestMove != nil)
+        // Back-rank mate, already delivered: Ra8 checks along the eighth, f8 and
+        // h8 are covered by the same rook, and Black's own pawns seal f7/g7/h7.
+        // Black has nothing that can interpose or capture, so it is mate and the
+        // engine has no move to report.
+        let mated = try await engine.search(.fen("R5k1/5ppp/8/8/8/8/8/6K1 b - - 0 1", moves: []), limit: .depth(4))
+        #expect(mated.bestMove == nil, "expected `bestmove (none)`, got \(mated.bestMove ?? "nil")")
+
+        // The same material one tempo earlier: the rook is on a1, so Black is
+        // fine and there is a move. This half is what proves the assertion above
+        // is testing the position rather than a parser that returns nil freely.
+        let playable = try await engine.search(.fen("6k1/5ppp/8/8/8/8/8/R5K1 b - - 0 1", moves: []), limit: .depth(4))
+        #expect(playable.bestMove != nil)
+    }
+
+    @Test("A stopped search is marked truncated rather than passed off as complete")
+    func stoppedSearchIsMarkedTruncated() async throws {
+        let engine = try await Self.bootedEngine()
+        await engine.setOption(.multiPV, 1)
+        await engine.isReady()
+
+        async let search = engine.search(.startPosition(moves: []), limit: .infinite)
+        try await Task.sleep(for: .milliseconds(400))
+        await engine.stop()
+
+        let stopped = try await search
+        #expect(stopped.wasTruncated, "a search cut off by `stop` must not look like a completed one")
+
+        // And a search left to finish on its own must not be flagged, or the
+        // analysis pass would refuse to checkpoint anything at all.
+        let complete = try await engine.search(.startPosition(moves: []), limit: .nodes(50_000))
+        #expect(!complete.wasTruncated)
+    }
+
+    @Test("A cancelled search stops the engine and throws")
+    func cancelledSearchThrows() async throws {
+        let engine = try await Self.bootedEngine()
+        await engine.setOption(.multiPV, 1)
+        await engine.isReady()
+
+        let task = Task { try await engine.search(.startPosition(moves: []), limit: .infinite) }
+        try await Task.sleep(for: .milliseconds(400))
+        task.cancel()
+
+        await #expect(throws: CancellationError.self) {
+            _ = try await task.value
+        }
+
+        // The engine has to come back clean: a cancelled search that leaves the
+        // slot occupied wedges every caller after it.
+        await engine.waitUntilIdle()
+        #expect(await !engine.isSearching)
     }
 
     @Test("Returns the requested number of MultiPV lines")

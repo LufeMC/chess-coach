@@ -1,6 +1,8 @@
 import BoardUI
 import ChessKit
+import Database
 import SwiftUI
+import TrainingCore
 
 /// The play surface.
 ///
@@ -66,9 +68,23 @@ struct PlayScreen: View {
         }
         .navigationTitle("Play")
         .navigationBarTitleDisplayMode(.inline)
-        // Loaded on appear so the start prompt names the opponent you will
-        // actually face, not a placeholder that changes when you tap.
-        .task { picker = .current() }
+        .task {
+            // `startGame` re-reads the picker itself, so reading here as well
+            // would run the same two queries twice on the way into a game.
+            if !consumePendingRequest() {
+                // Loaded on appear so the start prompt names the opponent you
+                // will actually face, not a placeholder that changes when you
+                // tap.
+                picker = .current()
+            }
+        }
+        // The tab is kept alive once visited, so a request arriving while this
+        // screen already exists would never reach `task`. Both entry points run
+        // the same consume, which is what stops a stale flag from starting a
+        // game later on a screen the user came back to for something else.
+        .onChange(of: model.pendingPlayRequest) { _, requested in
+            if requested { consumePendingRequest() }
+        }
         .toolbar(session == nil ? .visible : .hidden, for: .navigationBar)
         .toolbar(session == nil ? .visible : .hidden, for: .tabBar)
         .navigationDestination(item: $summaryTarget) { target in
@@ -82,23 +98,41 @@ struct PlayScreen: View {
         VStack(spacing: 24) {
             Spacer()
 
-            BoardView(position: .standard, interaction: .locked)
+            BoardView(position: .standard, interaction: .locked, style: BoardAppearance.shared.style)
                 .frame(maxWidth: 280)
                 .opacity(0.35)
 
             VStack(spacing: 6) {
                 Text("Sparring")
                     .typeRole(.title)
-                Text("One game, then three moments to study.")
+                // Not "three moments": the number is a property of the game
+                // you are about to play, and this screen is standing in front
+                // of it. A clean game yields one moment or none, and a promise
+                // made here is one the summary screen has to break. See
+                // `DailyProgress.momentsAvailable` for the same rule on Today.
+                Text("One game, then the moments worth studying.")
                     .typeRole(.caption)
             }
 
             Spacer()
 
-            Button("Play \(opponentName)") {
-                startGame()
+            VStack(spacing: 8) {
+                Button("Play \(opponentName)") {
+                    startGame()
+                }
+                .buttonStyle(.primaryAction)
+
+                // Offered only when there is a habit to coach. A guided game
+                // with no focus would pause to ask about nothing in particular,
+                // which is the fastest way to teach someone to dismiss the
+                // pauses unread.
+                if let habit = guidedFocusHabit {
+                    Button("Guided game · \(habit.microGoalTitle)") {
+                        startGame(guidedBy: habit)
+                    }
+                    .buttonStyle(.secondaryAction)
+                }
             }
-            .buttonStyle(.primaryAction)
             .padding(.horizontal)
         }
         .padding(.bottom)
@@ -109,16 +143,57 @@ struct PlayScreen: View {
         picker.opponent.name
     }
 
+    /// The week's habit, or nil when there is nothing to coach yet.
+    ///
+    /// Read straight from storage rather than through a `MetricsService`
+    /// refresh: selection replays up to twenty games, and the start prompt only
+    /// needs to know which habit is in force — which selection already wrote
+    /// down. A fresh install has no focus, and the guided option correctly does
+    /// not appear until the first weekly selection has run.
+    private var guidedFocusHabit: Habit? {
+        guard let database = AppDatabase.sharedIfAvailable else { return nil }
+        return MetricsService.storedFocus(
+            metrics: database.metrics,
+            settings: database.settings
+        )?.habit
+    }
+
     private var opponentRating: Int {
         picker.rating
     }
 
-    private func startGame() {
+    /// Starts the game Today's CTA already promised.
+    ///
+    /// Today's button names the opponent and the price, so arriving here to a
+    /// second `Play Oscar` button would be the app asking twice for one
+    /// decision. A game in progress wins — but the request is still consumed,
+    /// because a flag left set is a game that starts out of nowhere later.
+    ///
+    /// - Returns: whether a game was started.
+    @discardableResult
+    private func consumePendingRequest() -> Bool {
+        guard model.consumePlayRequest(), session == nil else { return false }
+        startGame()
+        return true
+    }
+
+    private func startGame(guidedBy habit: Habit? = nil) {
         // Re-read on each start: the rating moves after every rated game, and
         // the games-played count is what advances the offset cycle.
         picker = .current()
 
-        let configuration = GameSession.Configuration.sparring(
+        // Guided and sparring are the same game with different interruptions,
+        // so they share every other parameter. They differ in what they are
+        // evidence of: a guided game is coached, so the ladder discounts it and
+        // `guided.scanThreatsHitRate` — which gates the required rung-2 skill —
+        // is only ever measured here.
+        let configuration = habit.map {
+            GameSession.Configuration.guided(
+                userColor: userColor,
+                opponentRating: picker.rating,
+                focusHabit: $0
+            )
+        } ?? GameSession.Configuration.sparring(
             userColor: userColor,
             opponentRating: picker.rating
         )
@@ -164,7 +239,8 @@ struct PlayScreen: View {
                 orientation: orientation(session),
                 interaction: interaction(for: session),
                 highlights: highlights(for: session),
-                arrows: arrows(for: session)
+                arrows: arrows(for: session),
+                style: BoardAppearance.shared.style
             )
             .scaleEffect(boardScale(for: sheetKind), anchor: .top)
             .animation(Motion.gentle, value: boardScale(for: sheetKind))
@@ -206,14 +282,21 @@ struct PlayScreen: View {
                 if let won = outcome.userWon {
                     Haptics.play(.gameEnd(won: won))
                 }
+                // Outside that guard on purpose: the sound is the same for a
+                // win, a loss and a draw, so unlike the haptic it has nothing
+                // to withhold from a player who drew.
+                Sound.play(.gameEnd)
             }
         }
         .sheet(item: sheetBinding(session)) { kind in
             sheetContent(kind, session: session)
                 .presentationDetents([.height(detentHeight(for: kind))])
                 // Removes the system dimming layer, which is the whole point:
-                // the board stays visible *and* stays playable underneath.
-                .presentationBackgroundInteraction(.enabled)
+                // the board stays visible *and* stays playable underneath. The
+                // guided pause is the one sheet that says no, and it says why.
+                .presentationBackgroundInteraction(
+                    kind.allowsBoardInteraction ? .enabled : .disabled
+                )
                 .presentationDragIndicator(.visible)
                 .presentationCornerRadius(CornerRadius.sheet)
         }
@@ -333,6 +416,7 @@ struct PlayScreen: View {
 
     private func currentSheet(_ session: GameSession) -> PlaySheetKind? {
         if case .secondTry = session.phase { return .secondTry }
+        if case .guidedPrompt = session.phase { return .guidedPrompt }
         return manualSheet
     }
 
@@ -346,6 +430,12 @@ struct PlayScreen: View {
                 if newValue == nil, case .secondTry = session.phase {
                     session.resumeAfterSecondTry()
                 }
+                // Pulling the guided card down ends the pause too. It counts as
+                // asking to be shown rather than as answering: a question
+                // dismissed unanswered is not evidence the idea landed.
+                if newValue == nil, case .guidedPrompt = session.phase {
+                    session.resolveGuidedPrompt(revealed: true)
+                }
                 manualSheet = newValue
             }
         )
@@ -357,6 +447,12 @@ struct PlayScreen: View {
         case .secondTry:
             if case .secondTry(let state) = session.phase {
                 SecondTrySheet(state: state, session: session)
+            }
+        case .guidedPrompt:
+            if case .guidedPrompt(let state) = session.phase {
+                GuidedPromptSheet(state: state) { revealed in
+                    session.resolveGuidedPrompt(revealed: revealed)
+                }
             }
         case .options:
             GameOptionsSheet(
@@ -438,6 +534,7 @@ struct PlayScreen: View {
             if !lowTimeWarned, PlayClock.crossedCritical(previousMs: previousUserMs, currentMs: userMs) {
                 lowTimeWarned = true
                 Haptics.play(.clockWarning)
+                Sound.play(.clockWarning)
             }
             previousUserMs = userMs
 
@@ -524,8 +621,26 @@ struct PlayScreen: View {
             // exactly how an illegal move snaps back — and how second-try
             // retracts a blunder.
             guard session.board.canMove(pieceAt: from, to: to) else {
+                Sound.play(.illegalDrop)
                 return .rejected
             }
+
+            // A promoting pawn has to be asked about before the move is played,
+            // because the piece it becomes is part of the move. `BoardUI`
+            // presents its inline picker over the destination square and calls
+            // back with the choice.
+            //
+            // Underpromotion is reachable on purpose rather than auto-queening:
+            // `underPromotion` is in the app's own theme vocabulary, and a
+            // board that silently queens cannot express an idea the training
+            // side of the app teaches.
+            if session.isPromotion(from: from, to: to) {
+                return .needsPromotion(complete: { kind in
+                    Task { await session.attemptUserMove(from: from, to: to, promoting: kind) }
+                    return .accepted
+                })
+            }
+
             Task { await session.attemptUserMove(from: from, to: to) }
             return .accepted
         }

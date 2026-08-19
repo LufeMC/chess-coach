@@ -28,20 +28,26 @@ struct CalibrationGamesView: View {
     let engineService: EngineService
 
     @State private var session: GameSession?
+    @State private var isConfirmingResign = false
 
     var body: some View {
         VStack(spacing: 12) {
             CalibrationHeader(progress: flow.progress)
                 .padding(.horizontal)
 
-            if let session {
-                activeGame(session)
-            } else {
-                ProgressView()
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
-            }
+            statusRow
+                .padding(.horizontal)
+
+            boardSlot
+
+            Spacer(minLength: 0)
+
+            resignButton
+                .padding(.horizontal)
+                .padding(.bottom, 12)
         }
         .padding(.top, 8)
+        .background(Palette.surfaceGround.dynamic.ignoresSafeArea())
         .task(id: flow.games.count) { await startGame() }
         .onChange(of: finishedOutcome) { _, outcome in
             guard let outcome else { return }
@@ -84,46 +90,79 @@ struct CalibrationGamesView: View {
         }
     }
 
+    // MARK: Status
+
+    /// Which side you are, which side is moving, and how strong the opponent is.
+    ///
+    /// The opponent's rating is on screen because the ladder is the honest part
+    /// of this phase: a user who loses game one and then sees the next opponent
+    /// drop a hundred points can read the measurement working, rather than
+    /// suspecting the app of being hard for its own sake.
+    private var statusRow: some View {
+        HStack(alignment: .firstTextBaseline) {
+            Text(sideLabel)
+                .typeRole(.caption)
+            Spacer(minLength: 12)
+            Text(turnLabel)
+                .typeRole(.label, monospacedDigits: true)
+                .contentTransition(.opacity)
+        }
+        .animation(Motion.crossfade, value: turnLabel)
+    }
+
+    private var sideLabel: String {
+        guard let session else { return "Setting up" }
+        return session.configuration.userColor == .white ? "You play White" : "You play Black"
+    }
+
+    /// A word, never a spinner.
+    ///
+    /// A spinner while the opponent thinks is the second most reliable tell of a
+    /// chess app that has not been edited: it animates for the entire time the
+    /// user is meant to be looking at the position, and it says nothing the
+    /// board does not already say.
+    private var turnLabel: String {
+        guard let session else { return "Opponent \(flow.opponentRating)" }
+        switch session.phase {
+        case .opponentThinking: return "Thinking"
+        case .userToMove: return "Your move"
+        default: return "Opponent \(session.configuration.opponentRating)"
+        }
+    }
+
     // MARK: Board
 
     @ViewBuilder
-    private func activeGame(_ session: GameSession) -> some View {
-        VStack(spacing: 10) {
-            HStack {
-                Text(session.configuration.userColor == .white ? "You play White" : "You play Black")
-                    .font(.footnote)
-                    .foregroundStyle(.secondary)
-                Spacer()
-                if session.phase == .opponentThinking {
-                    ProgressView().controlSize(.small)
-                }
+    private var boardSlot: some View {
+        Group {
+            if let session {
+                BoardView(
+                    position: session.board.position,
+                    orientation: session.configuration.userColor,
+                    interaction: interaction(for: session),
+                    highlights: highlights(for: session),
+                    style: BoardAppearance.shared.style
+                )
+            } else {
+                EmptyBoardSlot()
             }
-            .padding(.horizontal)
-
-            BoardView(
-                position: session.board.position,
-                orientation: session.configuration.userColor,
-                interaction: interaction(for: session),
-                highlights: highlights(for: session)
-            )
-            .padding(.horizontal, 12)
-
-            Spacer(minLength: 0)
-
-            Button("Resign") {
-                session.resign()
-            }
-            .buttonStyle(.plain)
-            .font(.subheadline)
-            .foregroundStyle(.secondary)
-            .padding(.bottom, 12)
         }
+        .skeleton(if: session == nil) { BoardSkeleton() }
     }
 
     private func interaction(for session: GameSession) -> BoardInteraction {
         guard case .userToMove = session.phase else { return .replay }
         return .userMove { from, to in
             guard session.board.canMove(pieceAt: from, to: to) else { return .rejected }
+            // Calibration games are real games, so they promote like real
+            // games. Skipping the picker here would corrupt the one measurement
+            // the entire curriculum is seeded from.
+            if session.isPromotion(from: from, to: to) {
+                return .needsPromotion(complete: { kind in
+                    Task { await session.attemptUserMove(from: from, to: to, promoting: kind) }
+                    return .accepted
+                })
+            }
             Task { await session.attemptUserMove(from: from, to: to) }
             return .accepted
         }
@@ -132,5 +171,29 @@ struct CalibrationGamesView: View {
     private func highlights(for session: GameSession) -> [SquareHighlight] {
         guard let last = session.lastMove else { return [] }
         return SquareHighlight.lastMove(from: last.from, to: last.to)
+    }
+
+    // MARK: Resign
+
+    /// Quiet, and asked about first.
+    ///
+    /// Resigning is a legitimate escape from a game that has stopped teaching
+    /// anything, and it is also a loss the combiner will believe. One stray tap
+    /// costing a hundred points off a first-run measurement is worth a
+    /// confirmation, and the confirmation is where the cost gets said out loud.
+    private var resignButton: some View {
+        Button("Resign this game") { isConfirmingResign = true }
+            .buttonStyle(.tertiaryAction)
+            .disabled(session == nil)
+            .confirmationDialog(
+                "Resign game \(flow.games.count + 1)?",
+                isPresented: $isConfirmingResign,
+                titleVisibility: .visible
+            ) {
+                Button("Resign", role: .destructive) { session?.resign() }
+                Button("Keep playing", role: .cancel) {}
+            } message: {
+                Text("It counts as a loss, and the next opponent drops a hundred points.")
+            }
     }
 }
