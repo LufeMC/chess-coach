@@ -12,30 +12,60 @@ import SwiftUI
 /// be visible at the same time or the primary interaction is only available at
 /// scroll-top — and everything else scrolls under them. On Mac the same material
 /// is split into three named panels.
+///
+/// The scrolling half is ordered as the story of the game: the verdict, then the
+/// numbers behind it, then the three positions it turned on, then the coach on
+/// whichever of them is selected. The move list comes last and closed, because a
+/// list of sixty half-moves is reference material — it answers "what happened on
+/// move 41", which is a question you arrive with, not one the screen should
+/// spend its first screenful anticipating.
 struct ReviewScreen: View {
 
     @State private var model: ReviewModel
     /// Mac only; harmless elsewhere.
     @State private var isCoachCollapsed = false
+    @State private var isMoveListExpanded = false
 
-    private let style = BoardStyle.default
+    /// Read through the shared appearance rather than captured once, so a theme
+    /// changed in Settings is reflected the next time this screen draws.
+    private var style: BoardStyle { BoardAppearance.shared.style }
+
+    /// A moment to scrub to once the game has loaded.
+    ///
+    /// Carried rather than applied immediately because the positions do not
+    /// exist until `load()` has run; selecting before then would silently do
+    /// nothing and leave the user at move 1 wondering what they tapped.
+    private let focusMomentID: UUID?
 
     init(gameID: UUID) {
         _model = State(initialValue: ReviewModel(gameID: gameID))
+        focusMomentID = nil
     }
 
-    /// Injection point for previews and for a future coach service.
+    /// Opens the game already scrubbed to one moment — the destination of a
+    /// moment route, where the user asked for that position specifically.
+    init(gameID: UUID, focusMomentID: UUID) {
+        _model = State(initialValue: ReviewModel(gameID: gameID))
+        self.focusMomentID = focusMomentID
+    }
+
+    /// Injection point for previews.
     init(model: ReviewModel) {
         _model = State(initialValue: model)
+        focusMomentID = nil
     }
 
     var body: some View {
         content
+            .background(Palette.surfaceGround.dynamic.ignoresSafeArea())
             .navigationTitle("Review")
             #if os(iOS)
                 .navigationBarTitleDisplayMode(.inline)
             #endif
-            .task { await model.load() }
+            .task {
+                await model.load()
+                if let focusMomentID { model.select(momentID: focusMomentID) }
+            }
             .modifier(ReviewKeyboardCommands(model: model))
     }
 
@@ -91,17 +121,16 @@ struct ReviewScreen: View {
                             if let notice = analysisNotice {
                                 notice.padding(.horizontal, 16)
                             }
+                            if let verdict = model.verdict {
+                                ReviewVerdictCard(verdict: verdict)
+                                    .padding(.horizontal, 16)
+                            }
+                            statPills
+                                .padding(.horizontal, 16)
                             filmstripSection(width: proxy.size.width)
                             coachSection.padding(.horizontal, 16)
-                            ReviewMoveList(
-                                rows: model.moveRows,
-                                currentPly: model.currentPly,
-                                selectedPly: model.selectedRowPly,
-                                style: style,
-                                onSelect: { model.selectRow(ply: $0) },
-                                onAsk: { model.askAboutMove(ply: $0) }
-                            )
-                            .padding(.horizontal, 16)
+                            moveListSection
+                                .padding(.horizontal, 16)
                         }
                         .padding(.vertical, 16)
                     }
@@ -128,6 +157,7 @@ struct ReviewScreen: View {
                         evalBar
                             .frame(maxWidth: 520)
                         scrubber
+                        statPills
                         filmstripSection(width: 520)
                         Spacer(minLength: 0)
                     }
@@ -139,10 +169,8 @@ struct ReviewScreen: View {
                         ReviewMoveList(
                             rows: model.moveRows,
                             currentPly: model.currentPly,
-                            selectedPly: model.selectedRowPly,
                             style: style,
-                            onSelect: { model.selectRow(ply: $0) },
-                            onAsk: { model.askAboutMove(ply: $0) }
+                            onSelect: { model.select(index: $0) }
                         )
                         .padding(12)
                     }
@@ -160,12 +188,9 @@ struct ReviewScreen: View {
                             .foregroundStyle(.secondary)
                             .frame(maxHeight: .infinity)
                             .frame(width: 28)
-                            .background(
-                                RoundedRectangle(cornerRadius: 12, style: .continuous)
-                                    .fill(.quaternary)
-                            )
+                            .elevation(.raised, cornerRadius: CornerRadius.chip)
                     }
-                    .buttonStyle(.plain)
+                    .buttonStyle(.pressable)
                     .help("Show the coach panel")
                 } else {
                     ReviewPanel(
@@ -177,21 +202,26 @@ struct ReviewScreen: View {
                                 Image(systemName: "chevron.right")
                                     .font(.caption.weight(.semibold))
                             }
-                            .buttonStyle(.plain)
+                            .buttonStyle(.pressable)
                             .foregroundStyle(.secondary)
                             .help("Hide the coach panel")
                         }
                     ) {
                         ScrollView {
-                            coachSection
-                                .padding(12)
+                            VStack(alignment: .leading, spacing: 14) {
+                                if let verdict = model.verdict {
+                                    ReviewVerdictCard(verdict: verdict)
+                                }
+                                coachSection
+                            }
+                            .padding(12)
                         }
                     }
                     .frame(width: 340)
                 }
             }
             .padding(10)
-            .animation(.snappy(duration: 0.2), value: isCoachCollapsed)
+            .animation(Motion.standard, value: isCoachCollapsed)
         }
 
         private var evalBar: some View {
@@ -236,14 +266,15 @@ struct ReviewScreen: View {
             )
         } else {
             // No curve yet. The strip keeps its slot so the layout does not jump
-            // when analysis finishes.
-            RoundedRectangle(cornerRadius: 12, style: .continuous)
-                .fill(.quaternary)
+            // when analysis finishes, and it is drawn as a pending slot rather
+            // than an empty card — nothing has failed here.
+            Color.clear
                 .frame(height: 94)
+                .elevation(.raised, cornerRadius: CornerRadius.card, fill: Palette.surfaceSunken)
+                .pendingOutline(cornerRadius: CornerRadius.card)
                 .overlay {
                     Text(model.analysisState == .failed ? "No evaluation" : "Evaluation pending")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
+                        .typeRole(.caption)
                 }
         }
     }
@@ -256,24 +287,51 @@ struct ReviewScreen: View {
         }
     }
 
+    // MARK: - Stats
+
+    /// The three numbers the game comes down to, each with the comparison the
+    /// app can honestly draw.
+    ///
+    /// Only accuracy carries a comparison chip, and that is a data fact rather
+    /// than an oversight: it is the one per-game number stored on every past
+    /// game, so it is the only one that can be averaged without re-reading every
+    /// game's moves. A chip under the other two would either be a guess or a
+    /// table scan on a screen that has to open instantly.
+    private var statPills: some View {
+        HStack(alignment: .top, spacing: 10) {
+            ReviewStatPill(
+                label: "Accuracy",
+                value: model.accuracy.map { "\(Int($0.rounded()))%" },
+                comparison: accuracyComparison
+            )
+            ReviewStatPill(
+                label: "Mistakes",
+                value: model.analysisState == .complete ? "\(model.userMistakeCount)" : nil
+            )
+            ReviewStatPill(
+                label: "Moments",
+                value: model.analysisState == .complete ? "\(model.momentCards.count)" : nil
+            )
+        }
+    }
+
+    private var accuracyComparison: ReviewStatComparison? {
+        guard let accuracy = model.accuracy, let average = model.accuracyAverage else { return nil }
+        return ReviewStatComparison(
+            value: accuracy,
+            reference: average,
+            text: "your avg \(Int(average.rounded()))%"
+        )
+    }
+
+    // MARK: - Moments
+
     @ViewBuilder
     private func filmstripSection(width: CGFloat) -> some View {
         if !model.momentCards.isEmpty {
             VStack(alignment: .leading, spacing: 10) {
-                HStack(spacing: 8) {
-                    // Counter first, at the leading edge: it says how far through
-                    // a fixed-size set you are, which is the question a strip of
-                    // three cards raises.
-                    Text(counterText)
-                        .font(.caption.weight(.semibold).monospacedDigit())
-                        .foregroundStyle(.secondary)
-                    Text("MOMENTS")
-                        .font(.caption.weight(.semibold))
-                        .tracking(0.6)
-                        .foregroundStyle(.secondary)
-                    Spacer(minLength: 0)
-                }
-                .padding(.horizontal, 16)
+                SectionHeader(title: "Moments", qualifier: counterText)
+                    .padding(.horizontal, 16)
 
                 MomentFilmstrip(
                     moments: model.momentCards.map(\.thumbnail),
@@ -313,35 +371,59 @@ struct ReviewScreen: View {
         return "\(ordinal)/\(total)"
     }
 
-    /// The coach card, or nothing at all.
+    // MARK: - Coach
+
+    /// The coach card for the moment the board is standing on, or nothing at all.
     ///
-    /// `Moment.coachText` is nil whenever generation never ran — no API key, or a
-    /// failed request. That is an ordinary state for this app, so it renders as
-    /// the absence of a card rather than as an error the user has to dismiss.
+    /// A note either exists on the row or it does not — it is written by the
+    /// analysis pass, so by the time this screen can draw anything the answer is
+    /// already settled. Its absence renders as the absence of a card rather than
+    /// as an error: a game analysed by a build that predates the notes still has
+    /// its board, its curve and its moments, and none of that is broken.
     @ViewBuilder
     private var coachSection: some View {
-        if let focus = model.coachFocus {
-            let state = model.coachState(for: focus)
-            if state != .unavailable {
-                ReviewCoachCard(state: state, subtitle: coachSubtitle(for: focus))
-            } else if case .question(let ply) = focus {
-                // The user explicitly asked something; silence would look broken.
-                Text("Coaching is not connected yet, so there is no note for move \((ply + 1) / 2).")
-                    .font(.footnote)
-                    .foregroundStyle(.secondary)
-            }
+        if let card = model.focusedCard, let note = card.coachText {
+            ReviewCoachCard(
+                note: note,
+                diagnosis: card.diagnosis,
+                subtitle: "Move \(card.moveNumber) · \(card.classification.title)",
+                question: card.question,
+                suggestedQuestions: model.suggestedQuestions(forMoment: card.id)
+            )
+            .animation(Motion.contentSwap, value: note)
         }
     }
 
-    private func coachSubtitle(for focus: ReviewCoachFocus) -> String? {
-        switch focus {
-        case .moment(let id):
-            guard let card = model.card(withID: id) else { return nil }
-            return "Move \(card.moveNumber) · \(card.classification.title)"
-        case .question(let ply):
-            return "Move \((ply + 1) / 2)"
+    // MARK: - Moves
+
+    /// The full table, closed by default.
+    ///
+    /// A `DisclosureGroup` rather than a link to another screen: the answer to
+    /// "what did I play on move 41" belongs beside the board it scrubs, and a
+    /// push would take the board away to show it.
+    private var moveListSection: some View {
+        DisclosureGroup(isExpanded: $isMoveListExpanded) {
+            ReviewMoveList(
+                rows: model.moveRows,
+                currentPly: model.currentPly,
+                style: style,
+                onSelect: { model.select(index: $0) }
+            )
+            .padding(.top, 10)
+        } label: {
+            HStack(alignment: .firstTextBaseline) {
+                Text("All moves")
+                    .typeRole(.headline)
+                Spacer(minLength: 8)
+                Text("\(model.moveRows.count)")
+                    .typeRole(.caption, monospacedDigits: true)
+            }
         }
+        .tint(Palette.accent.dynamic)
+        .animation(Motion.standard, value: isMoveListExpanded)
     }
+
+    // MARK: - Status
 
     /// Honest reporting of where analysis stands. Nothing at all once it is done.
     private var analysisNotice: ReviewNoticeRow? {
@@ -373,48 +455,119 @@ struct ReviewScreen: View {
 
 // MARK: - Support views
 
-/// A named panel: header row, hairline, content.
-private struct ReviewPanel<Content: View, Accessory: View>: View {
-    let title: String
-    let accessory: Accessory
-    let content: Content
-
-    init(
-        title: String,
-        @ViewBuilder accessory: () -> Accessory = { EmptyView() },
-        @ViewBuilder content: () -> Content
-    ) {
-        self.title = title
-        self.accessory = accessory()
-        self.content = content()
-    }
+/// One number, its label, and the grey chip that puts it in context.
+private struct ReviewStatPill: View {
+    let label: String
+    /// `nil` until analysis has produced it.
+    let value: String?
+    var comparison: ReviewStatComparison? = nil
 
     var body: some View {
-        VStack(spacing: 0) {
-            HStack {
-                Text(title.uppercased())
-                    .font(.caption.weight(.semibold))
-                    .tracking(0.6)
-                    .foregroundStyle(.secondary)
-                Spacer()
-                accessory
+        VStack(alignment: .leading, spacing: 6) {
+            Text(label)
+                .typeRole(.label)
+
+            if let value {
+                Text(value)
+                    .typeRole(.title, monospacedDigits: true)
+                    .contentTransition(.numericText())
+            } else {
+                // Measured against the real number's own geometry, so nothing
+                // moves when analysis lands.
+                SkeletonView(width: 52, height: 26)
+                    .padding(.vertical, 2)
             }
-            .padding(.horizontal, 12)
-            .padding(.vertical, 8)
 
-            Divider()
-
-            content
-                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+            if let comparison {
+                HStack(spacing: 3) {
+                    Image(systemName: comparison.symbolName)
+                        .font(.system(size: 8, weight: .semibold))
+                    Text(comparison.text)
+                        .typeRole(.caption, monospacedDigits: true, appliesForeground: false)
+                }
+                // Grey, never semantic: above average is good for accuracy and
+                // bad for mistakes, and a colour that means both means neither.
+                .foregroundStyle(.secondary)
+                .padding(.horizontal, 7)
+                .padding(.vertical, 3)
+                .background(
+                    RoundedRectangle(cornerRadius: CornerRadius.chip, style: .continuous)
+                        .fill(Palette.surfaceSunken.dynamic)
+                )
+            }
         }
-        .background(
-            RoundedRectangle(cornerRadius: 12, style: .continuous)
-                .fill(.quaternary)
-        )
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(12)
+        .elevation(.raised, cornerRadius: CornerRadius.card)
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel(Text(accessibilityText))
+    }
+
+    /// One phrase, not a number followed by two fragments.
+    private var accessibilityText: String {
+        var text = "\(label): \(value ?? "still being worked out")"
+        if let comparison { text += ", \(comparison.text)" }
+        return text
     }
 }
 
-/// One line of status, in the same filled-rect vocabulary as the rest.
+/// How a number compares to the user's own recent average.
+struct ReviewStatComparison: Equatable {
+    var value: Double
+    var reference: Double
+    /// The chip's words, e.g. `"your avg 79%"`.
+    var text: String
+
+    /// A dead band, because a caret on a 0.2-point difference claims a trend
+    /// that does not exist.
+    static let tolerance = 0.5
+
+    var symbolName: String {
+        if value - reference > Self.tolerance { return "arrowtriangle.up.fill" }
+        if reference - value > Self.tolerance { return "arrowtriangle.down.fill" }
+        return "minus"
+    }
+}
+
+#if os(macOS)
+    /// A named panel: header row, hairline, content.
+    private struct ReviewPanel<Content: View, Accessory: View>: View {
+        let title: String
+        let accessory: Accessory
+        let content: Content
+
+        init(
+            title: String,
+            @ViewBuilder accessory: () -> Accessory = { EmptyView() },
+            @ViewBuilder content: () -> Content
+        ) {
+            self.title = title
+            self.accessory = accessory()
+            self.content = content()
+        }
+
+        var body: some View {
+            VStack(spacing: 0) {
+                HStack {
+                    Text(title)
+                        .typeRole(.label)
+                    Spacer()
+                    accessory
+                }
+                .padding(.horizontal, 12)
+                .padding(.vertical, 8)
+
+                Divider()
+
+                content
+                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+            }
+            .elevation(.raised, cornerRadius: CornerRadius.card)
+        }
+    }
+#endif
+
+/// One line of status, in the same raised-rect vocabulary as the rest.
 private struct ReviewNoticeRow: View {
     var symbol: String?
     var title: String
@@ -431,18 +584,15 @@ private struct ReviewNoticeRow: View {
             }
             VStack(alignment: .leading, spacing: 2) {
                 Text(title)
-                    .font(.subheadline.weight(.medium))
+                    .typeRole(.headline)
                 Text(detail)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
+                    .typeRole(.caption)
+                    .fixedSize(horizontal: false, vertical: true)
             }
             Spacer(minLength: 0)
         }
         .padding(12)
-        .background(
-            RoundedRectangle(cornerRadius: 14, style: .continuous)
-                .fill(.quaternary)
-        )
+        .elevation(.raised, cornerRadius: CornerRadius.card)
     }
 }
 

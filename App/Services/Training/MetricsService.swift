@@ -8,6 +8,27 @@ import Foundation
 import Observation
 import TrainingCore
 
+/// Read and write access to the metric history the Profile chart is drawn from.
+///
+/// Separate from `MetricStore` because it describes a different table with the
+/// opposite lifecycle — see `Database.MetricSample` — and because exactly two
+/// places in the app touch it: this service writes samples, `ProfileDataLoader`
+/// reads them. It lives here, beside its writer, rather than with the other
+/// store protocols in `TrainingStores.swift`.
+protocol MetricHistoryStore: Sendable {
+    func recordSample(
+        key: String,
+        window: String,
+        value: Double,
+        measuredAt: Date,
+        now: Date,
+        calendar: Calendar
+    ) throws
+    func samples(key: String, window: String, limit: Int) throws -> [MetricSample]
+}
+
+extension MetricsRepository: MetricHistoryStore {}
+
 /// The user's micro-goal for the week: one metric, one number to beat.
 ///
 /// Derived from the curriculum rather than invented. The weekly focus names a
@@ -85,13 +106,36 @@ final class MetricsService {
         static let focusWeeksWithoutImprovement = "focus.weeksWithoutImprovement"
         static let focusMicroGoalStartValue = "focus.microGoalStartValue"
         static let focusConsecutiveGamesMeetingGoal = "focus.consecutiveGamesMeetingGoal"
+        /// Start date of the newest analysed game already counted toward
+        /// ``focusConsecutiveGamesMeetingGoal``. See ``advanceMicroGoalStreak``.
+        static let focusMicroGoalGameMark = "focus.microGoalGameMark"
+        /// The drill multiplier of the focus in force, so a session built
+        /// without a recompute still gets the mix the selector intended.
+        static let focusDrillQuotaMultiplier = "focus.drillQuotaMultiplier"
     }
+
+    /// The metrics whose history is kept.
+    ///
+    /// Deliberately three. Every key here costs a row for each day its value
+    /// stands still, forever, on a table that synchronises — so it holds
+    /// precisely what the Profile chart plots and nothing else. Per-game
+    /// accuracy is absent because `games.userAccuracy` is already a time series
+    /// and a second copy could only disagree with it, and the curriculum gates
+    /// are absent because a gate never asks what a metric *was*.
+    nonisolated static let historyKeys: [MetricKey] = [
+        .ladderRating,
+        .puzzleRating,
+        .puzzleRatingDeviation,
+    ]
 
     // MARK: Dependencies
 
     private nonisolated let games: any GameStore
     private nonisolated let moments: any MomentStore
     private nonisolated let metrics: any MetricStore
+    /// `nil` when the metric store keeps no history, which is the honest answer
+    /// for the in-memory store used by previews and tests.
+    private nonisolated let history: (any MetricHistoryStore)?
     private nonisolated let settings: any AppSettingsStore
     private nonisolated let guided: any GuidedPromptLog
     private nonisolated let tuning: DomainTuning
@@ -99,12 +143,21 @@ final class MetricsService {
     private nonisolated let calendar: Calendar
     private nonisolated let clock: @Sendable () -> Date
 
+    /// - Parameter guided: Source of guided-mode prompt outcomes. Defaults to
+    ///   ``GameMovePromptLog`` over `games` rather than to
+    ///   ``EmptyGuidedPromptLog``, and the difference is a whole rung: the
+    ///   empty log leaves `guided.scanThreats.hitRate` permanently unmeasured,
+    ///   `Skill.evaluate(in:)` counts unmeasured as unmet, and `r2.threatAwareness`
+    ///   is required — so with the empty default the ladder had a hard ceiling
+    ///   at rung 2 no matter how well the user played. A `nil` default rather
+    ///   than a literal because the replacement is built from another
+    ///   parameter, which a default expression cannot see.
     init(
         games: any GameStore,
         moments: any MomentStore,
         metrics: any MetricStore,
         settings: any AppSettingsStore,
-        guided: any GuidedPromptLog = EmptyGuidedPromptLog(),
+        guided: (any GuidedPromptLog)? = nil,
         tuning: DomainTuning = .default,
         ladder: [Rung] = Curriculum.default,
         calendar: Calendar = Calendar(identifier: .gregorian),
@@ -113,8 +166,13 @@ final class MetricsService {
         self.games = games
         self.moments = moments
         self.metrics = metrics
+        // Taken from `metrics` rather than as a second parameter on purpose:
+        // the history and the metric rows are the same store, and two
+        // parameters would let a caller wire a chart to one database and the
+        // numbers behind it to another.
+        self.history = metrics as? any MetricHistoryStore
         self.settings = settings
-        self.guided = guided
+        self.guided = guided ?? GameMovePromptLog(games: games)
         self.tuning = tuning
         self.ladder = ladder
         self.calendar = calendar
@@ -143,6 +201,7 @@ final class MetricsService {
                 games: games,
                 moments: moments,
                 metrics: metrics,
+                history: history,
                 settings: settings,
                 guided: guided,
                 tuning: tuning,
@@ -177,13 +236,80 @@ final class MetricsService {
     }
 
     /// Overrides the selected focus — used when the coach's suggestion is
-    /// accepted.
+    /// accepted, or when the user picks a different habit for the week.
+    ///
+    /// Refreshes **first** and applies the override afterwards, rather than
+    /// writing the habit and then recomputing. Selection is what chose the
+    /// habit being overridden, so re-running it hands the slot straight back —
+    /// on a rotation weekday it would return the leak table's own answer, and a
+    /// control that silently undoes itself is worse than no control. The
+    /// override is written to exactly the storage a rotation writes, so the
+    /// next recompute reads it as the focus in force and leaves it alone until
+    /// the next rotation point.
     func setFocus(habit: Habit) async {
+        await refresh()
+
         let now = clock()
         _ = try? settings.update { $0.weeklyFocusHabit = habit.rawValue }
+
+        // Everything a rotation resets, because this is one: the streak, the
+        // improvement clock and the baseline the trend is measured against all
+        // describe the habit being replaced. Leaving them would let a stale
+        // "three weeks without improvement" force-switch the user off the habit
+        // they just chose, on the very next recompute.
         try? metrics.set(Keys.focusWeeksOnHabit, value: 1, sampleCount: 1, at: now)
         try? metrics.set(Keys.focusWeekStartedAt, value: now.timeIntervalSince1970, sampleCount: 1, at: now)
-        await refresh()
+        try? metrics.set(Keys.focusWeeksWithoutImprovement, value: 0, sampleCount: 1, at: now)
+        try? metrics.set(Keys.focusConsecutiveGamesMeetingGoal, value: 0, sampleCount: 1, at: now)
+        try? metrics.set(Keys.focusDrillQuotaMultiplier, value: 1, sampleCount: 1, at: now)
+
+        guard var updated = state else { return }
+        let goal = Self.microGoal(for: habit, rung: updated.rung, ladder: ladder, snapshot: updated.snapshot)
+        try? metrics.set(Keys.focusMicroGoalStartValue, value: goal?.current ?? 0, sampleCount: 1, at: now)
+
+        updated.focus = WeeklyFocus(
+            habit: habit,
+            epLostPerGame: updated.leaks.first { $0.habit == habit }?.epLostPerGame ?? 0,
+            reason: .initialSelection
+        )
+        updated.microGoal = goal
+        state = updated
+    }
+
+    /// The focus a training session should be assembled against.
+    ///
+    /// Prefers the recomputed focus and falls back to the stored one, because
+    /// the session cannot wait: a user who opens Train and taps Start before
+    /// the recompute lands must still get their week's 60/40 mix, and the
+    /// selector's last answer is already on disk.
+    var sessionFocus: WeeklyFocus? {
+        state?.focus ?? Self.storedFocus(metrics: metrics, settings: settings)
+    }
+
+    /// The focus in force, read back from storage rather than reselected.
+    ///
+    /// Selecting a focus replays up to twenty games; nothing that merely needs
+    /// to *know* the week's habit should pay that. Selection writes its answer
+    /// down — the habit onto `AppSettings`, the drill multiplier alongside the
+    /// rest of the focus counters — so reading it back is two indexed lookups.
+    ///
+    /// `epLostPerGame` and `primaryCauseTag` are deliberately not restored:
+    /// they are copy for the leak chart, and nothing in session assembly reads
+    /// either.
+    nonisolated static func storedFocus(
+        metrics: any MetricStore,
+        settings: any AppSettingsStore
+    ) -> WeeklyFocus? {
+        guard
+            let stored = try? settings.current(),
+            let habit = stored.weeklyFocusHabit.flatMap(Habit.init(rawValue:))
+        else { return nil }
+
+        return WeeklyFocus(
+            habit: habit,
+            drillQuotaMultiplier: metrics.value(Keys.focusDrillQuotaMultiplier, default: 1),
+            reason: .unchanged
+        )
     }
 }
 
@@ -195,6 +321,7 @@ extension MetricsService {
         games: any GameStore,
         moments: any MomentStore,
         metrics: any MetricStore,
+        history: (any MetricHistoryStore)?,
         settings: any AppSettingsStore,
         guided: any GuidedPromptLog,
         tuning: DomainTuning,
@@ -237,6 +364,30 @@ extension MetricsService {
             tuning: tuning
         )
 
+        // Read the tracked rows *before* the persist loop below overwrites
+        // them, and keep the whole row rather than only its timestamp. A stored
+        // row that already carries the value about to be recorded was written
+        // by whoever moved the number — `LadderRatingWriter`, at the end of the
+        // game that moved it — so its `updatedAt` is the instant the user
+        // earned it, and that is where the point belongs on the chart. A row
+        // still carrying the *previous* value is stale evidence about a change
+        // this recompute is the first to see, and the honest stamp for that
+        // is `now`.
+        let previouslyStored: [MetricKey: SkillMetric] =
+            history == nil
+            ? [:]
+            : Dictionary(
+                uniqueKeysWithValues: historyKeys.compactMap { key -> (MetricKey, SkillMetric)? in
+                    guard
+                        let row = try? metrics.metric(
+                            key: key.rawValue,
+                            window: MetricWindow.allTime.key
+                        )
+                    else { return nil }
+                    return (key, row)
+                }
+            )
+
         // Persist, then read back into a snapshot from the same values so the
         // UI and the database never disagree.
         var snapshot = MetricSnapshot()
@@ -249,6 +400,33 @@ extension MetricsService {
                 updatedAt: now
             )
             snapshot[address.key, address.window] = value
+        }
+
+        // The chart's history. Nothing is backfilled behind the first sample:
+        // the rating's past was never stored — every recompute overwrote the
+        // one `skillMetrics` row and its timestamp with it — so a curve drawn
+        // behind today would be invented, and a flat line from the calibration
+        // date to now would assert a rating that held still through games that
+        // certainly moved it. History therefore begins at the first refresh,
+        // with one true point; per-game accuracy, which *was* always stored,
+        // plots its whole past immediately.
+        if let history {
+            for key in historyKeys {
+                guard let value = computed[MetricAddress(key: key, window: .allTime)] else {
+                    continue
+                }
+                let measuredAt =
+                    previouslyStored[key]
+                    .flatMap { $0.value == value.value ? $0.updatedAt : nil } ?? now
+                try? history.recordSample(
+                    key: key.rawValue,
+                    window: MetricWindow.allTime.key,
+                    value: value.value,
+                    measuredAt: measuredAt,
+                    now: now,
+                    calendar: calendar
+                )
+            }
         }
 
         // Time and volume at the current rung.
@@ -303,7 +481,12 @@ extension MetricsService {
         let currentGoal = currentHabit.flatMap { microGoal(for: $0, rung: rung, ladder: ladder, snapshot: snapshot) }
         let trend = FocusMetricTrend(
             weeksWithoutImprovement: Int(metrics.value(Keys.focusWeeksWithoutImprovement)),
-            consecutiveGamesMeetingMicroGoal: Int(metrics.value(Keys.focusConsecutiveGamesMeetingGoal)),
+            consecutiveGamesMeetingMicroGoal: advanceMicroGoalStreak(
+                goal: currentGoal,
+                games: recent,
+                metrics: metrics,
+                now: now
+            ),
             startValue: metrics.value(Keys.focusMicroGoalStartValue, default: currentGoal?.current ?? 0),
             currentValue: currentGoal?.current ?? 0
         )
@@ -375,6 +558,51 @@ extension MetricsService {
         )
     }
 
+    /// Moves the consecutive-games-clearing-the-micro-goal streak on, at most
+    /// once per analysed game.
+    ///
+    /// `FocusSelector`'s early-rotation rule reads this counter and
+    /// ``persistFocus(_:previousHabit:weeksOnFocus:trend:goal:metrics:settings:tuning:now:)``
+    /// resets it, but nothing ever raised it — so the rule could not fire, and
+    /// a habit the user had already fixed held the focus slot until the weekly
+    /// cap ran out.
+    ///
+    /// The advance is gated on a *watermark* rather than happening on every
+    /// call, because ``refresh()`` also runs on app foreground and on every
+    /// Profile load: without it, opening the app five times on a good afternoon
+    /// would rotate the week's focus. The watermark is the start date of the
+    /// newest **analysed** game already counted, because only an analysed game
+    /// can have moved the metric the goal is measured on — counting a game the
+    /// moment it is saved would score the user on the numbers from the game
+    /// before it.
+    private nonisolated static func advanceMicroGoalStreak(
+        goal: MicroGoalState?,
+        games: [Database.Game],
+        metrics: any MetricStore,
+        now: Date
+    ) -> Int {
+        let stored = Int(metrics.value(Keys.focusConsecutiveGamesMeetingGoal))
+        guard let goal else { return stored }
+
+        guard
+            let newest = games
+                .filter({ $0.analysisState == AnalysisState.complete.rawValue })
+                .map(\.startedAt)
+                .max(),
+            newest.timeIntervalSince1970 > metrics.value(Keys.focusMicroGoalGameMark)
+        else { return stored }
+
+        let advanced = goal.isMet ? stored + 1 : 0
+        try? metrics.set(Keys.focusConsecutiveGamesMeetingGoal, value: Double(advanced), sampleCount: 1, at: now)
+        try? metrics.set(
+            Keys.focusMicroGoalGameMark,
+            value: newest.timeIntervalSince1970,
+            sampleCount: 1,
+            at: now
+        )
+        return advanced
+    }
+
     private nonisolated static func loadCounters(
         metrics: any MetricStore,
         settings stored: AppSettings,
@@ -431,6 +659,17 @@ extension MetricsService {
         now: Date
     ) throws {
         try settings.update { $0.weeklyFocusHabit = focus.habit.rawValue }
+
+        // The multiplier is part of the focus in force, not a display value: a
+        // forced switch doubles the session's focus share, and a session that
+        // reads the focus back from storage has to get the same mix the
+        // selector intended rather than a quietly halved one.
+        try metrics.set(
+            Keys.focusDrillQuotaMultiplier,
+            value: focus.drillQuotaMultiplier,
+            sampleCount: 1,
+            at: now
+        )
 
         if focus.habit != previousHabit {
             // A new habit restarts every counter: the streak, the improvement

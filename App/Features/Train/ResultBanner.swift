@@ -28,9 +28,16 @@ import SwiftUI
 /// ``PuzzleConcept/verdictMessage(solved:theme:answer:)``, which produces one
 /// sentence of the same shape either way.
 ///
-/// Orange, not red, for the failure tint: red is Review's blunder colour, where
-/// it is a factual severity label about a game already lost. Here the puzzle
-/// just gets rescheduled.
+/// ``Palette/caution``, not red, for the failure tint: red is the eval bar's
+/// "advantage lost" and Review's blunder colour, where it is a factual severity
+/// label about a game already played. Here the puzzle just gets rescheduled, and
+/// amber is exactly the register that asks for — "note this", not "alarm".
+///
+/// Success takes the **accent**, not green. Green is spoken for: it means
+/// advantage gained on the eval bar, and a token that also means "correct",
+/// "confirmed" and "online" ends up meaning none of them. The accent is the
+/// screen's one ration and this is where it is spent, because while the banner
+/// is up its Continue button *is* the primary action.
 struct ResultBanner: View {
 
     /// The banner's height, and therefore the height every footer that can be
@@ -48,14 +55,14 @@ struct ResultBanner: View {
     var body: some View {
         HStack(alignment: .center, spacing: 12) {
             Image(systemName: verdict.solved ? "checkmark.circle.fill" : "arrow.uturn.backward.circle.fill")
-                .font(.title2)
+                .font(.system(size: 22))
                 .foregroundStyle(tint)
                 // A fixed frame so the glyph's differing optical widths cannot
                 // shift the sentence beside it by a point or two.
                 .frame(width: 28, height: 28)
 
             Text(verdict.message)
-                .font(.subheadline.weight(.medium))
+                .typeRole(.body)
                 .fixedSize(horizontal: false, vertical: true)
                 // Exactly two lines of room, always. The sentence is one line at
                 // most realistic widths; reserving the second stops a long
@@ -63,28 +70,35 @@ struct ResultBanner: View {
                 .lineLimit(2, reservesSpace: true)
                 .frame(maxWidth: .infinity, alignment: .leading)
 
-            Button(continueTitle, action: onContinue)
-                .buttonStyle(.borderedProminent)
-                .tint(tint)
-                .controlSize(.regular)
-                .fixedSize()
+            Button(action: onContinue) {
+                Text(continueTitle)
+                    .typeRole(.headline, appliesForeground: false)
+                    .foregroundStyle(Color.white)
+                    .padding(.horizontal, 16)
+                    .padding(.vertical, 9)
+                    .background(Capsule().fill(tint))
+            }
+            .buttonStyle(.pressable)
+            .fixedSize()
         }
         .padding(.horizontal, 16)
         .padding(.vertical, 14)
         .frame(minHeight: Self.height)
         .background(
-            RoundedRectangle(cornerRadius: 16, style: .continuous)
+            RoundedRectangle(cornerRadius: CornerRadius.card, style: .continuous)
                 .fill(tint.opacity(0.12))
         )
         .overlay(
-            RoundedRectangle(cornerRadius: 16, style: .continuous)
+            RoundedRectangle(cornerRadius: CornerRadius.card, style: .continuous)
                 .strokeBorder(tint.opacity(0.35), lineWidth: 1)
         )
         .accessibilityElement(children: .combine)
     }
 
+    /// Semantic backgrounds at ~10% alpha, semantic foregrounds at full
+    /// strength — the one rule that keeps a tinted card from becoming a poster.
     private var tint: Color {
-        verdict.solved ? .green : .orange
+        (verdict.solved ? Palette.accent : Palette.caution).dynamic
     }
 }
 

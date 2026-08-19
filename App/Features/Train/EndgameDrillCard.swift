@@ -3,6 +3,8 @@
 //  ChessCoach
 //
 
+import BoardUI
+import ChessKit
 import SwiftUI
 import TrainingCore
 
@@ -11,6 +13,11 @@ import TrainingCore
 /// The catalogue in `EndgameDrills.swift` is the service's: it owns the
 /// positions, the move budgets and the pass criteria. This is only the wording,
 /// which belongs with the screen that shows it.
+///
+/// Every entry is a **named pattern** — `Lucena`, `Philidor`, `Two bishops` —
+/// and never a numbered level. A level number tells the user how far through a
+/// list they are; a name is the thing they will later recognise across the board
+/// in a real game, which is the entire point of drilling it.
 struct DrillFamilyPresentation: Sendable, Hashable, Identifiable {
 
     var kind: EndgameDrillKind
@@ -23,6 +30,15 @@ struct DrillFamilyPresentation: Sendable, Hashable, Identifiable {
     var teaches: String
 
     var id: EndgameDrillKind { kind }
+
+    /// The family's first position, for the card's thumbnail.
+    ///
+    /// Read from the service's catalogue rather than duplicated here: a
+    /// thumbnail showing a position the drill does not actually start from is a
+    /// lie the user only discovers after tapping.
+    var thumbnailPosition: Position? {
+        EndgameDrill.drills(kind: kind).first.flatMap { Position(fen: $0.fen) }
+    }
 
     static let all: [DrillFamilyPresentation] = [
         DrillFamilyPresentation(
@@ -82,7 +98,7 @@ struct DrillMastery: Sendable, Hashable {
     var label: String { "\(min(cleanStreak, required)) of \(required) clean" }
 }
 
-/// Speak's level-card shape, applied to an endgame drill.
+/// One drill family, as a tile in the 2-up grid.
 ///
 /// Endgame drills are a *separate entry* rather than items mixed into the puzzle
 /// queue, and that is a real distinction rather than a filing convenience: a
@@ -90,10 +106,15 @@ struct DrillMastery: Sendable, Hashable {
 /// engine for twenty moves. Interleaving them would mean the ten-puzzle counter
 /// silently sometimes meant ten minutes and sometimes forty.
 ///
-/// The footer is mastery, not completion: a short inline bar and `2 of 3 clean`.
-/// A ring here would be the donut the conventions rule out, and a percentage
-/// would obscure the thing that actually matters — that the runs have to be
-/// *consecutive*, so one sloppy attempt sends it back to zero.
+/// The tile is a thumbnail, a name and a mastery ring, and the whole card is the
+/// control — a `Select` button inside a card the size of a thumb is a smaller
+/// target than the card it sits in.
+///
+/// ``DrillFamilyPresentation/teaches`` is carried as the accessibility hint
+/// rather than rendered. Two columns leave about 150pt of width, which truncates
+/// those sentences mid-word, and half a teaching sentence teaches nothing; the
+/// name plus the position is what a tile is for, and the sentence is read once
+/// and remembered.
 struct EndgameDrillCard: View {
 
     let family: DrillFamilyPresentation
@@ -101,55 +122,91 @@ struct EndgameDrillCard: View {
     let onSelect: () -> Void
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            HStack(alignment: .firstTextBaseline, spacing: 8) {
-                Text(family.title)
-                    .font(.headline)
+        Button(action: onSelect) {
+            VStack(alignment: .leading, spacing: 10) {
+                thumbnail
 
-                Text(family.classifier)
-                    .font(.caption2.weight(.medium))
-                    .foregroundStyle(.secondary)
-                    .padding(.horizontal, 7)
-                    .padding(.vertical, 3)
-                    .background(Capsule().fill(.quaternary))
-
-                Spacer(minLength: 8)
-
-                Button("Select", action: onSelect)
-                    .buttonStyle(.bordered)
-                    .controlSize(.small)
-            }
-
-            Text(family.teaches)
-                .font(.subheadline)
-                .foregroundStyle(.secondary)
-                .fixedSize(horizontal: false, vertical: true)
-
-            HStack(spacing: 10) {
-                GeometryReader { proxy in
-                    ZStack(alignment: .leading) {
-                        Capsule().fill(.quaternary)
-                        Capsule()
-                            .fill(mastery.isMastered ? Color.green : Color.accentColor)
-                            .frame(width: max(0, proxy.size.width * mastery.fraction))
-                    }
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(family.title)
+                        .typeRole(.headline)
+                        .lineLimit(1)
+                    Text(family.classifier)
+                        .typeRole(.caption)
+                        .lineLimit(1)
                 }
-                .frame(height: 3)
 
-                Text(mastery.label)
-                    .font(.caption.monospacedDigit())
-                    .foregroundStyle(.secondary)
-                    .layoutPriority(1)
+                HStack(spacing: 8) {
+                    MasteryRing(mastery: mastery)
+                    Text(mastery.label)
+                        .typeRole(.caption, monospacedDigits: true)
+                        .lineLimit(1)
+                }
             }
-            .frame(height: 14)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(12)
+            .elevation(.raised, cornerRadius: CornerRadius.card)
         }
-        .padding(14)
-        .background(RoundedRectangle(cornerRadius: 14, style: .continuous).fill(.quaternary))
+        .buttonStyle(.pressable)
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel("\(family.title), \(mastery.label)")
+        .accessibilityHint(family.teaches)
+    }
+
+    @ViewBuilder
+    private var thumbnail: some View {
+        if let position = family.thumbnailPosition {
+            // Hit testing off, so a tap anywhere on the tile reaches the button
+            // rather than being swallowed by a board that cannot be played.
+            // A still thumbnail: material feedback animates a capture that
+            // is not happening here, and a grid of tiles twitching as they
+            // scroll reads as a rendering bug.
+            BoardView(position: position, style: BoardAppearance.shared.style.showingMaterialFeedback(false))
+                .allowsHitTesting(false)
+        } else {
+            RoundedRectangle(cornerRadius: CornerRadius.chip, style: .continuous)
+                .fill(Palette.surfaceSunken.dynamic)
+                .aspectRatio(1, contentMode: .fit)
+        }
+    }
+}
+
+/// Mastery of one drill family, as a ring.
+///
+/// A ring is right here and wrong for a rating: this is a genuine 0-to-1 share
+/// of a small, named requirement — two clean runs, or six — and the count sits
+/// beside it in words. The completed state fills the ring and drops a check
+/// inside it, the same mark a completed day carries on Today, rather than
+/// turning green: green is the eval bar's "advantage gained" and would be a
+/// third meaning for one token.
+private struct MasteryRing: View {
+
+    let mastery: DrillMastery
+
+    private let size: CGFloat = 18
+
+    var body: some View {
+        ZStack {
+            Circle()
+                .strokeBorder(Palette.surfaceSunken.dynamic, lineWidth: 2.5)
+
+            Circle()
+                .trim(from: 0, to: mastery.fraction)
+                .stroke(Palette.accent.dynamic, style: StrokeStyle(lineWidth: 2.5, lineCap: .round))
+                .rotationEffect(.degrees(-90))
+
+            if mastery.isMastered {
+                Image(systemName: "checkmark")
+                    .font(.system(size: 8, weight: .bold))
+                    .foregroundStyle(Palette.accent.dynamic)
+            }
+        }
+        .frame(width: size, height: size)
+        .accessibilityHidden(true)
     }
 }
 
 #Preview {
-    VStack(spacing: 12) {
+    LazyVGrid(columns: [GridItem(.flexible(), spacing: 12), GridItem(.flexible(), spacing: 12)], spacing: 12) {
         EndgameDrillCard(
             family: DrillFamilyPresentation.all[4],
             mastery: DrillMastery(cleanStreak: 1, required: 2),

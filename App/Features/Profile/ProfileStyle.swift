@@ -5,33 +5,49 @@
 
 import SwiftUI
 
-/// The Profile screen's small shared vocabulary.
+/// The Profile screen's small shared vocabulary, and its accent budget.
+///
+/// ## Where the accent goes
+///
+/// One accent, and on this screen it means **"this is what the reading is
+/// about"**. It appears in exactly two places, which are the same claim said
+/// twice: the ring on the most recent point (here is where you are) and the
+/// leak bars, the status word, and the single filled button beneath them (here
+/// is what to do about it).
+///
+/// Everything else is deliberately monochrome. The selection chrome — metric
+/// chips, the range control — is a fill change on ``Palette/surfaceSunken``,
+/// because a tinted `3M` is a statement about the chart's window rather than
+/// about the user, and it would spend the accent on a control that answers
+/// nothing. The plotted line and the period bars are ink, for the same reason a
+/// good instrument face is black on white: three tints inside a 176pt box leave
+/// the eye nothing to rank.
 enum ProfileStyle {
 
-    /// The one colour the impact chips are allowed to use.
+    /// The ink every plotted mark is drawn in.
     ///
-    /// A muted amber, defined in HSB with the saturation pulled well down so it
-    /// reads as "note this" rather than "alarm". **It must never become red.**
-    /// Impact is orthogonal to good/bad: the chip says "this is where the points
-    /// are", which is what expected-points-lost means, and that reframe is the
-    /// difference between triage and scolding.
-    static let impactAmber = Color(hue: 0.105, saturation: 0.52, brightness: 0.68)
+    /// The line is quieter than the period bars sitting over it, because the
+    /// bars are the reading and the line is the evidence for it.
+    static let plotLineOpacity: Double = 0.55
 
-    /// The single desaturated colour every leak hairline is drawn in. One
-    /// colour, varying only in width — colour would imply a per-row verdict.
-    static let hairline = Color.secondary.opacity(0.45)
+    /// The uncertainty band. Faint enough to be felt rather than measured — a
+    /// legible band invites the reader to trace its edge, which is precisely the
+    /// precision the band exists to deny.
+    static let plotBandOpacity: Double = 0.07
 
-    static let cardCornerRadius: CGFloat = 16
+    /// Height of a leak bar. Thick enough to carry a length comparison across
+    /// four rows, thin enough that it cannot be mistaken for a progress bar the
+    /// user is meant to fill.
+    static let leakBarHeight: CGFloat = 4
 }
 
 /// The uppercase, tracked eyebrow used across the app's cards.
 struct Eyebrow: View {
     let text: String
+
     var body: some View {
         Text(text)
-            .font(.caption.weight(.semibold))
-            .textCase(.uppercase)
-            .tracking(0.6)
+            .typeRole(.label, appliesForeground: false)
             .foregroundStyle(.tertiary)
     }
 }
@@ -43,8 +59,7 @@ struct ProfileChip: View {
 
     var body: some View {
         Text(text)
-            .font(.caption2.weight(.semibold))
-            .tracking(0.4)
+            .typeRole(.label, appliesForeground: false)
             .foregroundStyle(tint)
             .padding(.horizontal, 7)
             .padding(.vertical, 3)
@@ -64,12 +79,61 @@ struct MeasurementPlaceholder: View {
     var body: some View {
         HStack(spacing: 8) {
             Image(systemName: symbol)
-                .font(.footnote)
+                .typeRole(.caption, appliesForeground: false)
             Text(message)
-                .font(.footnote)
+                .typeRole(.caption, appliesForeground: false)
                 .fixedSize(horizontal: false, vertical: true)
             Spacer(minLength: 0)
         }
         .foregroundStyle(.secondary)
+    }
+}
+
+/// A row of equal-width choices, one of them current.
+///
+/// The system's segmented `Picker` is not used because its selected segment is
+/// a floating white capsule with a shadow under it, which is the one depth
+/// treatment the app does not have: level 1 is a hairline, never a shadow. This
+/// draws the same control out of the tokens the rest of the screen uses.
+struct SegmentedChoice<Option: Hashable & Identifiable>: View {
+
+    let options: [Option]
+    let selection: Option
+    let title: (Option) -> String
+    let onSelect: (Option) -> Void
+
+    var body: some View {
+        HStack(spacing: 2) {
+            ForEach(options) { option in
+                Button {
+                    onSelect(option)
+                } label: {
+                    Text(title(option))
+                        .typeRole(.label, monospacedDigits: true, appliesForeground: false)
+                        .foregroundStyle(option == selection ? Color.primary : Color.secondary)
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 7)
+                        .background(
+                            RoundedRectangle(cornerRadius: CornerRadius.chip - 2, style: .continuous)
+                                .fill(
+                                    option == selection
+                                        ? Palette.surfaceRaised.dynamic
+                                        : Color.clear
+                                )
+                        )
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.pressable)
+                .accessibilityAddTraits(option == selection ? [.isSelected] : [])
+            }
+        }
+        .padding(2)
+        .background(
+            RoundedRectangle(cornerRadius: CornerRadius.chip, style: .continuous)
+                .fill(Palette.surfaceSunken.dynamic)
+        )
+        // Removal is animated, never onset: a selection that eases *in* reads as
+        // the control thinking about it.
+        .animation(Motion.snappy, value: selection)
     }
 }

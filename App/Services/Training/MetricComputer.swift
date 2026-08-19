@@ -563,14 +563,27 @@ enum MetricComputer {
         return nil
     }
 
-    private static func ladderGame(for game: Database.Game) -> LadderGame? {
+    /// A finished game as the rating ladder sees it.
+    ///
+    /// Selected by *mode*, not by `isRated`. `isRated` means "this game is clean
+    /// enough to measure raw strength from" and is false for every sparring game
+    /// by construction, because second-try is on — filtering on it here left the
+    /// performance rating computed over calibration games alone, so the drift
+    /// guard that is supposed to catch a mis-set rating had nothing to look at.
+    ///
+    /// Calibration is the one mode excluded: `CalibrationModel` already writes
+    /// the rating those games produced, and counting them again here would let
+    /// the same five games move the number twice.
+    static func ladderGame(for game: Database.Game) -> LadderGame? {
         guard
-            game.isRated,
+            game.gameMode != .calibration,
             let result = game.result.flatMap(GameResult.init(rawValue:)),
             let color = game.color
         else { return nil }
 
-        let outcome: GameOutcome
+        // Qualified: `GameOutcome` also names the coaching layer's win/loss/draw
+        // for a game summary. This one is the ladder's scoring value.
+        let outcome: TrainingCore.GameOutcome
         if result == .draw {
             outcome = .draw
         } else {
@@ -580,7 +593,8 @@ enum MetricComputer {
         return LadderGame(
             opponentRating: Double(game.opponentRating),
             outcome: outcome,
-            mode: game.gameMode == .guided ? .guided : .sparring
+            mode: game.gameMode == .guided ? .guided : .sparring,
+            containedLevel2AssistedRetry: game.usedAssistedRetry
         )
     }
 }

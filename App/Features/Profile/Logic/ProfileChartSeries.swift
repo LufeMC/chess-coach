@@ -44,6 +44,17 @@ enum ProfileChartMetric: String, CaseIterable, Identifiable, Sendable, Hashable 
         }
     }
 
+    /// The same noun for a count of one. Spelled out rather than derived by
+    /// trimming an `s`, so an irregular plural added later cannot break it
+    /// silently.
+    var pointNounSingular: String {
+        switch self {
+        case .rating: return "game"
+        case .accuracy: return "game"
+        case .puzzles: return "session"
+        }
+    }
+
     func format(_ value: Double) -> String {
         switch self {
         case .rating, .puzzles: return String(format: "%.0f", value)
@@ -57,6 +68,44 @@ enum ProfileChartMetric: String, CaseIterable, Identifiable, Sendable, Hashable 
         switch self {
         case .rating, .puzzles: return String(format: "%.0f", value)
         case .accuracy: return String(format: "%.0f%%", value)
+        }
+    }
+
+    /// The digits alone, for a headline whose unit is carried beside it.
+    func formatBare(_ value: Double) -> String {
+        String(format: "%.0f", value)
+    }
+
+    /// The grey half of the headline.
+    ///
+    /// Split off the value because a 44pt `%` is a unit shouting louder than
+    /// the measurement it qualifies.
+    var unit: String {
+        switch self {
+        case .rating: return "rating"
+        case .accuracy: return "% accuracy"
+        case .puzzles: return "puzzle rating"
+        }
+    }
+
+    /// What the interpretive line calls a change in this series.
+    var changeNoun: String {
+        switch self {
+        case .rating: return "rating points"
+        case .accuracy: return "points of accuracy"
+        case .puzzles: return "puzzle points"
+        }
+    }
+
+    /// Movement smaller than this is the estimate breathing, not a direction.
+    ///
+    /// Calling a 6-point rating drift a decline is how a chart teaches someone
+    /// to read noise as failure, which is the one thing this screen must never
+    /// do.
+    var levelThreshold: Double {
+        switch self {
+        case .rating, .puzzles: return 10
+        case .accuracy: return 1.5
         }
     }
 }
@@ -76,6 +125,19 @@ enum ProfileTimeRange: String, CaseIterable, Identifiable, Sendable, Hashable {
         case .threeMonths: return 91
         case .sixMonths: return 182
         case .oneYear: return 365
+        }
+    }
+
+    /// How the interpretive line says this window out loud.
+    ///
+    /// Spelled rather than abbreviated: `1M` is a control label, and a sentence
+    /// that reads "up 62 over the last 1M" is a sentence written by a database.
+    var spokenSpan: String {
+        switch self {
+        case .oneMonth: return "month"
+        case .threeMonths: return "three months"
+        case .sixMonths: return "six months"
+        case .oneYear: return "year"
         }
     }
 
@@ -113,6 +175,40 @@ struct ProfileSeriesPoint: Sendable, Hashable, Identifiable {
     }
 }
 
+/// One period's average, drawn as a horizontal bar across the period it covers.
+///
+/// ## Why the chart carries these at all
+///
+/// A rating line is jagged by construction — every game moves it — and a jagged
+/// line answers "what happened on the 14th" when the only question worth asking
+/// is "is this going anywhere". Four bars, each sitting at its period's average
+/// and labelled with its change against the period before it, turn the same
+/// data into a sentence: *up, up, flat, up*. The line stays underneath because
+/// the bars are a reading of it, not a replacement for it.
+struct ProfileChartSegment: Sendable, Hashable, Identifiable {
+
+    var interval: DateInterval
+
+    var average: Double
+
+    /// Fractional change against the previous segment. `nil` on the first,
+    /// which has nothing behind it to compare against — rendering `0%` there
+    /// would claim a flat period that was never measured.
+    var delta: Double?
+
+    var id: Date { interval.start }
+
+    /// `+10%` / `−7%`, or `nil` when there is no previous period.
+    var deltaLabel: String? {
+        guard let delta else { return nil }
+        let percent = (delta * 100).rounded()
+        guard percent != 0 else { return "0%" }
+        return percent > 0
+            ? String(format: "+%.0f%%", percent)
+            : String(format: "−%.0f%%", abs(percent))
+    }
+}
+
 /// A windowed, summarised series, ready to draw.
 struct ProfileChartSeries: Sendable, Hashable {
 
@@ -138,6 +234,10 @@ struct ProfileChartSeries: Sendable, Hashable {
 
     /// y-domain covering the line and any uncertainty band, with headroom.
     var valueDomain: ClosedRange<Double>?
+
+    /// Period averages across the span the data actually covers, oldest first.
+    /// Empty when there is not enough play to divide into comparable periods.
+    var segments: [ProfileChartSegment] = []
 
     /// A single point cannot show a trend, and a chart is a trend instrument.
     var isPlottable: Bool { points.count >= 2 }
@@ -187,8 +287,65 @@ struct ProfileChartSeries: Sendable, Hashable {
             average: average,
             typicalRange: Self.typicalRange(of: values),
             latest: windowed.last,
-            valueDomain: (low - padding)...(high + padding)
+            valueDomain: (low - padding)...(high + padding),
+            segments: Self.segments(in: windowed)
         )
+    }
+
+    /// How many periods a given number of points can honestly be split into.
+    ///
+    /// Two points per period is the floor: a one-point "average" is the point
+    /// itself wearing a bar, and a delta between two such bars is a delta
+    /// between two games.
+    static func segmentCount(pointCount: Int) -> Int {
+        min(4, pointCount / 2)
+    }
+
+    /// Divides the series into equal periods and averages each.
+    ///
+    /// The periods span the **data**, not the selected window. A 3M window
+    /// holding three weeks of play would otherwise produce three bars
+    /// describing nothing and one bar describing everything, which reads as a
+    /// collapse rather than as a gap in the record.
+    static func segments(in points: [ProfileSeriesPoint]) -> [ProfileChartSegment] {
+        let count = segmentCount(pointCount: points.count)
+        guard count >= 2, let first = points.first?.date, let last = points.last?.date else {
+            return []
+        }
+        let span = last.timeIntervalSince(first)
+        guard span > 0 else { return [] }
+
+        let width = span / Double(count)
+        var segments: [ProfileChartSegment] = []
+        var previousAverage: Double?
+
+        for index in 0..<count {
+            let start = first.addingTimeInterval(width * Double(index))
+            let end = index == count - 1 ? last : first.addingTimeInterval(width * Double(index + 1))
+            let inPeriod = points.filter { point in
+                point.date >= start && (index == count - 1 ? point.date <= end : point.date < end)
+            }
+            // An empty period is skipped rather than plotted at zero: a bar on
+            // the floor is a claim that the rating went to nothing.
+            guard !inPeriod.isEmpty else { continue }
+
+            let average = inPeriod.map(\.value).reduce(0, +) / Double(inPeriod.count)
+            let delta: Double? = previousAverage.flatMap { previous in
+                previous == 0 ? nil : (average - previous) / abs(previous)
+            }
+            segments.append(
+                ProfileChartSegment(
+                    interval: DateInterval(start: start, end: end),
+                    average: average,
+                    delta: delta
+                )
+            )
+            previousAverage = average
+        }
+
+        // One bar is not a comparison, and the whole point of the bars is the
+        // comparison between them.
+        return segments.count >= 2 ? segments : []
     }
 
     /// 10th–90th percentile, linearly interpolated.

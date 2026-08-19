@@ -15,6 +15,14 @@ import TrainingCore
 /// fraction, so the ladder occupies roughly a third of a screen while still
 /// reporting where every rung stands.
 ///
+/// ## Why every sub-skill is named
+///
+/// The open rung lists its skills by their **measurable** names — "hanging
+/// pieces under 1.0 per 100 moves", not "board vision" — because that is the
+/// difference between a ladder that reads as competence and one that reads as
+/// points. A user who can name what they are being measured on can go and
+/// practise it; a user shown a percentage can only wait.
+///
 /// A winding-path level map was considered and rejected: it costs a screen and
 /// a half to encode an ordering that "RUNG 1, RUNG 2" already carries, and it
 /// makes a training tool look like a game.
@@ -25,12 +33,8 @@ struct CurriculumLadderSection: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
-            HStack {
-                Text("Curriculum")
-                    .font(.headline)
-                Spacer()
-            }
-            .padding(.bottom, 8)
+            SectionHeader(title: "Curriculum", qualifier: qualifier)
+                .padding(.bottom, 4)
 
             ForEach(state.rungs) { rung in
                 RungSection(
@@ -39,10 +43,19 @@ struct CurriculumLadderSection: View {
                     onToggle: { onToggle(rung.id) }
                 )
                 if rung.id != state.rungs.last?.id {
-                    Divider()
+                    Rectangle()
+                        .fill(Palette.hairline.dynamic)
+                        .frame(height: 1)
                 }
             }
         }
+    }
+
+    /// `RUNG 2 OF 4`, right-aligned and dimmer — the same small-caps style as
+    /// the header it sits beside.
+    private var qualifier: String? {
+        guard let current = state.rungs.first(where: { $0.status == .current }) else { return nil }
+        return "Rung \(current.id) of \(state.rungs.count)"
     }
 }
 
@@ -58,7 +71,7 @@ private struct RungSection: View {
             if isExpanded {
                 expandedBody
                     .padding(.top, 4)
-                    .padding(.bottom, 12)
+                    .padding(.bottom, 14)
             }
         }
     }
@@ -66,61 +79,62 @@ private struct RungSection: View {
     private var header: some View {
         Button(action: onToggle) {
             HStack(alignment: .center, spacing: 10) {
-                VStack(alignment: .leading, spacing: 3) {
+                VStack(alignment: .leading, spacing: 4) {
                     HStack(spacing: 6) {
                         Eyebrow(text: "Rung \(rung.id)")
                         if rung.status == .locked {
-                            ProfileChip(text: "LOCKED")
+                            ProfileChip(text: "Locked")
                         }
                         if rung.status == .completed {
                             Image(systemName: "checkmark.circle.fill")
-                                .font(.caption2)
-                                .foregroundStyle(Color.accentColor)
+                                .typeRole(.caption, appliesForeground: false)
+                                .foregroundStyle(.primary)
                         }
                     }
                     Text(rung.title)
-                        .font(.body.weight(.semibold))
+                        .typeRole(.headline, appliesForeground: false)
+                        // Locked rungs go quiet by weight, not by dimming the
+                        // whole row — a row at reduced opacity reads as broken
+                        // rendering rather than as "not yet".
                         .foregroundStyle(rung.status == .locked ? .secondary : .primary)
                 }
 
                 Spacer(minLength: 8)
 
                 Text(rung.completionFraction)
-                    .font(.subheadline.monospacedDigit())
-                    .foregroundStyle(.secondary)
+                    .typeRole(.caption, monospacedDigits: true)
 
                 Image(systemName: "chevron.right")
-                    .font(.caption.weight(.semibold))
+                    .typeRole(.caption, appliesForeground: false)
                     .foregroundStyle(.tertiary)
                     .rotationEffect(.degrees(isExpanded ? 90 : 0))
             }
-            .padding(.vertical, 12)
+            .padding(.vertical, 14)
             .contentShape(Rectangle())
         }
-        .buttonStyle(.plain)
+        .buttonStyle(.pressable)
         .accessibilityElement(children: .combine)
         .accessibilityHint(isExpanded ? "Collapse" : "Expand")
     }
 
     @ViewBuilder
     private var expandedBody: some View {
-        VStack(alignment: .leading, spacing: 12) {
+        VStack(alignment: .leading, spacing: 14) {
             Text("Ratings \(rung.ratingBand.lowerBound)–\(rung.ratingBand.upperBound)")
-                .font(.caption.monospacedDigit())
-                .foregroundStyle(.tertiary)
+                .typeRole(.label, monospacedDigits: true)
 
             ForEach(rung.skills) { skill in
                 SkillRow(skill: skill)
             }
 
             if !rung.blockerMessages.isEmpty {
-                VStack(alignment: .leading, spacing: 4) {
+                VStack(alignment: .leading, spacing: 5) {
                     ForEach(rung.blockerMessages, id: \.self) { message in
                         HStack(spacing: 6) {
                             Image(systemName: "arrow.right")
-                                .font(.caption2)
+                                .typeRole(.label, appliesForeground: false)
                             Text(message)
-                                .font(.footnote)
+                                .typeRole(.caption, monospacedDigits: true, appliesForeground: false)
                         }
                         .foregroundStyle(.secondary)
                     }
@@ -144,21 +158,22 @@ private struct SkillRow: View {
     var body: some View {
         HStack(alignment: .top, spacing: 10) {
             Image(systemName: skill.symbol)
-                .font(.footnote)
+                .typeRole(.caption, appliesForeground: false)
                 .foregroundStyle(.secondary)
                 .frame(width: 18, alignment: .center)
-                .padding(.top, 1)
+                .padding(.top, 2)
 
-            VStack(alignment: .leading, spacing: 2) {
+            VStack(alignment: .leading, spacing: 3) {
                 HStack(spacing: 6) {
                     Text(skill.title)
-                        .font(.subheadline)
+                        .typeRole(.body, appliesForeground: false)
+                        // A met skill steps back to secondary rather than being
+                        // struck through: a strikethrough reads as cancelled,
+                        // which is the opposite of earned.
                         .foregroundStyle(skill.isMet ? .secondary : .primary)
                     if skill.isRequired {
-                        Text("REQUIRED")
-                            .font(.system(size: 9, weight: .semibold))
-                            .tracking(0.4)
-                            .foregroundStyle(.tertiary)
+                        Text("Required")
+                            .typeRole(.label)
                     }
                 }
 
@@ -177,26 +192,30 @@ private struct SkillRow: View {
             // Honest empty state, not a zero. A zero blunder rate and an
             // unmeasured blunder rate look identical, and one of them is a lie.
             Text("Not enough games yet — \(samplesNeeded) more to measure this")
-                .font(.caption)
+                .typeRole(.label, monospacedDigits: true, appliesForeground: false)
                 .foregroundStyle(.tertiary)
                 .fixedSize(horizontal: false, vertical: true)
         } else if let measurement = skill.measurement {
             Text(measurement)
-                .font(.caption.monospacedDigit())
-                .foregroundStyle(.secondary)
+                .typeRole(.caption, monospacedDigits: true)
         }
     }
 
+    /// Filled when met, a grey outline when not.
+    ///
+    /// Ink rather than accent: the accent on this screen belongs to the leak
+    /// the user is being asked to work on, and twenty accent-coloured ticks
+    /// would outshout it while saying nothing to act on.
     @ViewBuilder
     private var indicator: some View {
         if skill.isMet {
             Image(systemName: "checkmark.circle.fill")
-                .font(.body)
-                .foregroundStyle(Color.accentColor)
+                .typeRole(.body, appliesForeground: false)
+                .foregroundStyle(.primary)
                 .accessibilityLabel("Met")
         } else {
             Circle()
-                .strokeBorder(.quaternary, lineWidth: 1.5)
+                .strokeBorder(Palette.hairlinePending.dynamic, lineWidth: 1.5)
                 .frame(width: 18, height: 18)
                 .accessibilityLabel("Not met")
         }

@@ -10,34 +10,44 @@ import SwiftUI
 ///
 /// ## Chrome, top to bottom
 ///
-/// Title row with icon → the big current value with its date beneath → the
-/// expected range as **text on the right**, not a drawn axis → the plot → the
-/// metric chips → the time-range row with steppers.
+/// Title row with icon → the big current value with its unit and date → **the
+/// sentence that says what the number means** → the expected range as text on
+/// the right, not a drawn axis → the plot → the metric chips → the range
+/// control with steppers.
 ///
-/// Two of those are worth defending. The expected range is text because a
-/// labelled y-axis on a personal-history chart spends a column of pixels
-/// restating numbers the headline already gives; one line of text says the same
-/// thing and leaves the plot area to the data. And the metric chips sit *below*
-/// the chart because they select what the chart above them shows — a chip row
-/// above the plot reads as a filter applied to the whole screen.
+/// Three of those are worth defending.
+///
+/// The interpretive line is the most valuable element on the card. A chart asks
+/// the reader to find the trend, compare the recent stretch against the earlier
+/// one, and decide whether either matters — all work the card already did in
+/// order to draw itself. Leaving the reader to redo it by eye is how a chart
+/// becomes decoration.
+///
+/// The expected range is text because a labelled y-axis on a personal-history
+/// chart spends a column of pixels restating numbers the headline already
+/// gives; one line of text says the same thing and leaves the plot area to the
+/// data. And the metric chips sit *below* the chart because they select what
+/// the chart above them shows — a chip row above the plot reads as a filter
+/// applied to the whole screen.
 struct RatingChartCard: View {
 
     @Bindable var model: ProfileModel
 
     private var series: ProfileChartSeries { model.series }
 
+    /// Tall enough for four period bars and their labels without the labels
+    /// landing on the line.
+    private let plotHeight: CGFloat = 176
+
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
             header
             plot
-            metricChips
+            metricControl
             rangeRow
         }
         .padding(16)
-        .background(
-            RoundedRectangle(cornerRadius: ProfileStyle.cardCornerRadius, style: .continuous)
-                .fill(.quaternary)
-        )
+        .elevation(.raised, cornerRadius: CornerRadius.card)
     }
 
     // MARK: - Header
@@ -46,19 +56,17 @@ struct RatingChartCard: View {
         VStack(alignment: .leading, spacing: 10) {
             HStack(spacing: 6) {
                 Image(systemName: model.metric.symbol)
-                    .font(.caption)
+                    .typeRole(.caption, appliesForeground: false)
+                    .foregroundStyle(.tertiary)
                 Eyebrow(text: model.metric.title)
                 Spacer()
             }
 
             HStack(alignment: .firstTextBaseline) {
                 VStack(alignment: .leading, spacing: 2) {
-                    Text(headlineValue)
-                        .font(.system(size: 34, weight: .semibold, design: .rounded))
-                        .monospacedDigit()
+                    headlineValue
                     Text(headlineDate)
-                        .font(.footnote)
-                        .foregroundStyle(.secondary)
+                        .typeRole(.caption, monospacedDigits: true)
                 }
 
                 Spacer(minLength: 12)
@@ -68,17 +76,41 @@ struct RatingChartCard: View {
                     // window's own values — see `ProfileChartSeries.typicalRange`
                     // for why it is not a population claim.
                     Text("Typical \(model.metric.formatCompact(typical.lowerBound))–\(model.metric.formatCompact(typical.upperBound))")
-                        .font(.footnote.monospacedDigit())
-                        .foregroundStyle(.secondary)
+                        .typeRole(.caption, monospacedDigits: true)
                         .multilineTextAlignment(.trailing)
                 }
+            }
+
+            if let interpretation = model.interpretation {
+                Text(interpretation)
+                    .typeRole(.body, appliesForeground: false)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            } else if let pending = model.interpretationPlaceholder {
+                // Says what is missing rather than leaving the sentence's slot
+                // blank. Caption weight, because it is an explanation of an
+                // absence and must not read as the finding itself.
+                Text(pending)
+                    .typeRole(.caption)
+                    .fixedSize(horizontal: false, vertical: true)
             }
         }
     }
 
-    private var headlineValue: String {
-        guard let latest = series.latest else { return "—" }
-        return model.metric.format(latest.value)
+    @ViewBuilder
+    private var headlineValue: some View {
+        if let latest = series.latest {
+            DenominatorText(
+                Denominator(
+                    value: model.metric.formatBare(latest.value),
+                    denominator: model.metric.unit
+                ),
+                role: .display
+            )
+        } else {
+            Text("—")
+                .typeRole(.display)
+        }
     }
 
     private var headlineDate: String {
@@ -94,7 +126,7 @@ struct RatingChartCard: View {
     private var plot: some View {
         if series.isPlottable {
             chart
-                .frame(height: 168)
+                .frame(height: plotHeight)
         } else {
             // A single point is not a trend, and a chart drawn through one dot
             // invites the reader to imagine the line.
@@ -102,7 +134,7 @@ struct RatingChartCard: View {
                 message: model.seriesState.message ?? "Nothing to plot yet",
                 symbol: "chart.line.flattrend.xyaxis"
             )
-            .frame(height: 168, alignment: .center)
+            .frame(height: plotHeight, alignment: .center)
         }
     }
 
@@ -118,7 +150,7 @@ struct RatingChartCard: View {
                         yStart: .value("Low", interval.lowerBound),
                         yEnd: .value("High", interval.upperBound)
                     )
-                    .foregroundStyle(Color.accentColor.opacity(0.13))
+                    .foregroundStyle(Color.primary.opacity(ProfileStyle.plotBandOpacity))
                     .interpolationMethod(.monotone)
                 }
             }
@@ -128,92 +160,133 @@ struct RatingChartCard: View {
                     x: .value("Date", point.date),
                     y: .value(model.metric.title, point.value)
                 )
-                .foregroundStyle(Color.accentColor)
+                .foregroundStyle(Color.primary.opacity(ProfileStyle.plotLineOpacity))
                 .interpolationMethod(.monotone)
-                .lineStyle(StrokeStyle(lineWidth: 2, lineCap: .round, lineJoin: .round))
+                .lineStyle(StrokeStyle(lineWidth: 1.5, lineCap: .round, lineJoin: .round))
             }
 
-            if let average = series.average {
-                RuleMark(y: .value("Average", average))
-                    .lineStyle(StrokeStyle(lineWidth: 1, dash: [4, 4]))
-                    .foregroundStyle(.secondary)
-                    // The label rides on the line itself rather than sitting in
-                    // a legend: a legend for one dashed rule is chart junk.
-                    .annotation(position: .top, alignment: .trailing, spacing: -9) {
-                        Text("Avg. \(model.metric.formatCompact(average))")
-                            .font(.caption2.weight(.medium))
-                            .monospacedDigit()
-                            .foregroundStyle(.secondary)
-                            .padding(.horizontal, 6)
-                            .padding(.vertical, 2)
-                            .background(Capsule().fill(.background))
-                            .overlay(Capsule().strokeBorder(.quaternary))
-                    }
+            // The narrative layer: one bar per period, each labelled with its
+            // average and its change against the period before it. This is what
+            // turns a jagged line into "up, up, flat, up".
+            ForEach(series.segments) { segment in
+                RuleMark(
+                    xStart: .value("From", segment.interval.start),
+                    xEnd: .value("To", segment.interval.end),
+                    y: .value("Period average", segment.average)
+                )
+                .lineStyle(StrokeStyle(lineWidth: 4, lineCap: .round))
+                .foregroundStyle(Color.primary)
+                .annotation(position: .top, alignment: .center, spacing: 2) {
+                    segmentLabel(segment)
+                }
+            }
+
+            // The ring is the one piece of accent the chart is allowed: it says
+            // "here is where you are", which is the only question the card is
+            // being asked.
+            if let latest = series.latest {
+                PointMark(
+                    x: .value("Date", latest.date),
+                    y: .value(model.metric.title, latest.value)
+                )
+                .symbolSize(160)
+                .foregroundStyle(Palette.accent.dynamic.opacity(0.20))
+
+                PointMark(
+                    x: .value("Date", latest.date),
+                    y: .value(model.metric.title, latest.value)
+                )
+                .symbolSize(44)
+                .foregroundStyle(Palette.accent.dynamic)
             }
         }
         .chartYAxis(.hidden)
-        .chartYScale(domain: series.valueDomain ?? 0...1)
+        .chartYScale(domain: plotDomain)
         .chartXAxis {
-            AxisMarks(values: .automatic(desiredCount: 3)) { value in
+            AxisMarks(values: .automatic(desiredCount: 3)) { _ in
                 AxisValueLabel(format: .dateTime.month(.abbreviated).day())
-                    .font(.caption2)
+                    .font(TypeRole.label.font)
                     .foregroundStyle(.tertiary)
             }
         }
         .chartXScale(domain: series.interval.start...series.interval.end)
+        .animation(Motion.contentSwap, value: series)
     }
 
-    // MARK: - Metric chips
+    /// The y-domain the plot is actually drawn in.
+    ///
+    /// Wider at the top than ``ProfileChartSeries/valueDomain`` whenever period
+    /// bars are drawn, because their labels ride above them and a label clipped
+    /// by the top of the card is a number the reader can see half of.
+    private var plotDomain: ClosedRange<Double> {
+        guard let domain = series.valueDomain else { return 0...1 }
+        guard !series.segments.isEmpty else { return domain }
+        let headroom = (domain.upperBound - domain.lowerBound) * 0.14
+        return domain.lowerBound...(domain.upperBound + headroom)
+    }
 
-    private var metricChips: some View {
-        HStack(spacing: 8) {
-            ForEach(ProfileChartMetric.allCases) { candidate in
-                Button {
-                    model.metric = candidate
-                } label: {
-                    Text(candidate.title)
-                        .font(.footnote.weight(.medium))
-                        .padding(.horizontal, 12)
-                        .padding(.vertical, 6)
-                        .background(
-                            Capsule().fill(
-                                candidate == model.metric
-                                    ? AnyShapeStyle(Color.accentColor.opacity(0.18))
-                                    : AnyShapeStyle(.quaternary)
-                            )
-                        )
-                        .foregroundStyle(candidate == model.metric ? Color.accentColor : Color.secondary)
+    /// `1148 +4%`. The delta carries an arrow as well as a colour, because
+    /// colour alone fails for the readers who need the encoding most.
+    private func segmentLabel(_ segment: ProfileChartSegment) -> some View {
+        HStack(spacing: 3) {
+            Text(model.metric.formatCompact(segment.average))
+                .typeRole(.label, monospacedDigits: true, appliesForeground: false)
+                .foregroundStyle(.secondary)
+
+            if let delta = segment.delta, let label = segment.deltaLabel {
+                let direction = ProfileNarrative.Direction.of(delta * 100, threshold: 1)
+                HStack(spacing: 1) {
+                    Image(systemName: deltaSymbol(direction))
+                        .typeRole(.label, appliesForeground: false)
+                        .imageScale(.small)
+                    Text(label)
+                        .typeRole(.label, monospacedDigits: true, appliesForeground: false)
                 }
-                .buttonStyle(.plain)
-                .accessibilityAddTraits(candidate == model.metric ? [.isSelected] : [])
+                .foregroundStyle(deltaStyle(direction))
             }
-            Spacer(minLength: 0)
         }
+        .accessibilityElement(children: .combine)
+    }
+
+    private func deltaSymbol(_ direction: ProfileNarrative.Direction) -> String {
+        switch direction {
+        case .up: "arrow.up"
+        case .down: "arrow.down"
+        case .level: "minus"
+        }
+    }
+
+    private func deltaStyle(_ direction: ProfileNarrative.Direction) -> Color {
+        switch direction {
+        // Rating gained and rating given back, which is the one thing the eval
+        // colours are allowed to mean.
+        case .up: Palette.evalPositive.dynamic
+        case .down: Palette.evalNegative.dynamic
+        case .level: Color.secondary
+        }
+    }
+
+    // MARK: - Which series
+
+    private var metricControl: some View {
+        SegmentedChoice(
+            options: ProfileChartMetric.allCases,
+            selection: model.metric,
+            title: { $0.title },
+            onSelect: { model.metric = $0 }
+        )
     }
 
     // MARK: - Time range
 
     private var rangeRow: some View {
-        HStack(spacing: 8) {
-            ForEach(ProfileTimeRange.allCases) { candidate in
-                Button {
-                    model.range = candidate
-                } label: {
-                    Text(candidate.rawValue)
-                        .font(.caption.weight(.semibold))
-                        .monospacedDigit()
-                        .foregroundStyle(candidate == model.range ? Color.primary : Color.secondary)
-                        .frame(minWidth: 28)
-                        .padding(.vertical, 5)
-                        .background(
-                            RoundedRectangle(cornerRadius: 7, style: .continuous)
-                                .fill(candidate == model.range ? AnyShapeStyle(.quaternary) : AnyShapeStyle(.clear))
-                        )
-                }
-                .buttonStyle(.plain)
-            }
-
-            Spacer(minLength: 0)
+        HStack(spacing: 10) {
+            SegmentedChoice(
+                options: ProfileTimeRange.allCases,
+                selection: model.range,
+                title: { $0.rawValue },
+                onSelect: { model.range = $0 }
+            )
 
             stepper(symbol: "chevron.left", delta: 1, enabled: model.canStepBack)
             stepper(symbol: "chevron.right", delta: -1, enabled: model.canStepForward)
@@ -225,11 +298,12 @@ struct RatingChartCard: View {
             model.step(delta)
         } label: {
             Image(systemName: symbol)
-                .font(.caption.weight(.semibold))
-                .frame(width: 24, height: 24)
-                .foregroundStyle(enabled ? Color.secondary : Color.secondary.opacity(0.35))
+                .typeRole(.caption, appliesForeground: false)
+                .frame(width: 28, height: 28)
+                .foregroundStyle(Color.secondary.opacity(enabled ? 1 : 0.35))
+                .contentShape(Rectangle())
         }
-        .buttonStyle(.plain)
+        .buttonStyle(.pressable)
         .disabled(!enabled)
         .accessibilityLabel(delta > 0 ? "Earlier \(model.range.rawValue)" : "Later \(model.range.rawValue)")
     }

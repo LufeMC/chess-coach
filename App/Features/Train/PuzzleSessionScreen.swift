@@ -52,6 +52,15 @@ struct PuzzleSessionScreen: View {
 
     private var solving: some View {
         VStack(spacing: 12) {
+            // A plain statement of the task, above the board rather than under
+            // it: it is the first thing to read and the last thing to re-read,
+            // and a board that starts at the top edge leaves the user hunting
+            // for whose move it is.
+            Text(model.taskLine)
+                .typeRole(.headline)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.horizontal, 16)
+
             board
                 .padding(.horizontal, 12)
 
@@ -61,6 +70,7 @@ struct PuzzleSessionScreen: View {
                 .padding(.horizontal, 12)
                 .padding(.bottom, 8)
         }
+        .background(Palette.surfaceGround.dynamic.ignoresSafeArea())
         .navigationTitle("")
         #if os(iOS)
             .navigationBarTitleDisplayMode(.inline)
@@ -82,13 +92,15 @@ struct PuzzleSessionScreen: View {
             position: displayedPosition,
             orientation: model.orientation,
             interaction: interaction,
-            highlights: highlights
+            highlights: highlights,
+            style: BoardAppearance.shared.style
         )
         .overlay {
             BoardAnnotationOverlay(
                 orientation: model.orientation,
                 ring: ring,
-                hint: hintArrow
+                hint: hintArrow,
+                style: BoardAppearance.shared.style
             )
         }
     }
@@ -118,9 +130,25 @@ struct PuzzleSessionScreen: View {
         }
     }
 
+    /// The last move's wash, plus — after a miss — the answer's destination in
+    /// `BoardUI`'s dashed green target.
+    ///
+    /// The dashed border is a state of its own rather than a louder version of
+    /// the hint ring: "this was the answer" is what the user needs after they
+    /// have already committed, and drawing it with the same solid ring the hint
+    /// uses would make the two indistinguishable in memory a puzzle later. The
+    /// user's own wrong square keeps its orange ring from
+    /// ``BoardAnnotationOverlay`` — amber, never red, for the reason stated
+    /// there — so the two marks never collide in shape or in colour.
     private var highlights: [SquareHighlight] {
-        guard !isPlayingSetupMove, let move = model.lastOpponentMove else { return [] }
-        return SquareHighlight.lastMove(from: move.from, to: move.to)
+        guard !isPlayingSetupMove else { return [] }
+
+        var marks = model.lastOpponentMove.map { SquareHighlight.lastMove(from: $0.from, to: $0.to) } ?? []
+        if case let .verdict(verdict) = model.stage,
+            let answer = PuzzleConcept.destination(ofUCI: verdict.answer) {
+            marks.append(SquareHighlight(answer, .correctAnswer))
+        }
+        return marks
     }
 
     private var ring: BoardRing? {
@@ -166,8 +194,8 @@ struct PuzzleSessionScreen: View {
             Button {
                 model.revealHint()
             } label: {
-                Label("Reveal", systemImage: "arrow.turn.up.right")
-                    .font(.subheadline)
+                Label("Reveal", systemImage: "lightbulb")
+                    .typeRole(.body, appliesForeground: false)
             }
             .buttonStyle(.plain)
             .foregroundStyle(.secondary)
@@ -179,7 +207,7 @@ struct PuzzleSessionScreen: View {
                 Task { await model.skip() }
             } label: {
                 Text("Skip")
-                    .font(.subheadline)
+                    .typeRole(.body, appliesForeground: false)
             }
             .buttonStyle(.plain)
             .foregroundStyle(.secondary)

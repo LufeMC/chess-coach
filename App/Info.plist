@@ -23,11 +23,7 @@
 	<key>ITSAppUsesNonExemptEncryption</key>
 	<false/>
 	<key>NSHumanReadableCopyright</key>
-	<string></string>
-	<key>UIBackgroundModes</key>
-	<array>
-		<string>remote-notification</string>
-	</array>
+	<string>Embeds Stockfish (GPL v3) and ChessKit (MIT). See Settings › Acknowledgements.</string>
 	<key>UILaunchScreen</key>
 	<dict/>
 </dict>

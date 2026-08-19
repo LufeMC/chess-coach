@@ -61,7 +61,7 @@ struct ReviewScrubber: View {
             Spacer(minLength: 0)
             Text("Black")
         }
-        .font(.caption)
+        .typeRole(.caption, appliesForeground: false)
         .foregroundStyle(.tertiary)
         .frame(width: 42, height: curveHeight, alignment: .leading)
     }

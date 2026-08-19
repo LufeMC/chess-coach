@@ -49,20 +49,29 @@ actor ProfileDataLoader {
     /// year of daily play, and the rows are tiny.
     static let historyGameLimit = 400
 
-    private let metrics: any MetricStore
+    /// How many stored observations of one metric the chart reads.
+    ///
+    /// The coalescing in `MetricsRepository.recordSample` caps a metric at
+    /// roughly one row per day its value stood still plus one per time it
+    /// moved, so this is a decade of daily play. The cap counts back from the
+    /// newest, so a user who somehow passed it would lose the distant past
+    /// rather than this week.
+    static let historySampleLimit = 4_000
+
+    private let history: any MetricHistoryStore
     private let games: any GameStore
     private let moments: any MomentStore
     private let ladder: [Rung]
     private let tuning: DomainTuning
 
     init(
-        metrics: any MetricStore,
+        history: any MetricHistoryStore,
         games: any GameStore,
         moments: any MomentStore,
         ladder: [Rung] = Curriculum.default,
         tuning: DomainTuning = .default
     ) {
-        self.metrics = metrics
+        self.history = history
         self.games = games
         self.moments = moments
         self.ladder = ladder
@@ -71,12 +80,14 @@ actor ProfileDataLoader {
 
     /// The shared loader, or `nil` when the database could not be opened.
     static let shared: ProfileDataLoader? = AppDatabase.sharedIfAvailable.map {
-        ProfileDataLoader(metrics: $0.metrics, games: $0.games, moments: $0.moments)
+        ProfileDataLoader(history: $0.metrics, games: $0.games, moments: $0.moments)
     }
 
     func load(now: Date = Date()) throws -> ProfileChartData {
-        let stored = try metrics.all()
         let finished = try games.recent(limit: Self.historyGameLimit).filter { $0.endedAt != nil }
+        let rating = try samples(of: .ladderRating)
+        let puzzle = try samples(of: .puzzleRating)
+        let puzzleDeviation = try samples(of: .puzzleRatingDeviation)
 
         // The leak half looks at exactly the games `MetricsService` fed to
         // `LeakAnalyzer`, so the `Last N games` label and the numbers under it
@@ -111,7 +122,12 @@ actor ProfileDataLoader {
         }
 
         return ProfileChartData(
-            series: Self.series(from: stored, games: finished),
+            series: Self.series(
+                rating: rating,
+                puzzle: puzzle,
+                puzzleDeviation: puzzleDeviation,
+                games: finished
+            ),
             occurrences: occurrences,
             leakWindowGames: LeakTable.windowSize(games: gameRecords, now: now, tuning: tuning.focus),
             gamesAvailable: leakHorizon.count
@@ -120,19 +136,33 @@ actor ProfileDataLoader {
 
     // MARK: - Chart series
 
+    /// Every stored observation of one metric, oldest first.
+    private func samples(of key: MetricKey) throws -> [MetricSample] {
+        try history.samples(
+            key: key.rawValue,
+            window: MetricWindow.allTime.key,
+            limit: Self.historySampleLimit
+        )
+    }
+
     /// Builds the three plotted series from stored values only.
     ///
-    /// * **Accuracy** is a genuine per-game time series: `games.userAccuracy` is
-    ///   written by the analysis pipeline and stamped with the game's end time.
-    /// * **Rating** and **Puzzles** come from `skillMetrics` rows, timestamped
-    ///   with `updatedAt`. The schema stores one row per `(key, window)`, so
-    ///   today that yields a *current value* rather than a history — the chart
-    ///   shows its empty state until a rating history exists. Nothing here
-    ///   fabricates intermediate points, and nothing re-derives a rating from
-    ///   game results: that is `MetricsService`'s job, and two implementations
-    ///   would eventually disagree.
+    /// * **Accuracy** is a genuine per-game time series already: `userAccuracy`
+    ///   is written by the analysis pipeline and stamped with the game's end
+    ///   time, so it needs no history table.
+    /// * **Rating** and **Puzzles** come from `metricSamples`, the append-only
+    ///   history `MetricsService` writes. They used to be read off `skillMetrics`
+    ///   instead, which holds one row per `(key, window)` — a *current value*,
+    ///   not a series — so the chart could only ever render its empty state, on
+    ///   real data, permanently.
+    ///
+    /// Nothing here fabricates intermediate points, and nothing re-derives a
+    /// rating from game results: that is `MetricsService`'s job, and two
+    /// implementations would eventually disagree.
     static func series(
-        from rows: [SkillMetric],
+        rating: [MetricSample],
+        puzzle: [MetricSample],
+        puzzleDeviation: [MetricSample],
         games: [Game]
     ) -> [ProfileChartMetric: [ProfileSeriesPoint]] {
 
@@ -146,20 +176,17 @@ actor ProfileDataLoader {
         // The Glicko deviation in force at each puzzle-rating observation. Only
         // a deviation recorded at or before the point is used — carrying a later,
         // narrower one backwards would understate the uncertainty of old points.
-        let deviations = rows
-            .filter { $0.key == MetricKey.puzzleRatingDeviation.rawValue }
-            .sorted { $0.updatedAt < $1.updatedAt }
+        let deviations = puzzleDeviation.sorted { $0.recordedAt < $1.recordedAt }
 
-        func points(key: MetricKey, withDeviation: Bool) -> [ProfileSeriesPoint] {
-            rows
-                .filter { $0.key == key.rawValue }
-                .sorted { $0.updatedAt < $1.updatedAt }
-                .map { row in
+        func points(_ samples: [MetricSample], withDeviation: Bool) -> [ProfileSeriesPoint] {
+            samples
+                .sorted { $0.recordedAt < $1.recordedAt }
+                .map { sample in
                     ProfileSeriesPoint(
-                        date: row.updatedAt,
-                        value: row.value,
+                        date: sample.recordedAt,
+                        value: sample.value,
                         deviation: withDeviation
-                            ? deviations.last { $0.updatedAt <= row.updatedAt }?.value
+                            ? deviations.last { $0.recordedAt <= sample.recordedAt }?.value
                             : nil
                     )
                 }
@@ -169,9 +196,9 @@ actor ProfileDataLoader {
             // No deviation is stored for the playing ladder, so no band is drawn
             // for it. Inventing one from a constant would be a fabricated error
             // bar, which is worse than no error bar at all.
-            .rating: points(key: .ladderRating, withDeviation: false),
+            .rating: points(rating, withDeviation: false),
             .accuracy: accuracy,
-            .puzzles: points(key: .puzzleRating, withDeviation: true)
+            .puzzles: points(puzzle, withDeviation: true)
         ]
     }
 }

@@ -90,6 +90,34 @@ final class ProfileModel {
         .forSeries(pointCount: series.points.count, noun: metric.pointNoun)
     }
 
+    /// The sentence under the headline number, saying what the chart means.
+    ///
+    /// `nil` when there is not enough plotted to say anything true, in which
+    /// case the card shows its measurement placeholder instead.
+    var interpretation: String? {
+        ProfileNarrative.interpretation(for: series, metric: metric, range: range)
+    }
+
+    /// Stands in for the interpretation while the series is too young to carry
+    /// one, so the card never shows an empty space where a sentence belongs.
+    var interpretationPlaceholder: String? {
+        guard interpretation == nil else { return nil }
+        return ProfileNarrative.pendingNote(for: series, metric: metric)
+    }
+
+    /// Per-cause history for the leak sparklines, keyed by cause tag raw value.
+    ///
+    /// A fold over the occurrences already in memory rather than another read:
+    /// the snapshot holds every occurrence behind the table, and bucketing a few
+    /// hundred dates is cheaper than the round trip that would avoid it.
+    var leakTrends: [String: LeakTrend] {
+        var trends: [String: LeakTrend] = [:]
+        for (tag, occurrences) in snapshot.occurrences {
+            trends[tag] = LeakTrend.make(from: occurrences, now: snapshot.generatedAt)
+        }
+        return trends
+    }
+
     /// Stepping back is only offered while there is older data to reach.
     var canStepBack: Bool {
         guard let earliest = snapshot.points(for: metric).map(\.date).min() else { return false }

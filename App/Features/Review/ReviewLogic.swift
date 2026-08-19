@@ -4,6 +4,7 @@ import ChessKit
 import Database
 import EngineKit
 import Foundation
+import TrainingCore
 
 // Everything in this file is pure: value in, value out, no database, no engine,
 // no main actor. That is deliberate — the Review screen's genuinely error-prone
@@ -385,6 +386,10 @@ struct ReviewMomentCard: Identifiable, Sendable {
     var classification: BoardUI.MoveClassification
     var thumbnail: MomentThumbnail
     var coachText: String?
+    var diagnosis: ReviewDiagnosis
+    /// The Socratic lead-in for this cause. Nil for a reinforcement, which is
+    /// never asked what it allowed in return.
+    var question: String?
     var playedSAN: String
     var bestSAN: String
 
@@ -393,13 +398,90 @@ struct ReviewMomentCard: Identifiable, Sendable {
     var positionIndex: Int { ply - 1 }
 }
 
+/// What the analysis concluded about a moment, in words.
+///
+/// Both halves are already on the stored row and both were previously legible
+/// only inside the note's prose — which is the one place a reader scanning a
+/// screen does not look. A moment is the app's diagnosis, and a diagnosis that
+/// has to be read out of a paragraph is a paragraph.
+struct ReviewDiagnosis: Sendable, Equatable {
+    /// The cause in the leak table's words. Deliberately the *same* words: a
+    /// mistake that reads "Hanging pieces" here and something else on the
+    /// Profile leak it feeds is two diagnoses, not one.
+    var title: String
+    /// The step of the move routine that broke down, when the row names one.
+    var step: String?
+}
+
+enum ReviewDiagnoses {
+
+    /// A reinforcement's label.
+    ///
+    /// It gets no cause and no step because it is not a diagnosis of anything:
+    /// `MomentBuilder` hands a praised move the `generic` tag precisely because
+    /// every value in the taxonomy names something that went wrong, and the
+    /// filmstrip captions the same card as praise two views away.
+    static let praiseTitle = "Well played"
+
+    /// The label for a move no detector explained.
+    ///
+    /// AnalysisKit's own wording for the tag. "Generic" would print an
+    /// implementation detail, and anything more specific would invent the
+    /// finding the detectors did not make.
+    static let unexplainedTitle = "A move that cost something"
+
+    /// The label above a moment's note.
+    static func diagnosis(for moment: Database.Moment) -> ReviewDiagnosis {
+        guard MomentKind(rawValue: moment.kind) != .reinforcement else {
+            return ReviewDiagnosis(title: praiseTitle, step: nil)
+        }
+
+        let step = AnalysisKit.StepTag(rawValue: moment.stepTag).map(stepTitle)
+        guard moment.causeTag != AnalysisKit.CauseTag.generic.rawValue else {
+            return ReviewDiagnosis(title: unexplainedTitle, step: step)
+        }
+        return ReviewDiagnosis(
+            title: LeakTable.title(for: TrainingCore.CauseTag(moment.causeTag)),
+            step: step
+        )
+    }
+
+    /// The Socratic question this moment opens with, or `nil` where asking one
+    /// would be wrong.
+    static func question(for moment: Database.Moment) -> String? {
+        guard MomentKind(rawValue: moment.kind) != .reinforcement else { return nil }
+        guard let cause = AnalysisKit.CauseTag(rawValue: moment.causeTag) else { return nil }
+        return CoachingQuestions.question(forCauseTag: cause)
+    }
+
+    /// The step of the move routine, numbered.
+    ///
+    /// The number is carried because the app teaches the routine as a numbered
+    /// sequence and the user's word for the blunder check is "step 5" — a name
+    /// without the number is a synonym rather than a pointer back to the drill.
+    /// `K` has no number because it is not part of the routine at all.
+    static func stepTitle(_ step: AnalysisKit.StepTag) -> String {
+        switch step {
+        case .s1WhatChanged: "Step 1 · What changed"
+        case .s2ChecksCapturesThreats: "Step 2 · Checks and threats"
+        case .s3Candidates: "Step 3 · Candidates"
+        case .s4Calculate: "Step 4 · Calculation"
+        case .s5BlunderCheck: "Step 5 · Blunder check"
+        case .kKnowledge: "Knowledge, not process"
+        }
+    }
+}
+
 enum ReviewMomentCards {
 
     /// Three, never more.
     ///
-    /// The number is a product decision, not a layout constraint: the daily loop
-    /// promises "one game, then three moments", and a filmstrip that sometimes
-    /// shows seven would quietly break that promise.
+    /// A ceiling, not a quota. The number is a product decision rather than a
+    /// layout constraint: the daily loop is built around a review that stays
+    /// short enough to finish, and a filmstrip that sometimes shows seven turns
+    /// a five-minute step into an open-ended one. Fewer than three is the normal
+    /// case for a clean game and is left alone — the screens that count moments
+    /// take their number from what the game produced, never from this constant.
     static let limit = 3
 
     static func cards(
@@ -452,6 +534,8 @@ enum ReviewMomentCards {
                         highlights: highlights(forUCI: moment.playedUCI)
                     ),
                     coachText: moment.coachText,
+                    diagnosis: ReviewDiagnoses.diagnosis(for: moment),
+                    question: ReviewDiagnoses.question(for: moment),
                     playedSAN: moment.playedSAN,
                     bestSAN: moment.bestSAN
                 )
@@ -481,6 +565,122 @@ enum ReviewMomentCards {
         let from = Square(String(characters[0...1]))
         let to = Square(String(characters[2...3]))
         return SquareHighlight.lastMove(from: from, to: to) + [SquareHighlight(to, .momentSquare)]
+    }
+}
+
+// MARK: - Suggested questions
+
+/// A question the card offers, and the answer the app can prove.
+///
+/// The pair is the whole point: a question the screen cannot answer from stored
+/// data would be a prompt, and a prompt with nothing behind it is worse than
+/// silence on a screen whose job is to be believed. Both answers here come from
+/// rows the analysis already wrote — the engine's move, and the curriculum's own
+/// mapping from the moment's cause tag — so they are instant and they are
+/// checkable.
+struct ReviewSuggestedQuestion: Identifiable, Equatable, Sendable {
+    var id: String
+    var question: String
+    var answer: String
+}
+
+enum ReviewSuggestedQuestions {
+
+    /// Builds the chips each moment offers.
+    ///
+    /// A reinforcement is offered none. Both questions are written about a
+    /// mistake — what to play instead, how to catch it next time — and put under
+    /// the one card in a review that exists to say *well played* they read as an
+    /// accusation.
+    static func byMoment(
+        moments: [Database.Moment],
+        cards: [ReviewMomentCard],
+        rung: Int
+    ) -> [UUID: [ReviewSuggestedQuestion]] {
+        let storedByID = Dictionary(moments.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
+
+        return cards.reduce(into: [:]) { result, card in
+            guard
+                let stored = storedByID[card.id],
+                MomentKind(rawValue: stored.kind) != .reinforcement
+            else {
+                result[card.id] = []
+                return
+            }
+
+            var questions: [ReviewSuggestedQuestion] = []
+
+            if !card.bestSAN.isEmpty {
+                questions.append(
+                    ReviewSuggestedQuestion(
+                        id: "\(card.id)-best",
+                        question: "What should I have played?",
+                        answer: "\(card.bestSAN) — the engine's move in this position."
+                    )
+                )
+            }
+
+            if let habit = TrainingCore.CauseTag(stored.causeTag).habit(rung: rung) {
+                questions.append(
+                    ReviewSuggestedQuestion(
+                        id: "\(card.id)-habit",
+                        question: "How do I catch this next time?",
+                        answer: habit.microGoalTitle
+                    )
+                )
+            }
+
+            result[card.id] = questions
+        }
+    }
+}
+
+// MARK: - Verdict
+
+enum ReviewVerdicts {
+
+    /// The game's one-line verdict and the paragraph under it.
+    ///
+    /// `nil` rather than a hedge wherever writing one would claim more than the
+    /// data supports. An unfinished or unanalysed game has nothing to sum up;
+    /// and a slate whose payloads this build cannot decode would be summarised
+    /// as a game with no moments in it while the filmstrip directly below it
+    /// shows three, which is a contradiction on one screen.
+    static func verdict(
+        game: Database.Game,
+        moves: [GameMove],
+        moments: [Database.Moment],
+        cards: [ReviewMomentCard]
+    ) -> GameSummary? {
+        guard
+            game.analysis == .complete,
+            let result = game.result.flatMap(GameResult.init(rawValue:)),
+            let color = game.color
+        else { return nil }
+
+        // The verdict is written about the positions the reader is looking at,
+        // not about every moment the pass recorded: its closing line points at
+        // them.
+        let shown = Set(cards.map(\.id))
+        let displayed = moments.filter { shown.contains($0.id) }.sorted { $0.ply < $1.ply }
+        let decoded = displayed.compactMap(AnalysisPipeline.moment(from:))
+        guard decoded.count == displayed.count else { return nil }
+
+        return GameSummarizer.summary(
+            outcome: outcome(result: result, color: color),
+            accuracy: game.userAccuracy,
+            // Full moves, which is how a player counts them: "43 moves" means
+            // forty-three of yours and forty-three of theirs.
+            moveCount: (moves.count + 1) / 2,
+            moments: decoded
+        )
+    }
+
+    /// The result from the reviewing player's side, which is the only side a
+    /// personal history is read from.
+    static func outcome(result: GameResult, color: PlayerColor) -> AnalysisKit.GameOutcome {
+        if result == .draw { return .draw }
+        return result.isWin(for: color) ? .win : .loss
     }
 }
 

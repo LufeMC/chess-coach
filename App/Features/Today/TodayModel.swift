@@ -23,6 +23,9 @@ struct TodaySnapshot: Sendable, Equatable {
     var rungTitle: String = ""
     var focusHabit: String?
     var latestGameID: UUID?
+    /// Who the next sparring game is against, so the CTA can name them rather
+    /// than saying `Play`. Nil when there was no database to ask.
+    var opponentName: String?
 }
 
 /// Loads the Today screen and holds its computed plan.
@@ -62,7 +65,8 @@ final class TodayModel {
                 completedDays: snapshot.completedDays,
                 today: now(),
                 calendar: calendar
-            )
+            ),
+            opponentName: snapshot.opponentName
         )
     }
 
@@ -178,9 +182,7 @@ final class TodayModel {
         var snapshot = TodaySnapshot()
         let todayKey = DailyLoop.dayKey(for: now, calendar: calendar)
 
-        if let loop = try? database.dailyLoop.loop(for: todayKey) {
-            snapshot.progress = DailyProgress(loop)
-        }
+        let loop = try? database.dailyLoop.loop(for: todayKey)
 
         // Five weeks covers the current strip plus enough history for any
         // streak the strip can show.
@@ -191,6 +193,22 @@ final class TodayModel {
         let games = (try? database.games.recent(limit: 1)) ?? []
         snapshot.hasAnyGame = !games.isEmpty
         snapshot.latestGameID = games.first?.id
+
+        // Counted only once the pass that produces moments has finished. While
+        // analysis is pending or running the count is *unknown*, not zero, and
+        // the day keeps its nominal target — reporting zero mid-pass would tick
+        // the moments row green seconds before its moments arrived.
+        let momentsAvailable: Int? =
+            if let latest = games.first, latest.analysis == .complete {
+                (try? database.moments.eligibleCount(forGame: latest.id)) ?? 0
+            } else {
+                nil
+            }
+        if let loop {
+            snapshot.progress = DailyProgress(loop, momentsAvailable: momentsAvailable)
+        } else {
+            snapshot.progress = DailyProgress(momentsAvailable: momentsAvailable)
+        }
         // A game today is history the daily-loop rows may not have caught yet.
         snapshot.hasHistory = snapshot.hasHistory || !games.isEmpty
 
@@ -201,6 +219,11 @@ final class TodayModel {
                 .flatMap(Habit.init(rawValue:))?
                 .microGoalTitle
         }
+
+        // Through the picker rather than off the stored rating, because the
+        // opponent named here has to be the one the Play screen puts above the
+        // board — and the offset cycle can move that pick a whole roster entry.
+        snapshot.opponentName = OpponentPicker.nextOpponentName(database: database)
 
         return snapshot
     }

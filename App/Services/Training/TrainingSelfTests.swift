@@ -669,14 +669,31 @@ enum TrainingSelfTests {
         )
 
         // Frugal-1U converges on the median of a stationary stream.
+        //
+        // Two things here are deliberate. The stream is **seeded**, because a
+        // self-check that ships in the app and consults the system RNG is a
+        // check that fails on some launches and not others — which teaches
+        // whoever sees it to ignore it. And the assertion is on the **mean of
+        // the tail**, not on the final value, because a single terminal reading
+        // is not something Frugal-1U promises: the estimator does a random walk
+        // whose step is 6% of the estimate, so it is always somewhere in a wide
+        // band around the median and can be a long way off on any given sample.
+        // Averaging the last quarter tests the property the algorithm actually
+        // has. (Asserting the terminal value is what the earlier version did,
+        // and it went red roughly one run in three.)
         var estimate = LatencyBandMedian.seed(band: 5)
-        let samples: [Double] = (0..<400).map { _ in Double.random(in: 5_000...25_000) }
-        for sample in samples {
+        var rng = DeterministicStream(seed: 0x5EED_1A7E)
+        var tail: [Double] = []
+        let sampleCount = 400
+        for index in 0..<sampleCount {
+            let sample = 5_000 + rng.nextUnitInterval() * 20_000
             estimate = LatencyBandMedian.updated(estimate: estimate, sample: sample)
+            if index >= sampleCount * 3 / 4 { tail.append(estimate) }
         }
+        let settled = tail.reduce(0, +) / Double(tail.count)
         check.expect(
-            estimate > 11_000 && estimate < 19_000,
-            "estimate should settle near the 15s median, got \(estimate)"
+            settled > 13_000 && settled < 17_000,
+            "estimate should settle near the 15s median, got \(settled)"
         )
 
         // ...and moves toward a sample rather than away from it.
@@ -690,6 +707,31 @@ enum TrainingSelfTests {
         )
 
         return check
+    }
+
+    /// A tiny SplitMix64, so the checks that need a sample stream get the same
+    /// one on every device and every launch.
+    ///
+    /// Local to the self-checks rather than exposed: nothing in the app should
+    /// be reaching for a seeded generator, and a shared one would invite it.
+    private struct DeterministicStream {
+        private var state: UInt64
+
+        init(seed: UInt64) { state = seed }
+
+        mutating func next() -> UInt64 {
+            state &+= 0x9E37_79B9_7F4A_7C15
+            var z = state
+            z = (z ^ (z >> 30)) &* 0xBF58_476D_1CE4_E5B9
+            z = (z ^ (z >> 27)) &* 0x94D0_49BB_1331_11EB
+            return z ^ (z >> 31)
+        }
+
+        /// Uniform in `0..<1`, from the top 53 bits — the low bits of an LCG-ish
+        /// generator are the least well distributed.
+        mutating func nextUnitInterval() -> Double {
+            Double(next() >> 11) * (1.0 / 9_007_199_254_740_992.0)
+        }
     }
 
     // MARK: Drills

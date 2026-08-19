@@ -124,6 +124,7 @@ final class TrainingService {
             let loaded = try await Self.loadSession(
                 srs: srs,
                 corpus: corpus,
+                metrics: metrics,
                 settings: settings,
                 momentPositions: momentPositions,
                 scheduler: scheduler,
@@ -448,6 +449,7 @@ extension TrainingService {
     private nonisolated static func loadSession(
         srs: any SRSCardStore,
         corpus: any PuzzleCorpus,
+        metrics: any MetricStore,
         settings: any AppSettingsStore,
         momentPositions: any MomentPositionSource,
         scheduler: any SchedulerProtocol,
@@ -467,7 +469,13 @@ extension TrainingService {
 
         var cards: [TrainingCard] = []
         var positions: [TrainingCard.ID: SolvableItem] = [:]
-        var seenPuzzleIDs: Set<Puzzle.ID> = []
+        // Seeded from the serve history rather than starting empty. Exclusion
+        // that only spans one load keeps a puzzle out of *today's* queue and
+        // hands the same one back next week: the corpus query is
+        // `ORDER BY random()` over a rating band, so a band of a few thousand
+        // rows repeats within a fortnight at ten puzzles a day, and the second
+        // sighting measures memory of the answer rather than the idea.
+        var seenPuzzleIDs = ServedPuzzleHistory.recentlyServed(metrics: metrics)
 
         for row in dueRows {
             guard let item = try resolvePosition(row: row, corpus: corpus, momentPositions: momentPositions) else {
@@ -664,15 +672,33 @@ extension TrainingService {
             )
         }
 
-        // 4. Per-theme success, which is what rung 2 gates on. Counted at the
-        //    curriculum's rating floor because "70% on forks" and "70% on forks
-        //    rated 1200+" are different measurements.
-        let floor = tuning.curriculum.themeRatingFloor
-        if item.presented.item.rating >= floor {
-            let theme = item.presented.item.primaryTheme
-            try metrics.increment(TrainingMetricKeys.themeAttempts(theme, ratingFloor: floor), at: context.now)
-            if context.solvedUnaided {
-                try metrics.increment(TrainingMetricKeys.themeSolves(theme, ratingFloor: floor), at: context.now)
+        // 4. What a *fresh* puzzle produces: the per-theme success rate rung 2
+        //    gates on, and the serve record that keeps the corpus from handing
+        //    the same position back next week.
+        //
+        //    Both are restricted to fresh items, and for the same reason. A
+        //    review is the same card returning, so counting it again measures
+        //    how often a position has come round rather than how well the theme
+        //    is known — and the bias runs the wrong way, because a card the user
+        //    keeps failing is scheduled more often than one they have learned,
+        //    so the weakest themes collect the most extra attempts and the gate
+        //    reads worse the harder the user is working on it. A relearn is a
+        //    second look, minutes later, at a position already counted.
+        //
+        //    Per-theme counts are kept at the curriculum's rating floor because
+        //    "70% on forks" and "70% on forks rated 1200+" are different
+        //    measurements.
+        if case .fresh = item.kind {
+            let floor = tuning.curriculum.themeRatingFloor
+            if item.presented.item.rating >= floor {
+                let theme = item.presented.item.primaryTheme
+                try metrics.increment(TrainingMetricKeys.themeAttempts(theme, ratingFloor: floor), at: context.now)
+                if context.solvedUnaided {
+                    try metrics.increment(TrainingMetricKeys.themeSolves(theme, ratingFloor: floor), at: context.now)
+                }
+            }
+            if let puzzleID = item.presented.item.puzzleID {
+                ServedPuzzleHistory.record(puzzleID: puzzleID, metrics: metrics, at: context.now)
             }
         }
 
@@ -769,6 +795,55 @@ extension TrainingService {
         let samples = (metrics.counter(key)?.sampleCount ?? 0) + 1
         try? metrics.set(key, value: next, sampleCount: samples, at: now)
         return next
+    }
+}
+
+// MARK: - Served puzzles
+
+/// The corpus puzzles the user has already been shown.
+///
+/// Stored in `skillMetrics`, one row per puzzle, for the same reason every other
+/// running total is (see `TrainingMetricKeys`): it is a `(key, window) -> value`
+/// pair, and a table to hold one date per puzzle would be a schema migration and
+/// a CloudKit change to buy nothing. The value is the number of times the puzzle
+/// has been served, which makes the write an `increment` and therefore idempotent
+/// in the only sense that matters — a second serve moves `updatedAt`, so the
+/// puzzle simply becomes the most recent thing in the window.
+enum ServedPuzzleHistory {
+
+    /// Namespaced so a reader can tell a serve record from a computed metric at
+    /// a glance, and so the prefix scan cannot pick up anything else.
+    static let keyPrefix = "puzzle.served."
+
+    /// How many recent serves are held out of the fresh pool.
+    ///
+    /// A window rather than the whole history, for two reasons. The set becomes
+    /// a SQL `IN` list — `PuzzleRepository.puzzles(excluding:)` says as much in
+    /// its own documentation — so it has to stay small. And forgetting a puzzle
+    /// after several hundred others is the behaviour we want anyway: at that
+    /// distance the position is a fresh test of the idea rather than a recall
+    /// test of the answer, which is the only reason repeats were a problem.
+    static let exclusionWindow = 400
+
+    /// The most recently served puzzles, newest first, capped at `limit`.
+    static func recentlyServed(metrics: any MetricStore, limit: Int = exclusionWindow) -> Set<Puzzle.ID> {
+        guard let rows = try? metrics.all() else { return [] }
+        let recent =
+            rows
+            .filter { $0.key.hasPrefix(keyPrefix) }
+            .sorted { $0.updatedAt > $1.updatedAt }
+            .prefix(limit)
+        return Set(recent.map { String($0.key.dropFirst(keyPrefix.count)) })
+    }
+
+    /// Records that a puzzle was put in front of the user.
+    ///
+    /// Called when an item is *finished*, not when the session is assembled: a
+    /// queue the user abandons after two puzzles has served two, and burning the
+    /// other eight would quietly shrink the corpus for someone who was
+    /// interrupted.
+    static func record(puzzleID: Puzzle.ID, metrics: any MetricStore, at date: Date) {
+        try? metrics.increment(keyPrefix + puzzleID, at: date)
     }
 }
 

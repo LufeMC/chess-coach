@@ -20,15 +20,39 @@ import TrainingCore
 //    work" into "here is what is wrong with you", and a user who feels accused
 //    stops opening the app. The chips are muted amber and grey.
 //
-// 3. **No bars, no per-row colour.** A full-width saturated bar per row reads as
-//    an alarm panel and encodes nothing the number and the ordering do not
-//    already carry. The one permitted visual encoding is a 2pt hairline under
-//    each row, scaled by magnitude, in a single desaturated colour.
+// 3. **One hue, opacity by rank.** Each row carries a full-width 4pt bar whose
+//    length is the points it costs, and every bar is the same accent at a lower
+//    alpha the further down the table it sits. Multi-hue bars read as a pie
+//    chart of blame — the eye starts ranking the *colours* and invents a
+//    severity scale nobody encoded. One hue leaves length as the only variable,
+//    which is the only variable there is.
 //
 // 4. **Chips are not on every row.** A badge that appears on 100% of rows
 //    conveys tone, not data — so ``LeakImpact/low`` deliberately has no chip.
 //    If you find yourself adding one "for consistency", you have just built the
 //    thing rule 4 exists to prevent.
+
+extension Habit {
+
+    /// The habit named as a thing you go and practise.
+    ///
+    /// ``Habit/microGoalTitle`` is an imperative — "Blunder-check every move" —
+    /// which is right on a chip the user reads mid-game and wrong on a button,
+    /// where an instruction reads as the app telling them off on their way out.
+    var trainingNoun: String {
+        switch self {
+        case .whatChanged: return "reading the last move"
+        case .scanThreats: return "threat scanning"
+        case .candidatesFirst: return "picking candidates"
+        case .calcToQuiet: return "calculating to quiet"
+        case .blunderCheck: return "blunder-checking"
+        case .kingSafety: return "king safety"
+        case .endgameTechnique: return "endgame technique"
+        case .convertCleanly: return "converting won positions"
+        case .clockDiscipline: return "clock discipline"
+        }
+    }
+}
 
 /// How much of the user's result is riding on a leak.
 enum LeakImpact: Sendable, Hashable, CaseIterable {
@@ -70,6 +94,13 @@ struct LeakRow: Sendable, Hashable, Identifiable {
     var causeTag: CauseTag
     var title: String
 
+    /// One line saying what the cause actually is, under the title.
+    ///
+    /// The table's names are necessarily terse — "Positional drift" is a
+    /// category, not an explanation — and a user who cannot tell two rows apart
+    /// cannot act on either. Written about the move, never about the person.
+    var detail: String
+
     /// Positive number of expected points lost per game, rendered with a
     /// leading minus. Expected points rather than centipawns because the user
     /// cares about results, and a 200cp slip costs wildly different amounts of
@@ -89,8 +120,8 @@ struct LeakRow: Sendable, Hashable, Identifiable {
 
     var impact: LeakImpact
 
-    /// 0...1 relative to the largest leak in the table. Drives the hairline
-    /// width only.
+    /// 0...1 relative to the largest leak in the table. Drives the bar's length
+    /// and nothing else — length is the only thing the bar is allowed to say.
     var magnitude: Double
 
     var habit: Habit?
@@ -137,6 +168,7 @@ enum LeakTable {
             LeakRow(
                 causeTag: leak.causeTag,
                 title: title(for: leak.causeTag),
+                detail: detail(for: leak.causeTag),
                 epLostPerGame: leak.epLostPerGame,
                 count: leak.count,
                 typicalCount: typicalCounts[leak.causeTag],
@@ -192,6 +224,73 @@ enum LeakTable {
         }
     }
 
+    /// The one-line explanation under a cause's name.
+    ///
+    /// Every line describes the *move*: "the piece you moved was left where it
+    /// could be taken", never "you hang pieces". The distinction is the whole
+    /// difference between a diagnosis a user acts on and one they stop opening.
+    static func detail(for tag: CauseTag) -> String {
+        switch tag {
+        case .missedNewThreat:
+            return "The opponent's last move created a threat that went unanswered."
+        case .ignoredStandingThreat:
+            return "A threat that had been on the board for several moves stayed unanswered."
+        case .missedForcingIdea:
+            return "A check, capture or threat of your own was available and went unplayed."
+        case .kingExposure:
+            return "The king's shelter came apart before the position could afford it."
+        case .forcingBias:
+            return "A check or capture played because it was forcing, not because it was best."
+        case .planlessTrade:
+            return "Pieces came off with nothing gained by the trade."
+        case .positionalDrift:
+            return "Several quiet moves in a row with no plan behind them."
+        case .miscalculatedTactic:
+            return "A line was calculated, and the calculation went wrong."
+        case .allowedDeepTactic:
+            return "A tactic several moves deep landed against you."
+        case .miscountedExchange:
+            return "The captures on one square were counted wrong."
+        case .hungMovedPiece:
+            return "The piece you moved was left where it could be taken."
+        case .hungLeftPiece:
+            return "A piece elsewhere on the board was left undefended."
+        case .allowedShallowTactic:
+            return "A one or two-move tactic landed against you."
+        case .endgameTechnique:
+            return "A known endgame method was available and was not used."
+        case .openingPrinciple:
+            return "An opening move against development, the centre, or king safety."
+        default:
+            // An unknown tag still belongs in a table whose job is
+            // completeness, and inventing prose for it would be worse than
+            // saying only what is known.
+            return "Repeated across your recent games."
+        }
+    }
+
+    /// The label on the button that opens training for a cause.
+    ///
+    /// Named after the *habit that fixes it* rather than the cause itself, so
+    /// the button reads as somewhere to go: "Train blunder-checking" is a
+    /// destination, "Train hanging pieces" is a description of the problem with
+    /// the word Train in front of it. A generic `Continue` would be worse than
+    /// either — the step and what it costs both belong on the button.
+    static func trainActionTitle(for row: LeakRow) -> String {
+        guard let habit = row.habit else { return "Train this pattern" }
+        return "Train \(habit.trainingNoun)"
+    }
+
+    /// Alpha for the bar on the row at `rank`, top row first.
+    ///
+    /// A ramp rather than a palette: the accent stays the accent all the way
+    /// down and only its presence fades, so the eye reads "less of the same
+    /// thing" instead of "a different kind of thing". The floor keeps the last
+    /// row visible — a bar too faint to see is a row the table forgot to draw.
+    static func barOpacity(rank: Int) -> Double {
+        max(1.0 - Double(max(rank, 0)) * 0.22, 0.34)
+    }
+
     /// `missedNewThreat` → `Missed new threat`.
     static func humanised(_ rawValue: String) -> String {
         guard !rawValue.isEmpty else { return "Unclassified" }
@@ -207,5 +306,170 @@ enum LeakTable {
             }
         }
         return out
+    }
+}
+
+// MARK: - The reading above the table
+
+/// What the table says taken as a whole: how much is going out, and whether it
+/// is going out through one hole or several.
+///
+/// The shape matters more than the total. A user losing 0.6 expected points a
+/// game through one habit has a fortnight of work in front of them; a user
+/// losing the same 0.6 through five habits has a general standard-of-play
+/// problem and no single thing to practise. Those are different instructions,
+/// and a table of numbers alone gives neither.
+struct LeakDiagnosis: Sendable, Hashable {
+
+    /// How the loss is distributed.
+    enum Shape: Sendable, Hashable {
+        case clean
+        case concentrated
+        case spread
+
+        /// The word beside the number. One word, because it is read at a glance
+        /// — a phrase gets read *instead of* the number rather than with it.
+        var word: String {
+            switch self {
+            case .clean: return "Clean"
+            case .concentrated: return "Concentrated"
+            case .spread: return "Spread"
+            }
+        }
+    }
+
+    /// Expected points per game currently going out, summed across causes.
+    ///
+    /// Deliberately **not** a 0–100 composite. A score needs a ceiling, no
+    /// ceiling has been measured, and the moment one is invented the number
+    /// stops describing the user and starts describing the invention. Expected
+    /// points per game is what the analyser actually computes and it is already
+    /// in the unit that matters: results.
+    var pointsPerGame: Double
+
+    var shape: Shape
+
+    /// One sentence naming the finding.
+    var headline: String
+
+    /// The short paragraph under it, which says what to do about it.
+    var explanation: String
+
+    /// The digits alone; the unit is carried beside them and one tier down.
+    var formattedPoints: String { String(format: "%.2f", pointsPerGame) }
+
+    /// The share of the loss riding on the top row. At or above this, working
+    /// anything but the first row is a worse use of the fortnight.
+    static let concentrationThreshold = 0.45
+
+    /// Reads a sorted leak table.
+    ///
+    /// `nil` when there is nothing to read, in which case the section shows its
+    /// measurement placeholder rather than a confident sentence about an empty
+    /// table.
+    static func make(rows: [LeakRow], windowGames: Int) -> LeakDiagnosis? {
+        guard let top = rows.first else { return nil }
+
+        let total = rows.reduce(0) { $0 + $1.epLostPerGame }
+        let sample = windowGames > 0 ? "your last \(windowGames) games" : "your recent games"
+        let points = String(format: "%.2f", total)
+
+        guard total >= LeakTable.mediumImpactThreshold else {
+            return LeakDiagnosis(
+                pointsPerGame: total,
+                shape: .clean,
+                headline: "Nothing here is costing you much.",
+                explanation: """
+                    Across \(sample) no cause recurs often enough to be worth a training block. \
+                    Keep playing — this table finds the next one before you feel it.
+                    """
+            )
+        }
+
+        let share = total > 0 ? top.epLostPerGame / total : 0
+        guard share >= concentrationThreshold else {
+            return LeakDiagnosis(
+                pointsPerGame: total,
+                shape: .spread,
+                headline: "The points are coming off in small pieces.",
+                explanation: """
+                    Across \(sample) these causes account for \(points) expected points a game, \
+                    split fairly evenly between them. Take them from the top — with nothing \
+                    dominating, the ordering is the whole of the priority.
+                    """
+            )
+        }
+
+        return LeakDiagnosis(
+            pointsPerGame: total,
+            shape: .concentrated,
+            headline: "\(top.title) is where most of it goes.",
+            explanation: """
+                Across \(sample) these causes account for \(points) expected points a game, and \
+                \(Int((share * 100).rounded()))% of that is the top row alone. Work it first; \
+                the rest of the table barely moves until it does.
+                """
+        )
+    }
+}
+
+// MARK: - Per-leak history
+
+/// A leak's recent history, bucketed for a sparkline.
+///
+/// This is the one element on the screen that can say *it is working*. A row
+/// reporting "−0.38 a game" is a fact about now; the same row with a shape
+/// falling away behind it is evidence that a fortnight of blunder-checking
+/// changed something, which is the only argument that survives a bad week.
+struct LeakTrend: Sendable, Hashable {
+
+    /// Expected points lost inside each bucket, oldest first, so the sparkline
+    /// reads left-to-right the way time does.
+    var buckets: [Double]
+
+    /// The span the buckets cover.
+    var days: Int
+
+    /// The tallest bucket, which the sparkline scales against. Never zero —
+    /// ``make`` refuses to build a trend with nothing in it.
+    var peak: Double { buckets.max() ?? 0 }
+
+    var spanLabel: String { "\(days) days" }
+
+    /// Occurrences below this cannot make a shape, only a pattern of when the
+    /// user happened to sit down and play.
+    static let minimumOccurrences = 4
+
+    /// Buckets the occurrences of one cause.
+    ///
+    /// `nil` rather than a flat line when the evidence is thin: a sparkline is
+    /// read as a claim about direction, and a claim about direction drawn from
+    /// three moves is the kind of number that makes a user distrust every other
+    /// number beside it.
+    static func make(
+        from occurrences: [LeakOccurrence],
+        now: Date = Date(),
+        days: Int = 90,
+        bucketCount: Int = 6
+    ) -> LeakTrend? {
+        guard days > 0, bucketCount >= 2 else { return nil }
+
+        let span = Double(days) * 86_400
+        let bucketSeconds = span / Double(bucketCount)
+        var buckets = [Double](repeating: 0, count: bucketCount)
+        var counted = 0
+
+        for occurrence in occurrences {
+            let age = now.timeIntervalSince(occurrence.playedAt)
+            guard age >= 0, age < span else { continue }
+            let index = bucketCount - 1 - min(Int(age / bucketSeconds), bucketCount - 1)
+            buckets[index] += occurrence.epLost
+            counted += 1
+        }
+
+        guard counted >= minimumOccurrences, buckets.filter({ $0 > 0 }).count >= 2 else {
+            return nil
+        }
+        return LeakTrend(buckets: buckets, days: days)
     }
 }

@@ -3,11 +3,12 @@ import Foundation
 import Observation
 import SwiftUI
 
-// NOTE FOR INTEGRATION: this is the real games list. The placeholder
-// `GamesListScreen` in `App/Features/Placeholders.swift` still owns that name, so
-// this type is `GameLibraryScreen` to keep the app compiling while both exist.
-// When the placeholder is deleted, either rename this type to `GamesListScreen`
-// or point `RootView.MacRootView` at `GameLibraryScreen()`. One line either way.
+// The file name is a leftover: this type was called `GameLibraryScreen` only to
+// avoid colliding with a `GamesListScreen` placeholder that has since been
+// deleted along with the rest of `App/Features/Placeholders.swift`. The name is
+// kept because it is the one both call sites use — `TodayScreen`'s history
+// glyph and the macOS sidebar — and renaming a wired-up screen to match a file
+// name is churn, not cleanup.
 
 /// The list of played games, and the way into Review.
 struct GameLibraryScreen: View {
@@ -15,14 +16,32 @@ struct GameLibraryScreen: View {
     @State private var model = GameLibraryModel()
 
     var body: some View {
-        // Its own stack: today this screen is planted directly in the Mac
-        // sidebar's detail column, which is not a navigation container. If it
-        // ever gets embedded in an existing `NavigationStack`, drop this one.
-        NavigationStack {
-            content
-                .navigationTitle("Games")
-                .task { await model.load() }
-        }
+        // The stack is Mac-only, and that is the whole point of the split.
+        //
+        // On the Mac this screen is planted directly in the sidebar's detail
+        // column, which is not a navigation container, so it has to bring its
+        // own or the row taps have nowhere to push to. On iPhone it arrives by
+        // `NavigationLink` from `TodayScreen`'s history glyph — and `TodayScreen`
+        // already sits inside the Today tab's `NavigationStack` (`RootView`), so
+        // a stack here would be a stack inside a stack: two navigation bars, a
+        // title stranded under a back button, and a push animation that runs on
+        // the wrong container.
+        //
+        // This is what the previous comment said to do — "if it ever gets
+        // embedded in an existing NavigationStack, drop this one" — written when
+        // the Mac sidebar was the only caller. The iPhone caller arrived later
+        // and the condition went unnoticed.
+        #if os(macOS)
+            NavigationStack { listing }
+        #else
+            listing
+        #endif
+    }
+
+    private var listing: some View {
+        content
+            .navigationTitle("Games")
+            .task { await model.load() }
     }
 
     @ViewBuilder
@@ -83,10 +102,9 @@ private struct GameLibraryRow: View {
 
             VStack(alignment: .leading, spacing: 2) {
                 Text(row.opponent)
-                    .font(.body.weight(.medium))
+                    .typeRole(.headline)
                 Text(row.subtitle)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
+                    .typeRole(.caption)
             }
 
             Spacer(minLength: 8)
@@ -100,7 +118,7 @@ private struct GameLibraryRow: View {
             }
 
             Text(row.accuracyText)
-                .font(.footnote.monospacedDigit())
+                .typeRole(.caption, monospacedDigits: true, appliesForeground: false)
                 .foregroundStyle(row.accuracyText == "—" ? .tertiary : .secondary)
                 .frame(width: 44, alignment: .trailing)
         }
