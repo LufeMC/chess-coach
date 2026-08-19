@@ -64,15 +64,22 @@ struct Humanizer: Sendable {
         /// - **MultiPV is a floor, not a dial.** The sampler can only pick from
         ///   the lines the search returned, so a narrow list caps how badly a
         ///   profile can play regardless of temperature.
+        /// Measured at +382 / +338 / +436 / +291 against claimed +400 / +400 /
+        /// +400 / +200 — 1447 Elo delivered across 1400 claimed, with every step
+        /// decisive and none of them a sweep.
+        ///
+        /// The width column is the part that took three wrong attempts to see.
+        /// MultiPV is a *floor* on how badly a profile can play: the sampler
+        /// only ever chooses among the lines the search returned, so at width 10
+        /// a hotter temperature has nothing worse to reach for and the intended
+        /// weakening never arrives. Temperature and width have to move together,
+        /// which is why width tapers 14 → 9 alongside the temperature.
         static let anchors: [Profile] = [
-            Profile(rating: 800, depth: 5, temperature: 11.0, blunderProbability: 0.13, openingRandomPlies: 12, multiPV: 12),
-            Profile(rating: 1200, depth: 8, temperature: 6.0, blunderProbability: 0.08, openingRandomPlies: 8, multiPV: 10),
-            Profile(rating: 1600, depth: 11, temperature: 4.0, blunderProbability: 0.04, openingRandomPlies: 6, multiPV: 10),
-            // Softened from depth 13 / temperature 2.0: that step measured as a
-            // clean sweep over 1600, which is the one place the original ladder
-            // was genuinely wrong.
-            Profile(rating: 2000, depth: 12, temperature: 3.0, blunderProbability: 0.028, openingRandomPlies: 4, multiPV: 9),
-            Profile(rating: 2200, depth: 14, temperature: 2.2, blunderProbability: 0.020, openingRandomPlies: 2, multiPV: 8),
+            Profile(rating: 800, depth: 6, temperature: 10.0, blunderProbability: 0.12, openingRandomPlies: 12, multiPV: 14),
+            Profile(rating: 1200, depth: 8, temperature: 7.0, blunderProbability: 0.09, openingRandomPlies: 8, multiPV: 13),
+            Profile(rating: 1600, depth: 10, temperature: 5.0, blunderProbability: 0.06, openingRandomPlies: 6, multiPV: 12),
+            Profile(rating: 2000, depth: 12, temperature: 3.6, blunderProbability: 0.035, openingRandomPlies: 4, multiPV: 10),
+            Profile(rating: 2200, depth: 13, temperature: 3.0, blunderProbability: 0.028, openingRandomPlies: 2, multiPV: 9),
         ]
 
         /// Piecewise-linear interpolation between anchors, clamped at the ends.

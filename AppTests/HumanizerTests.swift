@@ -160,7 +160,20 @@ struct HumanizerTests {
         #expect(mid < strong, "1600 (\(mid)) should be less accurate than 2200 (\(strong))")
         // The top of the ladder is a depth-capped engine, not a perfect one, but
         // it should still be recognisably strong.
-        #expect(strong > 0.7, "2200 played the top line only \(strong) of the time")
+        //
+        // The floor moved from 0.70 to 0.65 when the ladder was re-spaced, and
+        // that is a real softening rather than a goalpost being shifted: fixing
+        // the spacing meant compressing the whole ladder toward its middle, so
+        // the 800 anchor came up and the 2200 anchor went down (temperature 2.2
+        // to 3.0). It now picks the top line 69% of the time on this fixture.
+        //
+        // Accepted because spacing is what the rating system actually consumes,
+        // and because absolute strength is the thing self-play cannot measure at
+        // all — see Docs/humanizer-calibration.md. The invariant worth guarding
+        // is the one above (the ordering) plus staying far clear of chance;
+        // 0.65 on eight candidates is five times uniform.
+        #expect(strong > 0.65, "2200 played the top line only \(strong) of the time")
+        #expect(strong > 4 * (1.0 / 8.0), "2200 is barely above chance at \(strong)")
     }
 
     /// Opening randomness is a separate lever from temperature, and it is the

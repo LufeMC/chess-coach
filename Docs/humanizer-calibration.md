@@ -136,21 +136,48 @@ promotion, which was never recorded.
 
 | Pairing | Claimed | Measured | Games |
 |---|---|---|---|
-| 800 → 1200 | +400 | **+632** | 39 |
-| 1200 → 1600 | +400 | **+470** | 40 |
-| 1600 → 2000 | +400 | **+512** | 20 |
-| 2000 → 2200 | +200 | **+372** | 19 |
+| 800 → 1200 | +400 | **+382** | 20 |
+| 1200 → 1600 | +400 | **+338** | 20 |
+| 1600 → 2000 | +400 | **+436** | 20 |
+| 2000 → 2200 | +200 | **+291** | 19 |
 
-Every step is over-spread: the ladder delivers about **1986 Elo across labels
-claiming 1400**, or 1.4× too wide. The intervals at this sample size are also
-very wide — the two seeds for each of the first two pairings disagreed enough
-that a 95% interval spans several hundred points. Read the table as "the right
-order of magnitude, still loose", not as a calibration.
+**1447 Elo delivered across 1400 claimed — 103%**, every step decisive, no
+sweeps. The previous set delivered 1986 across the same 1400 (142%).
 
-What it is *not* any more is broken. Every step is measurable and decisive; none
-of them sweeps. That is the difference between a ladder that is too wide by a
-knowable amount and one whose top half returns no information at all, which is
-where both previous versions were.
+### What closed the gap: temperature and width are coupled
+
+Three attempts at re-spacing overshot before the reason turned up, and it is the
+same fact stated at the top of this file from the other direction. **MultiPV is
+a floor on weakness.** The sampler can only choose among the lines the search
+returned, so at width 10 a hotter temperature has nothing worse to reach for —
+the intended weakening simply does not arrive, and the step stays wide no matter
+what the temperature says.
+
+Every earlier attempt moved temperature while leaving width alone, which is why
+the analytical solve produced a ladder whose bottom step *swept*. The set above
+tapers width 14 → 13 → 12 → 10 → 9 alongside the temperature, so each anchor
+keeps the leverage its temperature is supposed to have. That single change took
+the ladder from 142% to 103% in one round.
+
+### The measurement saturates, and the intervals are still wide
+
+A second round tried to shave the two least-accurate steps using empirical
+deltas. It made the 1200 → 1600 step read as a clean sweep, and the useful thing
+is that this was **noise, not a regression**: round one scored 87.5% there and
+round two 100%, a difference of three games out of ~20. The Elo inversion
+explodes near the ceiling — 87.5% is +338, 95% is +512, 100% is unbounded — so
+at these sample sizes the two rounds are statistically indistinguishable for the
+middle steps.
+
+That is the honest ceiling on this method as run: at n≈20 per pairing, a step
+measured anywhere above ~85% carries an interval of several hundred Elo.
+Distinguishing +338 from +436 needs a hundred games a pairing, not twenty. The
+totals are more trustworthy than any single row, because the errors are
+independent across four pairings.
+
+So: the ladder is no longer meaningfully mis-spaced, and further tuning against
+n≈20 measurements is fitting noise. The next real improvement is more games, not
+more cleverness.
 
 The 1600 → 2000 step measured as a **clean sweep** with the original depth-13 /
 temperature-2.0 anchor — the one place the ladder was unambiguously broken.
