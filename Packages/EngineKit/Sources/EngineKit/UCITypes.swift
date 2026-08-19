@@ -68,11 +68,25 @@ public struct SearchResult: Sendable, Equatable {
     public var ponderMove: String?
     /// Deepest info line per MultiPV rank, ordered rank 1 first.
     public var lines: [UCIInfo]
+    /// Whether the search was cut short — a `stop` from a preempting client, or
+    /// a cancelled task — so the scores reflect less depth than was asked for.
+    ///
+    /// The distinction is not cosmetic. A truncated evaluation looks exactly
+    /// like a completed one, and the post-game pass checkpoints its evaluations
+    /// as a resume prefix it never revisits: stored once, a shallow score fixes
+    /// the wrong judgment of that one move in place for good.
+    public var wasTruncated: Bool
 
-    public init(bestMove: String?, ponderMove: String? = nil, lines: [UCIInfo] = []) {
+    public init(
+        bestMove: String?,
+        ponderMove: String? = nil,
+        lines: [UCIInfo] = [],
+        wasTruncated: Bool = false
+    ) {
         self.bestMove = bestMove
         self.ponderMove = ponderMove
         self.lines = lines
+        self.wasTruncated = wasTruncated
     }
 
     /// The engine's preferred line (MultiPV rank 1).
@@ -87,6 +101,15 @@ public enum SearchLimit: Sendable, Equatable {
     case nodes(Int)
     case depth(Int)
     case movetime(Int)
+    /// Search to `depth`, but give up after `milliseconds` whatever happens.
+    ///
+    /// For the sparring opponent, where the depth is the *point* — it is the
+    /// model of how far ahead that rating calculates — but an unbounded depth
+    /// search is still a game that can visibly hang. UCI honours both and stops
+    /// at whichever arrives first, so the time is a backstop rather than a
+    /// second budget: set it high enough that ordinary positions finish on
+    /// depth, and the profile plays at exactly the strength it was measured at.
+    case depthWithin(depth: Int, milliseconds: Int)
     /// Real clock control, used for sparring so the engine paces itself.
     case clock(whiteMs: Int, blackMs: Int, whiteIncMs: Int, blackIncMs: Int)
     case infinite
@@ -96,9 +119,31 @@ public enum SearchLimit: Sendable, Equatable {
         case .nodes(let n): return "go nodes \(n)"
         case .depth(let d): return "go depth \(d)"
         case .movetime(let ms): return "go movetime \(ms)"
+        case .depthWithin(let depth, let ms): return "go depth \(depth) movetime \(ms)"
         case .clock(let wtime, let btime, let winc, let binc):
             return "go wtime \(wtime) btime \(btime) winc \(winc) binc \(binc)"
         case .infinite: return "go infinite"
+        }
+    }
+
+    /// How long the engine may stay silent before the wait is treated as a dead
+    /// engine rather than a slow one.
+    ///
+    /// Derived from the limit because the limit is the only honest bound
+    /// available: a clock search cannot legitimately outlast the clock it was
+    /// handed, and an infinite search is stopped by whoever started it, so
+    /// putting a deadline on one would kill a search that is behaving exactly as
+    /// asked.
+    var silenceBudget: Duration? {
+        // Slack on top of the engine's own budget: it still has to unwind the
+        // search tree and print a `bestmove` after the clock says stop.
+        let slack = Duration.seconds(15)
+        switch self {
+        case .infinite: return nil
+        case .nodes, .depth: return .seconds(120)
+        case .movetime(let ms): return .milliseconds(ms) + slack
+        case .depthWithin(_, let ms): return .milliseconds(ms) + slack
+        case .clock(let whiteMs, let blackMs, _, _): return .milliseconds(max(whiteMs, blackMs)) + slack
         }
     }
 }
@@ -127,11 +172,27 @@ public enum UCIOption: String, Sendable {
     case evalFileSmall = "EvalFileSmall"
     case uciShowWDL = "UCI_ShowWDL"
     case ponder = "Ponder"
+    /// Switches on Stockfish's own strength limiter.
+    ///
+    /// The app never sets this — `Humanizer` exists precisely because a
+    /// weakened Stockfish plays engine chess with noise stirred in. It is here
+    /// for `HumanizerAnchoring`, which uses the limiter as an *external ruler*
+    /// rather than as an opponent: the humanizer's ladder can only be measured
+    /// against itself, and something outside it has to say where zero is.
+    case uciLimitStrength = "UCI_LimitStrength"
+    /// Target rating for the limiter. Stockfish 17 accepts 1320–3190.
+    case uciElo = "UCI_Elo"
 }
 
 public enum EngineError: Error, Sendable {
     case notStarted
     case searchAlreadyRunning
     case handshakeTimeout
+    /// The engine went silent past the deadline for a search.
+    case searchTimeout
+    /// The engine answered a command with a diagnostic instead of the reply the
+    /// caller was waiting for — a malformed position, an option it would not
+    /// take, a command it did not recognise. Carries the line verbatim.
+    case engineRejected(String)
     case missingNetwork(String)
 }

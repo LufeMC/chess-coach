@@ -277,7 +277,8 @@ struct EndgameDrillScreen: View {
                 BoardView(
                     position: position,
                     orientation: model.orientation,
-                    interaction: interaction
+                    interaction: interaction,
+                    style: BoardAppearance.shared.style
                 )
                 .padding(.horizontal, 12)
             }
@@ -288,6 +289,7 @@ struct EndgameDrillScreen: View {
                 .padding(.horizontal, 12)
                 .padding(.bottom, 8)
         }
+        .background(Palette.surfaceGround.dynamic.ignoresSafeArea())
         .navigationTitle(model.family.title)
         #if os(iOS)
             .navigationBarTitleDisplayMode(.inline)
@@ -299,8 +301,7 @@ struct EndgameDrillScreen: View {
             }
             ToolbarItem(placement: .primaryAction) {
                 Text(model.budgetLabel)
-                    .font(.footnote.monospacedDigit())
-                    .foregroundStyle(.secondary)
+                    .typeRole(.caption, monospacedDigits: true)
             }
         }
         .task { await model.begin() }
@@ -322,12 +323,14 @@ struct EndgameDrillScreen: View {
                     ProgressView().controlSize(.small)
                 }
                 Spacer()
-                Button("Give up") {
+                Button {
                     Task { await model.resign() }
+                } label: {
+                    Text("Give up")
+                        .typeRole(.body, appliesForeground: false)
                 }
                 .buttonStyle(.plain)
                 .foregroundStyle(.secondary)
-                .font(.subheadline)
             }
             .frame(minHeight: ResultBanner.height)
 
@@ -340,14 +343,9 @@ struct EndgameDrillScreen: View {
             .frame(minHeight: ResultBanner.height)
 
         case .finished:
-            Button {
-                dismiss()
-            } label: {
-                Text("Done").frame(maxWidth: .infinity)
-            }
-            .buttonStyle(.borderedProminent)
-            .controlSize(.large)
-            .frame(minHeight: ResultBanner.height)
+            Button("Done") { dismiss() }
+                .buttonStyle(.primaryAction)
+                .frame(minHeight: ResultBanner.height)
         }
     }
 }

@@ -148,6 +148,43 @@ struct EmptyGuidedPromptLog: GuidedPromptLog {
     func prompts(forGames gameIDs: [Game.ID]) throws -> [GuidedPromptRecord] { [] }
 }
 
+/// Reads guided-mode prompts back off the moves they interrupted.
+///
+/// Guided prompts get no table of their own because they have no independent
+/// life: a prompt is only ever asked *before a specific move*, and the only
+/// question anyone asks afterwards — did the move that followed answer it —
+/// is a property of that move. Storing the habit and the verdict on
+/// ``GameMove`` keeps the two together permanently, where a separate table
+/// would need a join and could drift out of step with the move it describes.
+///
+/// The empty default this replaces is not a neutral choice: with no prompt
+/// data `guided.scanThreats.hitRate` stays unmeasured, `Skill.evaluate(in:)`
+/// counts unmeasured as unmet, and `r2.threatAwareness` is a *required* skill —
+/// so the curriculum ladder had a hard ceiling at rung 2 that no amount of
+/// playing could lift.
+struct GameMovePromptLog: GuidedPromptLog {
+    let games: any GameStore
+
+    init(games: any GameStore) {
+        self.games = games
+    }
+
+    func prompts(forGames gameIDs: [Game.ID]) throws -> [GuidedPromptRecord] {
+        try gameIDs.flatMap { gameID in
+            try games.moves(forGame: gameID).compactMap { move in
+                // Both halves are required. A move carrying a habit with no
+                // verdict is a prompt whose outcome was never decided, and
+                // counting it as a miss would make an interrupted game look
+                // like a failed one.
+                guard let habit = move.guidedPromptHabit, let hit = move.guidedPromptHit else {
+                    return nil
+                }
+                return GuidedPromptRecord(gameID: gameID, habit: habit, hit: hit)
+            }
+        }
+    }
+}
+
 // MARK: - In-memory implementations
 
 /// In-memory SRS store, for previews and tests.

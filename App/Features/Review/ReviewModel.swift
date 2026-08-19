@@ -6,49 +6,6 @@ import Foundation
 import Observation
 import SwiftUI
 
-// MARK: - Coach plumbing
-
-/// A question put to the coach about one position.
-///
-/// A value rather than a closure argument list so the eventual coach service can
-/// grow context (the PV, the cause tag, the user's rung) without touching the
-/// Review screen.
-struct ReviewCoachRequest: Sendable, Hashable {
-    var gameID: UUID
-    var focus: ReviewCoachFocus
-    /// Position *before* the move under discussion.
-    var fen: String
-    var playedSAN: String
-    var bestSAN: String
-    /// Set when the user asked something specific rather than opening a moment.
-    var question: String?
-}
-
-/// What the coach panel is talking about right now.
-enum ReviewCoachFocus: Sendable, Hashable {
-    case moment(UUID)
-    /// A move the user selected in the table and asked about.
-    case question(ply: Int)
-}
-
-/// Generates coaching prose.
-///
-/// Deliberately a protocol the screen does not implement. Coach generation is a
-/// network call with an API key, a cost and a failure mode, and none of that
-/// belongs in a view model — the Review screen only knows how to *ask*.
-protocol ReviewCoachProvider: Sendable {
-    func note(for request: ReviewCoachRequest) async throws -> String
-}
-
-/// The coach card's state machine. `unavailable` is a normal, non-error state:
-/// no API key, generation never ran, or the note simply was not persisted.
-enum ReviewCoachState: Equatable {
-    case unavailable
-    case generating(label: String)
-    case ready(String)
-    case failed(String)
-}
-
 // MARK: - Model
 
 /// Everything the Review screen shows, loaded once and then navigated locally.
@@ -80,6 +37,8 @@ final class ReviewModel {
     private(set) var moveRows: [ReviewMoveRow] = []
     private(set) var momentCards: [ReviewMomentCard] = []
     private(set) var phaseSegments: [ReviewPhaseSegment] = []
+    /// Mean accuracy over the user's other recent games. `nil` on the first one.
+    private(set) var accuracyAverage: Double?
 
     // MARK: Navigation
 
@@ -90,15 +49,22 @@ final class ReviewModel {
     /// Moment whose card is stroked in the filmstrip, if the board is standing on
     /// one. Cleared as soon as the user scrubs elsewhere.
     private(set) var activeMomentID: UUID?
-    /// Move row the user tapped, which is what "Ask about this move" anchors to.
-    var selectedRowPly: Int?
 
     // MARK: Coach
 
-    /// Set by whoever owns coach generation. Nil is the shipped state today.
-    var coachProvider: ReviewCoachProvider?
-    private(set) var coachStates: [ReviewCoachFocus: ReviewCoachState] = [:]
-    private(set) var coachFocus: ReviewCoachFocus?
+    /// The read on the whole game. Written by the same pass that wrote the
+    /// moments, so it is either on screen from the first frame or not at all —
+    /// see ``ReviewVerdicts/verdict(game:moves:moments:cards:)`` for the cases
+    /// that leave it nil.
+    private(set) var verdict: GameSummary?
+
+    private var suggestedQuestions: [UUID: [ReviewSuggestedQuestion]] = [:]
+
+    /// Moments this screen has not counted as read yet.
+    ///
+    /// Seeded from the stored status, so a moment worked through last week is
+    /// not counted again when the game is reopened.
+    private var unreviewedMomentIDs: Set<UUID> = []
 
     private let database: AppDatabase?
 
@@ -151,6 +117,7 @@ final class ReviewModel {
     private func apply(_ snapshot: ReviewSnapshot) {
         game = snapshot.game
         orientation = snapshot.game.color == .black ? .black : .white
+        accuracyAverage = snapshot.accuracyAverage
 
         timeline = ReviewTimeline(moveRows: snapshot.moves)
         track = ReviewEvalTrack.build(
@@ -170,18 +137,27 @@ final class ReviewModel {
         )
         phaseSegments = ReviewPhases.segments(timeline: timeline)
 
-        // A persisted note is a finished note. Anything without one renders as no
-        // card at all rather than as an error, because "no API key" is a
-        // perfectly ordinary way to run this app.
-        coachStates = momentCards.reduce(into: [:]) { states, card in
-            states[.moment(card.id)] = card.coachText.map(ReviewCoachState.ready) ?? .unavailable
-        }
+        verdict = ReviewVerdicts.verdict(
+            game: snapshot.game,
+            moves: snapshot.moves,
+            moments: snapshot.moments,
+            cards: momentCards
+        )
+
+        suggestedQuestions = ReviewSuggestedQuestions.byMoment(
+            moments: snapshot.moments,
+            cards: momentCards,
+            rung: snapshot.rung
+        )
+
+        unreviewedMomentIDs = Set(
+            snapshot.moments.filter { $0.momentStatus == .new }.map(\.id)
+        )
 
         // Open on the first moment when there is one: the reason to reopen a game
         // is almost never move 1.
         if let first = momentCards.first {
-            select(index: first.positionIndex)
-            coachFocus = .moment(first.id)
+            select(momentID: first.id)
         } else {
             select(index: 0)
         }
@@ -204,12 +180,25 @@ final class ReviewModel {
 
     var momentPlies: Set<Int> { Set(momentCards.map(\.ply)) }
 
+    /// Blunders and mistakes among the user's own moves.
+    ///
+    /// Inaccuracies are left out on purpose: every game has a handful, so
+    /// including them turns a number that should sting into background noise.
+    var userMistakeCount: Int {
+        let userIsWhite = game?.color != .black
+        return moveRows.filter { row in
+            row.isWhite == userIsWhite && (row.chip == .mistake || row.chip == .blunder)
+        }.count
+    }
+
     func card(withID id: UUID) -> ReviewMomentCard? {
         momentCards.first { $0.id == id }
     }
 
-    func coachState(for focus: ReviewCoachFocus) -> ReviewCoachState {
-        coachStates[focus] ?? .unavailable
+    /// The card the coach panel is talking about: whichever moment the board is
+    /// standing on, and nothing when it is standing between them.
+    var focusedCard: ReviewMomentCard? {
+        activeMomentID.flatMap(card(withID:))
     }
 
     /// Position of a card in the strip, 1-based, for the `2/3` counter.
@@ -228,20 +217,13 @@ final class ReviewModel {
         guard let card = card(withID: momentID) else { return }
         selectedIndex = timeline.clamp(card.positionIndex)
         activeMomentID = card.id
-        coachFocus = .moment(card.id)
-        selectedRowPly = nil
-    }
-
-    func selectRow(ply: Int) {
-        selectedRowPly = ply
-        select(index: ply)
+        markReviewed(momentID: card.id)
     }
 
     /// Keeps the filmstrip's stroke honest: it marks where the board is standing,
     /// not the last thing tapped.
     private func syncActiveMoment() {
         activeMomentID = momentCards.first { $0.positionIndex == selectedIndex }?.id
-        if let activeMomentID { coachFocus = .moment(activeMomentID) }
     }
 
     func stepForward() { select(index: selectedIndex + 1) }
@@ -250,84 +232,39 @@ final class ReviewModel {
 
     // MARK: - Coach
 
-    /// Asks for a note about a moment. No-op when one is already present.
-    func requestCoachNote(for card: ReviewMomentCard) {
-        if case .ready = coachState(for: .moment(card.id)) { return }
-        generate(
-            focus: .moment(card.id),
-            label: "Analyzing move \(card.moveNumber)…",
-            fen: card.thumbnail.position.fen,
-            playedSAN: card.playedSAN,
-            bestSAN: card.bestSAN,
-            question: nil
-        )
+    /// The questions a moment offers under its note.
+    func suggestedQuestions(forMoment id: UUID) -> [ReviewSuggestedQuestion] {
+        suggestedQuestions[id] ?? []
     }
 
-    /// The "Ask about this move" affordance on a move row.
+    /// Records that the student has now worked through a moment.
     ///
-    /// Pushes a targeted question at the coach panel. With no provider wired the
-    /// panel says so; it never invents an answer, because a plausible-sounding
-    /// fabricated explanation of a chess position is worse than no explanation.
-    func askAboutMove(ply: Int) {
-        let focus = ReviewCoachFocus.question(ply: ply)
-        selectedRowPly = ply
-        // Move the board first: `select(index:)` re-derives the coach focus from
-        // whatever moment the board lands on, and an explicit question has to
-        // outrank that.
-        select(index: ply)
-        coachFocus = focus
+    /// The bump lives here rather than with the analysis pass that writes the
+    /// note, because writing a note is not reading one: a pass finishes on a
+    /// game the user may never open, and ticking the day's "3 moments" off for
+    /// that would make the streak a count of analysis runs.
+    ///
+    /// `MomentStatus` already names the event — `reviewed` means "shown to the
+    /// user and worked through" — so the new → reviewed transition is both the
+    /// trigger and the guard against double counting: the id leaves
+    /// ``unreviewedMomentIDs`` before the write is dispatched, so re-selecting
+    /// the card, reopening the game or syncing the row from another device
+    /// counts nothing further.
+    private func markReviewed(momentID: UUID) {
+        guard unreviewedMomentIDs.remove(momentID) != nil, let database else { return }
+        let day = DailyLoop.dayKey(for: Date())
 
-        let moveNumber = (ply + 1) / 2
-        let san = timeline.sanByPly[ply] ?? ""
-        generate(
-            focus: focus,
-            label: "Analyzing move \(moveNumber)…",
-            fen: timeline.position(at: ply - 1).fen,
-            playedSAN: san,
-            bestSAN: "",
-            question: "Why is \(san) the wrong idea here, and what should I have looked at first?"
-        )
-    }
-
-    private func generate(
-        focus: ReviewCoachFocus,
-        label: String,
-        fen: String,
-        playedSAN: String,
-        bestSAN: String,
-        question: String?
-    ) {
-        guard let coachProvider else {
-            // TODO: back this with `CoachCoordinator` (App/Services/Coach). Its
-            // `coachStream(_:)` already emits `.partial` fragments, which maps onto
-            // `.generating` → `.ready` without changing anything here; what is
-            // missing is a `CoachRequestBuilder.Inputs` for a *single* position
-            // (it currently builds a whole-game pass) and an owner for the
-            // coordinator's lifetime. Until then this is an honest dead end rather
-            // than a canned string: `unavailable` renders as "no card".
-            coachStates[focus] = .unavailable
-            return
-        }
-
-        let request = ReviewCoachRequest(
-            gameID: gameID,
-            focus: focus,
-            fen: fen,
-            playedSAN: playedSAN,
-            bestSAN: bestSAN,
-            question: question
-        )
-
-        coachStates[focus] = .generating(label: label)
-        Task { [weak self] in
-            do {
-                let text = try await coachProvider.note(for: request)
-                self?.coachStates[focus] = .ready(text)
-            } catch {
-                self?.coachStates[focus] = .failed(String(describing: error))
+        Task.detached(priority: .utility) {
+            try? database.moments.setStatus(.reviewed, forMoment: momentID)
+            // A separate write, deliberately: the daily loop is a streak
+            // counter, and failing to bump it must never undo the status that
+            // says this moment has been seen.
+            _ = try? database.dailyLoop.update(day: day) { loop in
+                loop.momentsReviewed += 1
             }
         }
     }
+
 }
 
 // MARK: - Snapshot
@@ -346,16 +283,34 @@ struct ReviewSnapshot: Sendable {
     var moves: [GameMove]
     var moments: [Database.Moment]
     var evals: [PlyEval]
+    /// The user's curriculum rung, which decides which habit a cause tag maps
+    /// to — the same tag is a blunder-check problem at rung 1 and a move-choice
+    /// problem above it.
+    var rung: Int
+    /// Mean accuracy over the user's recent games, for the comparison chip.
+    /// `nil` until there is more than this game to compare against.
+    var accuracyAverage: Double?
+
+    /// How many finished games the comparison averages over. Small enough that
+    /// it still describes how the user is playing *now*.
+    static let comparisonWindow = 20
 
     static func load(gameID: UUID, database: AppDatabase) throws -> ReviewSnapshot? {
         guard let game = try database.games.game(id: gameID) else { return nil }
+
+        // Everything below the game itself degrades rather than throws: a
+        // missing evaluation table must not stop a game from opening, and a
+        // comparison the app cannot compute is simply not shown.
+        let recent = (try? database.games.recent(limit: comparisonWindow)) ?? []
+        let others = recent.filter { $0.id != gameID }.compactMap(\.userAccuracy)
+
         return ReviewSnapshot(
             game: game,
             moves: try database.games.moves(forGame: gameID),
             moments: try database.moments.moments(forGame: gameID),
-            // Local-only and regenerable; a missing table here must not stop the
-            // game from opening, so evals degrade to an empty curve.
-            evals: (try? database.games.evals(forGame: gameID)) ?? []
+            evals: (try? database.games.evals(forGame: gameID)) ?? [],
+            rung: (try? database.settings.current())?.currentRung ?? 1,
+            accuracyAverage: others.isEmpty ? nil : others.reduce(0, +) / Double(others.count)
         )
     }
 }

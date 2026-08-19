@@ -91,7 +91,7 @@ escape row in a distinct color** (`I'm not sure, show me`). Always ship the esca
 - Primary full-width reads **`Try again`**, not `Continue`. Retry is the default path.
 
 Borrow from Duolingo only its secondary outlined **`EXPLAIN MY MISTAKE`** button placed
-*above* the dismiss — that's the AI-coach entry point.
+*above* the dismiss — that's the coach entry point.
 
 One sheet, one `@State var hintLevel`, content swapping with `.animation(.snappy, value:)`.
 L0 text nudge → L1 single slow pulse ring on one square → L2 arrow `Path` overlay.
@@ -101,14 +101,14 @@ L0 text nudge → L1 single slow pulse ring on one square → L2 arrow `Path` ov
 
 ## Screen 3 — Review
 
-Skeleton from Bevel's Strain screen: **summary metric → stat pills → AI insight → timeline.**
+Skeleton from Bevel's Strain screen: **summary metric → stat pills → verdict → timeline.**
 
 1. **Eval graph** — Swift Charts `AreaMark` with zero baseline. Moments as `PointMark`s in classification colors; tapping scrubs the board. **Label the Y axis with words** (`Winning`/`Equal`/`Losing`) rather than `+2.5`. Dashed-border shaded band for the normal range + `.annotation` tooltip pill on the selected point. *(Strava Relative Effort, The Outsiders)*
 2. **Stat pills** — label in small `.secondary` caps, big value, and a **grey comparison chip with a caret below**: `Accuracy 84%` / `▾ your avg 79%`. *(The Outsiders workout stats)*
-3. **AI summary card** — lightning glyph + **bold one-line verdict headline** + paragraph truncating at ~3 lines with a corner expand affordance. The game gets a verdict line before any detail. *(Bevel)*
+3. **Verdict card** — lightning glyph + **bold one-line verdict headline** + paragraph truncating at ~3 lines with a corner expand affordance. The game gets a verdict line before any detail, and it is written from the same analysis the graph above is drawn from, so the sentence and the numbers cannot disagree. *(Bevel)*
 4. **Moments filmstrip** — horizontal `ScrollView` + `.scrollTargetBehavior(.viewAligned)`, max 3 cards: board thumbnail, `Move 23`, classification badge, one-line stake. Move number as a **numeric badge on the thumbnail corner**. *(Bevel timeline)*
-5. **Per-moment coach commentary** — timestamp header (`Move 23 · Nxe5?`), generated paragraph, then **two suggested-question chips as full-width grey rounded rects**. Include a `Generated with AI` row with an info button, and a thumbs-up/down pair for prompt tuning. *(NBA AI Insights, Mindvalley)*
-   - **Streaming:** reserve the card frame immediately with a `.redacted(reason: .placeholder)` 3-line skeleton, then swap to live text. **Never a spinner in the card center** — the card appears instantly and fills in. Bold inline emphasis on load-bearing numbers. *(Superpower, Alma)*
+5. **Per-moment coach commentary** — timestamp header (`Move 23 · Nxe5?`), the note for that moment, then **two suggested-question chips as full-width grey rounded rects**, each answered on tap from the stored analysis. **No provenance row and no thumbs pair:** the note names the square, the refuting move and the material at stake because the detector found all three, so there is no authorship to disclose and nothing a rating could tune. *(NBA AI Insights, Mindvalley)*
+   - **Arrival:** the note is written while the game is being analysed, so the card is either waiting or complete — reserve its frame with a `.redacted(reason: .placeholder)` 3-line skeleton under a label naming the work, then swap to the text. **Never a spinner in the card center** — the card appears instantly and fills in. Bold inline emphasis on load-bearing numbers. *(Superpower, Alma)*
 6. **Move list last**, collapsed in a `DisclosureGroup`. Reference material, not the story. **Badge only the four classifications**, not every move.
 
 ---
@@ -182,5 +182,5 @@ motivating element on the screen. *(Bevel Recovery)*
 6. **A results modal that blocks return to the board.** Post-game is a screen you can leave.
 7. **Big centered ring gauges for non-0–100 values.** Right for readiness, wrong for rating — use a line chart with trend annotation.
 8. **Coordinates, borders, captured-piece trays on by default** — make them settings.
-9. **Spinners inside AI commentary cards** — reserve the frame with a redacted skeleton.
+9. **Spinners inside the coach card** — reserve the frame with a redacted skeleton.
 10. **Multiple filled buttons per screen.**

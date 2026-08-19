@@ -22,25 +22,19 @@ struct ReviewMoveList: View {
     let rows: [ReviewMoveRow]
     /// The ply the board is standing on.
     let currentPly: Int?
-    /// The ply the user tapped, which is what the ask affordance anchors to.
-    let selectedPly: Int?
     let style: BoardStyle
     var onSelect: (Int) -> Void
-    var onAsk: (Int) -> Void
 
     @Environment(\.colorScheme) private var colorScheme
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             Text("MOVES")
-                .font(.caption.weight(.semibold))
-                .tracking(0.6)
-                .foregroundStyle(.secondary)
+                .typeRole(.label)
 
             if rows.isEmpty {
                 Text("No moves recorded for this game.")
-                    .font(.subheadline)
-                    .foregroundStyle(.secondary)
+                    .typeRole(.caption)
             } else {
                 VStack(spacing: 0) {
                     ForEach(Array(rows.enumerated()), id: \.element.id) { offset, row in
@@ -62,55 +56,34 @@ struct ReviewMoveList: View {
     @ViewBuilder
     private func rowView(_ row: ReviewMoveRow) -> some View {
         let isCurrent = row.ply == currentPly
-        let isSelected = row.ply == selectedPly
 
-        VStack(alignment: .leading, spacing: 8) {
-            HStack(spacing: 10) {
-                Text(row.label)
-                    .font(.subheadline.weight(isCurrent ? .semibold : .regular))
-                    .monospacedDigit()
-                    .frame(width: 96, alignment: .leading)
+        HStack(spacing: 10) {
+            Text(row.label)
+                .font(.subheadline.weight(isCurrent ? .semibold : .regular))
+                .monospacedDigit()
+                .frame(width: 96, alignment: .leading)
 
-                if let chip = row.chip {
-                    ClassificationBadge(kind: chip, size: .regular, style: style)
-                }
-
-                Spacer(minLength: 0)
-
-                Text(row.evalAfter ?? "—")
-                    .font(.footnote.monospacedDigit())
-                    .foregroundStyle(row.evalAfter == nil ? .tertiary : .primary)
-                    .frame(width: 52, alignment: .trailing)
-
-                Text(row.loss ?? "")
-                    .font(.caption.monospacedDigit())
-                    .foregroundStyle(lossColor(for: row))
-                    .frame(width: 44, alignment: .trailing)
+            if let chip = row.chip {
+                ClassificationBadge(kind: chip, size: .regular, style: style)
             }
 
-            // Anchored to the row it is about, not parked in a toolbar: the
-            // question is "why this move", so the affordance belongs where the
-            // move is.
-            if isSelected {
-                Button {
-                    onAsk(row.ply)
-                } label: {
-                    Label("Ask about this move", systemImage: "bubble.and.sparkles")
-                        .font(.caption.weight(.medium))
-                        .padding(.horizontal, 10)
-                        .padding(.vertical, 5)
-                        .background(Capsule().fill(.quaternary))
-                }
-                .buttonStyle(.plain)
-                .transition(.opacity)
-            }
+            Spacer(minLength: 0)
+
+            Text(row.evalAfter ?? "—")
+                .typeRole(.caption, monospacedDigits: true, appliesForeground: false)
+                .foregroundStyle(row.evalAfter == nil ? .tertiary : .primary)
+                .frame(width: 52, alignment: .trailing)
+
+            Text(row.loss ?? "")
+                .font(.caption.monospacedDigit())
+                .foregroundStyle(lossColor(for: row))
+                .frame(width: 44, alignment: .trailing)
         }
         .padding(.horizontal, 14)
         .padding(.vertical, 9)
         .background(isCurrent ? Color.accentColor.opacity(0.12) : .clear)
         .contentShape(Rectangle())
         .onTapGesture { onSelect(row.ply) }
-        .animation(.snappy(duration: 0.16), value: isSelected)
         .accessibilityElement(children: .combine)
         .accessibilityAddTraits(isCurrent ? [.isSelected] : [])
     }
@@ -144,10 +117,8 @@ struct ReviewMoveList: View {
         ReviewMoveList(
             rows: rows,
             currentPly: 46,
-            selectedPly: 46,
             style: .default,
-            onSelect: { _ in },
-            onAsk: { _ in }
+            onSelect: { _ in }
         )
         .padding()
     }

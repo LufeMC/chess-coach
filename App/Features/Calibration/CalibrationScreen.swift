@@ -11,7 +11,9 @@ import TrainingCore
 ///
 /// One question, five games, twenty puzzles, one reveal. The framing line is
 /// said once on the opening screen and never repeated — see
-/// ``CalibrationModel/framingLine``.
+/// ``CalibrationModel/framingLine`` — and every one of the four screens carries
+/// the same `Step n of 4` header, because this is the only flow in the app the
+/// user cannot leave and the length of it should never be a guess.
 struct CalibrationScreen: View {
 
     @Environment(AppModel.self) private var model
@@ -34,7 +36,8 @@ struct CalibrationScreen: View {
             return CalibrationModel()
         }
         return CalibrationModel(
-            store: StoredCalibrationOutcome(settings: database.settings, metrics: database.metrics)
+            store: StoredCalibrationOutcome(settings: database.settings, metrics: database.metrics),
+            drafts: DatabaseCalibrationDraftStore()
         )
     }
 
@@ -43,6 +46,7 @@ struct CalibrationScreen: View {
             switch flow.stage {
             case .intro:
                 SelfAssessmentView(
+                    progress: flow.progress,
                     selection: flow.experience,
                     onSelect: { flow.select($0) },
                     onContinue: { flow.beginMeasurement() }
@@ -61,22 +65,52 @@ struct CalibrationScreen: View {
                 }
 
             case let .reveal(estimate):
-                CalibrationRevealView(estimate: estimate, onStart: onFinish)
+                CalibrationRevealView(
+                    progress: flow.progress,
+                    estimate: estimate,
+                    onStart: onFinish
+                )
             }
         }
+        .animation(Motion.standard, value: flow.stage)
         #if os(iOS)
             .navigationBarTitleDisplayMode(.inline)
         #endif
     }
 
+    /// This build shipped without the puzzle corpus.
+    ///
+    /// A pending or degraded condition gets a stated fact and a way forward, not
+    /// an illustrated empty state and a `Continue` that names neither the step
+    /// nor its cost. The five games already happened; nothing is lost, the
+    /// measurement is just shorter than the flow advertised.
     private var noPuzzleCorpus: some View {
-        ContentUnavailableView {
-            Label("Puzzles unavailable", systemImage: "square.grid.3x3")
-        } description: {
-            Text("This build shipped without the puzzle corpus, so we'll place you from the games alone.")
-        } actions: {
-            Button("Continue") { flow.finish() }
-                .buttonStyle(.borderedProminent)
+        VStack(spacing: 12) {
+            CalibrationHeader(progress: flow.progress, step: .puzzles)
+                .padding(.horizontal)
+
+            VStack(alignment: .leading, spacing: 10) {
+                Text("Placing you from the games")
+                    .typeRole(.headline)
+
+                Text("This build shipped without the puzzle corpus, so your five games carry the whole measurement. Your rating will move faster than usual over the first week as real results come in.")
+                    .typeRole(.body, appliesForeground: false)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+
+                Button("Show my rating") { flow.finish() }
+                    .buttonStyle(.primaryAction)
+                    .padding(.top, 6)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(16)
+            .elevation(.raised, cornerRadius: CornerRadius.card)
+            .padding(.horizontal)
+
+            Spacer(minLength: 0)
         }
+        .padding(.top, 8)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(Palette.surfaceGround.dynamic.ignoresSafeArea())
     }
 }

@@ -110,6 +110,16 @@ final class PuzzleSessionModel {
     private let driver: any PuzzleSessionDriver
     private let clock: @Sendable () -> Date
 
+    /// The week's habit, applied when the session is assembled.
+    ///
+    /// Held from construction rather than handed to ``start(focus:)`` at the
+    /// call site, because the screen starts the session from a `.task` and a
+    /// `.task` takes no arguments. Without it the whole leak → habit → drill
+    /// pipeline is computed, stored, shown on Today, and then dropped on the
+    /// floor: `SessionAssembler.mix` reads a `nil` focus as "no theme bias" and
+    /// serves a general session, so the week's work never reaches a puzzle.
+    private let weeklyFocus: WeeklyFocus?
+
     private var startedAt: Date?
     private var baselineRating: Double = 0
     /// The in-flight grade for the move just accepted.
@@ -122,8 +132,13 @@ final class PuzzleSessionModel {
     /// because a hint invalidates the *attempt*, not the session.
     private var usedHintOnItem = false
 
-    init(driver: any PuzzleSessionDriver, clock: @escaping @Sendable () -> Date = { Date() }) {
+    init(
+        driver: any PuzzleSessionDriver,
+        focus: WeeklyFocus? = nil,
+        clock: @escaping @Sendable () -> Date = { Date() }
+    ) {
         self.driver = driver
+        self.weeklyFocus = focus
         self.clock = clock
     }
 
@@ -134,7 +149,7 @@ final class PuzzleSessionModel {
         stage = .loading
         startedAt = clock()
 
-        await driver.startSession(focus: focus)
+        await driver.startSession(focus: focus ?? weeklyFocus)
 
         if let failure = driver.loadFailure {
             stage = .unavailable(failure)
@@ -175,6 +190,16 @@ final class PuzzleSessionModel {
     /// The puzzle is always shown from the solver's side.
     var orientation: Piece.Color {
         machineSnapshot?.board.position.sideToMove ?? .white
+    }
+
+    /// The one line above the board.
+    ///
+    /// Names the side to move and nothing else. The obvious enrichment is to add
+    /// the puzzle's theme — "White to play, find the fork" — and it is the one
+    /// thing this line must never do: the theme *is* the answer, and a tactic
+    /// you have been told the name of is a lookup rather than a search.
+    var taskLine: String {
+        orientation == .white ? "White to play — find the best move." : "Black to play — find the best move."
     }
 
     /// The opponent's setup move, so the view can animate it in before handing

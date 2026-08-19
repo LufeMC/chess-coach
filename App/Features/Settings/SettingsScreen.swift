@@ -1,265 +1,289 @@
+//
+//  SettingsScreen.swift
+//  ChessCoach
+//
+
 import BoardUI
 import ChessKit
-import ClaudeKit
+import Database
 import SwiftUI
 
-/// Settings, ordered by what unblocks something: the coach key first (nothing
-/// else here enables a feature), then appearance, then engine diagnostics.
+/// Settings, ordered by reach: the board and its feedback first, because those
+/// are the only controls here, then the engine's measured numbers, then the
+/// notices — the two sections that can only be read sit below every one that
+/// can be changed.
+///
+/// ## Every control here changes something
+///
+/// That sounds like the floor rather than a principle, and it is the one rule
+/// this screen is built around. A settings screen is the only place in an app
+/// where the user is *told* what the app can do, so a picker offering a theme no
+/// board draws, or a toggle wired to nothing, does more damage than its absence:
+/// it teaches that the controls are decoration, and that lesson generalises to
+/// the ones that work. Options come from ``BoardAppearance``, which is the same
+/// vocabulary the boards themselves resolve, and every change is written through
+/// on the spot.
 struct SettingsScreen: View {
+
     @Environment(AppModel.self) private var model
     @State private var viewModel = SettingsModel()
 
+    private var appearance: BoardAppearance { .shared }
+
     var body: some View {
-        Form {
-            coachSection
-            modelSection
-            boardSection
-            engineSection
+        ScrollView {
+            VStack(alignment: .leading, spacing: 22) {
+                boardSection
+                engineSection
+                aboutSection
+            }
+            .padding(.horizontal)
+            .padding(.top, 8)
+            .padding(.bottom, 28)
         }
-        .formStyle(.grouped)
+        .background(Palette.surfaceGround.dynamic.ignoresSafeArea())
+        // The app's accent rather than the system's, so a selected segment and
+        // an on-state toggle read as the same "this one" the rest of the app
+        // uses. Selection is the accent's whole job here: nothing on this
+        // screen is a call to action, so nothing on it is filled.
+        .tint(Palette.accent.dynamic)
         .navigationTitle("Settings")
         .task { viewModel.load() }
-    }
-
-    // MARK: - API key
-
-    @ViewBuilder
-    private var coachSection: some View {
-        Section {
-            if viewModel.hasStoredKey {
-                // Naming the environment variable rather than a friendly label:
-                // anyone holding an Anthropic key recognises this faster than
-                // "API key", and it says exactly which credential is wanted.
-                LabeledContent("ANTHROPIC_API_KEY") {
-                    Text(viewModel.displayedKey)
-                        .font(.body.monospaced())
-                        .foregroundStyle(.secondary)
-                        .textSelection(.enabled)
-                }
-
-                // Actions as full-width accent rows rather than trailing icon
-                // buttons — they are distinct operations, not adornments on the
-                // field.
-                Button(viewModel.isKeyRevealed ? "Hide key" : "Reveal key") {
-                    viewModel.toggleReveal()
-                }
-                Button("Remove key", role: .destructive) {
-                    viewModel.removeKey()
-                }
-            } else {
-                SecureField("sk-ant-…", text: $viewModel.draftKey)
-                    .font(.body.monospaced())
-                    #if os(iOS)
-                        .textInputAutocapitalization(.never)
-                    #endif
-                    .autocorrectionDisabled()
-                    .onSubmit { viewModel.saveKey() }
-
-                Button("Save key") { viewModel.saveKey() }
-                    .disabled(!viewModel.draftKeyLooksValid)
-            }
-        } header: {
-            Text("Coach")
-        } footer: {
-            statusFooter
-        }
-    }
-
-    @ViewBuilder
-    private var statusFooter: some View {
-        if let error = viewModel.keyError {
-            Label(error, systemImage: "exclamationmark.triangle.fill")
-                .foregroundStyle(.orange)
-        } else if viewModel.hasStoredKey {
-            VStack(alignment: .leading, spacing: 6) {
-                Label("Stored in the Keychain on this device", systemImage: "checkmark.seal.fill")
-                    .foregroundStyle(.tint)
-                Text(
-                    "Coaching notes are written from engine analysis. The coach can never state a line the engine didn't produce — every move it names is checked against the engine's own variations before you see it."
-                )
-            }
-        } else {
-            Text("Add an Anthropic API key to turn engine findings into coaching notes. Everything else in the app works without one.")
-        }
-    }
-
-    // MARK: - Model
-
-    private var modelSection: some View {
-        Section {
-            // Grouped by capability with the cost tradeoff stated, rather than a
-            // bare list of model names: the choice being made is really
-            // quality-versus-cost, so label that axis directly.
-            Picker("Model", selection: $viewModel.model) {
-                ForEach(SettingsModel.CoachModel.allCases) { model in
-                    VStack(alignment: .leading) {
-                        Text(model.title)
-                        Text(model.costHint).font(.caption).foregroundStyle(.secondary)
-                    }
-                    .tag(model)
-                }
-            }
-            #if os(macOS)
-                .pickerStyle(.menu)
-            #else
-                .pickerStyle(.navigationLink)
-            #endif
-
-            Picker("Depth", selection: $viewModel.effort) {
-                Text("Brief").tag("low")
-                Text("Standard").tag("medium")
-                Text("Thorough").tag("high")
-            }
-            .pickerStyle(.segmented)
-        } header: {
-            Text("Coaching model")
-        } footer: {
-            Text("Thorough spends more tokens per game for more careful notes.")
-        }
     }
 
     // MARK: - Board
 
     private var boardSection: some View {
-        Section("Board") {
-            // A live preview, because a theme name means nothing until you see
-            // it on the pieces you actually play with.
-            BoardView(position: .standard, interaction: .locked)
-                .frame(maxWidth: 200)
-                .frame(maxWidth: .infinity, alignment: .center)
-                .padding(.vertical, 4)
+        VStack(alignment: .leading, spacing: 10) {
+            SectionHeader(title: "Board", qualifier: appearance.theme.name)
 
-            Picker("Pieces", selection: $viewModel.pieceSet) {
-                Text("Cburnett").tag("cburnett")
-                Text("Merida").tag("merida")
+            SettingsCard {
+                // A live preview, because a theme name means nothing until you
+                // see it on the pieces you actually play with. It is drawn with
+                // exactly the style the real boards resolve, so what is shown
+                // here is what arrives on the next board.
+                BoardView(position: .standard, interaction: .locked, style: appearance.style)
+                    .frame(maxWidth: 200)
+                    .frame(maxWidth: .infinity, alignment: .center)
+                    .padding(.bottom, 4)
+                    .accessibilityLabel("Preview of \(appearance.theme.name) squares with \(appearance.pieces.name) pieces")
+
+                Picker(
+                    "Squares",
+                    selection: Binding(
+                        get: { appearance.theme },
+                        set: { appearance.choose(theme: $0) }
+                    )
+                ) {
+                    ForEach(BoardAppearance.themes) { theme in
+                        Text(theme.name).tag(theme)
+                    }
+                }
+                .pickerStyle(.segmented)
+                .labelsHidden()
+
+                Picker(
+                    "Pieces",
+                    selection: Binding(
+                        get: { appearance.pieces },
+                        set: { appearance.choose(pieces: $0) }
+                    )
+                ) {
+                    ForEach(BoardAppearance.pieceSets) { renderer in
+                        Text(renderer.name).tag(renderer)
+                    }
+                }
+                .pickerStyle(.segmented)
+                .labelsHidden()
+
+                #if os(iOS)
+                    SettingsDivider()
+
+                    Toggle(
+                        "Sound",
+                        isOn: Binding(
+                            get: { viewModel.soundEnabled },
+                            set: { viewModel.setSound($0) }
+                        )
+                    )
+                    .typeRole(.body)
+
+                    // Both halves of this sentence answer a question somebody
+                    // is right to ask before touching the switch: what will I
+                    // hear, and what will it do to what I am already
+                    // listening to. The answer to the second is nothing, and
+                    // saying so is worth more than describing the sounds.
+                    Text("A wooden knock as a move lands, with its own sound for a capture, for check, and for a move that won't go. Mixes with whatever you're already playing, and the silent switch stops it.")
+                        .typeRole(.caption)
+                        .fixedSize(horizontal: false, vertical: true)
+
+                    SettingsDivider()
+
+                    Toggle(
+                        "Haptics",
+                        isOn: Binding(
+                            get: { appearance.hapticsEnabled },
+                            set: { appearance.setHaptics($0) }
+                        )
+                    )
+                    .typeRole(.body)
+
+                    // Naming the four events is the point: the budget is what
+                    // keeps haptics from feeling like a defect, and a user who
+                    // can see how short the list is has no reason to reach for
+                    // this switch.
+                    Text("A tap when you lift a piece, land a move, take something, or give check. Nothing else.")
+                        .typeRole(.caption)
+                        .fixedSize(horizontal: false, vertical: true)
+                #endif
             }
-            Picker("Squares", selection: $viewModel.boardTheme) {
-                Text("Brown").tag("lichessBrown")
-                Text("Blue").tag("lichessBlue")
-                Text("Green").tag("lichessGreen")
-            }
-            Toggle("Sound", isOn: $viewModel.soundOn)
-            #if os(iOS)
-                Toggle("Haptics", isOn: $viewModel.hapticsOn)
-            #endif
+            .animation(Motion.colorShift, value: appearance.theme)
         }
     }
 
     // MARK: - Engine
 
     private var engineSection: some View {
-        Section {
-            LabeledContent("Threads", value: "\(model.deviceProfile.threads)")
-            LabeledContent("Hash", value: "\(model.deviceProfile.hashMB) MB")
-            LabeledContent("Nodes per position", value: model.deviceProfile.analysisNodes.formatted())
-            if model.deviceProfile.benchNPS > 0 {
-                LabeledContent("Measured speed", value: "\(model.deviceProfile.benchNPS.formatted()) n/s")
+        VStack(alignment: .leading, spacing: 10) {
+            SectionHeader(title: "Engine")
+
+            SettingsCard {
+                SettingsDetailRow(label: "Threads", value: "\(model.deviceProfile.threads)")
+                SettingsDetailRow(label: "Hash", value: "\(model.deviceProfile.hashMB) MB")
+                SettingsDetailRow(
+                    label: "Nodes per position",
+                    value: model.deviceProfile.analysisNodes.formatted()
+                )
+                if model.deviceProfile.benchNPS > 0 {
+                    SettingsDetailRow(
+                        label: "Measured speed",
+                        value: "\(model.deviceProfile.benchNPS.formatted()) n/s"
+                    )
+                }
+
+                Text("Measured on this device at launch, then used to keep each game's analysis to roughly 10–20 seconds.")
+                    .typeRole(.caption)
+                    .fixedSize(horizontal: false, vertical: true)
             }
-        } header: {
-            Text("Engine")
-        } footer: {
-            Text("Measured on this device at launch, then used to keep each game's analysis to roughly 10–20 seconds.")
+        }
+    }
+
+    // MARK: - About
+
+    private var aboutSection: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            SectionHeader(title: "About")
+
+            NavigationLink {
+                AcknowledgementsScreen()
+            } label: {
+                HStack {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Acknowledgements")
+                            .typeRole(.body)
+                        Text("Stockfish, ChessKit, the Lichess puzzle database, and the piece art.")
+                            .typeRole(.caption)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                    Spacer(minLength: 12)
+                    Image(systemName: "chevron.right")
+                        .font(.footnote.weight(.semibold))
+                        .foregroundStyle(.tertiary)
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(16)
+                .elevation(.raised, cornerRadius: CornerRadius.card)
+            }
+            .buttonStyle(.pressable)
+            .foregroundStyle(.primary)
         }
     }
 }
+
+// MARK: - Components
+
+/// A level-1 card: solid fill, hairline, no shadow.
+private struct SettingsCard<Content: View>: View {
+    private let content: Content
+
+    init(@ViewBuilder content: () -> Content) {
+        self.content = content()
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            content
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(16)
+        .elevation(.raised, cornerRadius: CornerRadius.card)
+    }
+}
+
+/// The hairline that separates two groups inside one card.
+///
+/// A hairline rather than a second card, because everything either side of it
+/// is the same subject: a card per group would say these are unrelated settings
+/// that happen to sit near each other, when what they share is the board.
+private struct SettingsDivider: View {
+    var body: some View {
+        Rectangle()
+            .fill(Palette.hairline.dynamic)
+            .frame(height: 1)
+            .accessibilityHidden(true)
+    }
+}
+
+/// A read-only label/value row. Values are monospaced because they are
+/// instrument readings, and a column of figures that do not line up reads as an
+/// estimate.
+private struct SettingsDetailRow: View {
+    let label: String
+    let value: String
+
+    var body: some View {
+        HStack(alignment: .firstTextBaseline) {
+            Text(label)
+                .typeRole(.body)
+            Spacer(minLength: 12)
+            Text(value)
+                .typeRole(.caption, monospacedDigits: true)
+        }
+        .accessibilityElement(children: .combine)
+    }
+}
+
+// MARK: - Model
 
 @Observable
 @MainActor
 final class SettingsModel {
 
-    enum CoachModel: String, CaseIterable, Identifiable {
-        case opus = "claude-opus-5"
-        case sonnet = "claude-sonnet-5"
-        case haiku = "claude-haiku-4-5"
+    private(set) var soundEnabled = true
 
-        var id: String { rawValue }
+    private let store: (any AppSettingsStore)?
 
-        var title: String {
-            switch self {
-            case .opus: "Opus 5"
-            case .sonnet: "Sonnet 5"
-            case .haiku: "Haiku 4.5"
-            }
-        }
-
-        var costHint: String {
-            switch self {
-            case .opus: "Best coaching · highest cost"
-            case .sonnet: "Nearly as good · moderate cost"
-            case .haiku: "Serviceable · lowest cost"
-            }
-        }
-    }
-
-    var draftKey = ""
-    var hasStoredKey = false
-    var isKeyRevealed = false
-    var keyError: String?
-
-    var model: CoachModel = .opus
-    var effort = "medium"
-    var pieceSet = "cburnett"
-    var boardTheme = "lichessBrown"
-    var soundOn = true
-    var hapticsOn = true
-
-    private let keychain = KeychainStore()
-    private var storedKey: String?
-
-    /// Cheap shape check so an obviously-wrong paste fails here rather than as a
-    /// 401 several screens later.
-    var draftKeyLooksValid: Bool {
-        draftKey.hasPrefix("sk-ant-") && draftKey.count > 20
-    }
-
-    /// Masked by default, with the last four characters shown.
-    ///
-    /// Reading the key back out is a deliberate choice: with multiple keys in
-    /// circulation the only question a user actually has here is *which* key is
-    /// stored, and a bare "Stored ✓" can't answer it.
-    var displayedKey: String {
-        guard let key = storedKey else { return "—" }
-        if isKeyRevealed { return key }
-        let suffix = key.suffix(4)
-        return "sk-ant-••••••••••••\(suffix)"
+    init(store: (any AppSettingsStore)? = AppDatabase.sharedIfAvailable?.settings) {
+        self.store = store
     }
 
     func load() {
-        do {
-            storedKey = try keychain.load()
-            hasStoredKey = storedKey != nil
-        } catch {
-            storedKey = nil
-            hasStoredKey = false
-        }
+        guard let stored = try? store?.current() else { return }
+        // Reading the row is also what installs the mirror, so arriving here
+        // leaves `Sound.isEnabled` agreeing with the switch even if nothing
+        // called `Sound.prepare` at launch. The alternative is a toggle that
+        // reads "off" above a board that is still clicking.
+        soundEnabled = stored.soundOn
+        Sound.isEnabled = stored.soundOn
     }
 
-    func toggleReveal() {
-        isKeyRevealed.toggle()
-    }
-
-    func saveKey() {
-        guard draftKeyLooksValid else { return }
-        do {
-            try keychain.store(key: draftKey)
-            storedKey = draftKey
-            draftKey = ""
-            keyError = nil
-            hasStoredKey = true
-        } catch {
-            keyError = "Couldn't save to the Keychain: \(error.localizedDescription)"
-        }
-    }
-
-    func removeKey() {
-        do {
-            try keychain.delete()
-            storedKey = nil
-            hasStoredKey = false
-            isKeyRevealed = false
-            keyError = nil
-        } catch {
-            keyError = "Couldn't remove the key: \(error.localizedDescription)"
-        }
+    /// The switch and the audio service move together, in that order: the
+    /// service is what the next move consults, and a write that persisted
+    /// without mirroring would leave the setting correct on disk and wrong in
+    /// the hand until the next launch.
+    func setSound(_ enabled: Bool) {
+        soundEnabled = enabled
+        Sound.isEnabled = enabled
+        try? store?.update { $0.soundOn = enabled }
     }
 }

@@ -659,3 +659,130 @@ struct DailyProgressTests {
         #expect(progress == Fixture.allDone)
     }
 }
+
+// MARK: - The moments step promises only what the game produced
+
+/// The moments step is the one step whose work the user does not create by
+/// showing up. A clean game or a two-move resignation leaves nothing to review,
+/// and a fixed "Review 3 moments" CTA then opens a review screen with nothing
+/// in it — which is the single worst thing the Today screen can do, because the
+/// CTA is the promise the whole daily loop rests on.
+@Suite("Today · moments availability")
+struct TodayMomentsAvailabilityTests {
+
+    @Test("An unknown count keeps the nominal target")
+    func unknownKeepsNominalTarget() {
+        // Analysis pending or still running. Not zero — unknown.
+        let progress = DailyProgress(gamePlayed: true, momentsAvailable: nil)
+        #expect(progress.momentsTarget == 3)
+        #expect(!progress.isDone(.moments))
+    }
+
+    @Test("A game with fewer moments than the target promises only what it has")
+    func targetShrinksToWhatExists() {
+        let progress = DailyProgress(gamePlayed: true, momentsAvailable: 2)
+        #expect(progress.momentsTarget == 2)
+        #expect(progress.remaining(.moments) == 2)
+
+        let title = TodayPlanner.actionTitle(
+            for: .moments,
+            progress: progress,
+            firstRun: false
+        )
+        #expect(title.contains("Review 2 moments"))
+    }
+
+    @Test("A game that produced nothing does not advertise a review")
+    func nothingToReviewIsNotPromised() {
+        let progress = DailyProgress(gamePlayed: true, momentsAvailable: 0)
+
+        // The step is satisfied rather than parked: there is no work in it.
+        #expect(progress.isDone(.moments))
+
+        let plan = TodayPlanner.plan(progress: progress, hasHistory: true, streakBroken: false)
+        // The loop moves on to the step that does have work.
+        #expect(plan.primary.step == .puzzles)
+        #expect(!plan.primary.title.contains("moment"))
+    }
+
+    @Test("A zero target never ticks the moments row before the day's game")
+    func zeroTargetDoesNotPreCompleteTheRow() {
+        // Yesterday's game produced nothing, and today has not started. The
+        // row must still read locked — a green check for work that was never
+        // available today is a lie about the day.
+        let progress = DailyProgress(gamePlayed: false, momentsAvailable: 0)
+        let plan = TodayPlanner.plan(progress: progress, hasHistory: true, streakBroken: false)
+
+        let moments = try! #require(plan.steps.first { $0.step == .moments })
+        #expect(moments.status == .locked)
+        #expect(moments.lockedReason == "after your game")
+        #expect(plan.primary.step == .game)
+    }
+
+    @Test("Moments reviewed today from an older game still read as done")
+    func reviewingYesterdaysGameCounts() {
+        // The legitimate case the locked rule must not break: play Monday,
+        // review Tuesday.
+        let progress = DailyProgress(
+            gamePlayed: false,
+            momentsReviewed: 3,
+            momentsAvailable: 3
+        )
+        let plan = TodayPlanner.plan(progress: progress, hasHistory: true, streakBroken: false)
+
+        let moments = try! #require(plan.steps.first { $0.step == .moments })
+        #expect(moments.status == .done)
+    }
+
+    @Test("Emptying a short queue never shows a tally over its own denominator")
+    func clearedShortQueueReadsCleanly() {
+        let progress = DailyProgress(
+            gamePlayed: true,
+            momentsReviewed: 2,
+            momentsAvailable: 2
+        )
+        #expect(progress.momentsTarget == 2)
+        #expect(progress.completed(.moments) == 2)
+        #expect(progress.remaining(.moments) == 0)
+        #expect(progress.isDone(.moments))
+    }
+
+    @Test("A count that arrives below what was already reviewed cannot regress the row")
+    func lateCountCannotRegressProgress() {
+        // Moments get consumed as they are worked, so a count read after the
+        // work can legitimately come back lower than `momentsReviewed`. The row
+        // must not turn into a `3 of 0`.
+        let progress = DailyProgress(
+            gamePlayed: true,
+            momentsReviewed: 3,
+            momentsAvailable: 0
+        )
+        #expect(progress.momentsTarget == 3)
+        #expect(progress.completed(.moments) == 3)
+        #expect(progress.isDone(.moments))
+    }
+
+    @Test("The row label names the real number, and says so when there is none")
+    func rowLabelIsHonest() {
+        #expect(TodayStep.moments.title(target: 3) == "3 moments")
+        #expect(TodayStep.moments.title(target: 1) == "1 moment")
+        #expect(TodayStep.moments.title(target: 0) == "No moments to review")
+    }
+
+    @Test("A short review is priced for the work that is actually left")
+    func costScalesToTheShortQueue() {
+        let full = DailyProgress(gamePlayed: true, momentsAvailable: 3)
+        let short = DailyProgress(gamePlayed: true, momentsAvailable: 1)
+
+        let fullMinutes = TodayPlanner.estimatedMinutes(
+            for: .moments, remaining: full.remaining(.moments), target: full.momentsTarget
+        )
+        let shortMinutes = TodayPlanner.estimatedMinutes(
+            for: .moments, remaining: short.remaining(.moments), target: short.momentsTarget
+        )
+        // One moment out of a possible one is still the whole step, so this is
+        // not a fraction of the full estimate — but it must never exceed it.
+        #expect(shortMinutes <= fullMinutes)
+        #expect(shortMinutes >= 1)
+    }
+}

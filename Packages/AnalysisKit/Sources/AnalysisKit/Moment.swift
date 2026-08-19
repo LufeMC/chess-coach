@@ -33,6 +33,57 @@ public struct MomentScore: Sendable, Equatable, Codable {
     }
 }
 
+/// What the detector actually saw, kept for the copy that is written from it.
+///
+/// Every detector emits a ``Finding`` naming the hanging square, the size of the
+/// loss, the motif and the flags that decided the subtype, and a moment that
+/// keeps only the cause tag throws all of it away — leaving whatever writes the
+/// coaching note strictly less to work with than the analysis already had. The
+/// subtype alone is worth carrying: `CauseTag` collapses retreat, prophylaxis
+/// and improvement into `forcingBias`, and every ending type into
+/// `endgameTechnique`, and those are exactly the distinctions a sentence turns
+/// on.
+///
+/// The whole value rides to disk inside the moment's opaque payload blob, so it
+/// costs no column and no migration.
+public struct MomentEvidence: Sendable, Equatable, Codable {
+    public let detector: DetectorID
+    public let subtype: FindingSubtype
+    /// The finding's own squares, in the order it emitted them.
+    public let squares: [Square]
+    public let flags: Set<FindingFlag>
+    /// Centipawns for material findings, expected points for evaluation ones.
+    public let magnitude: Double
+    public let themes: [TacticTheme]
+
+    public init(
+        detector: DetectorID,
+        subtype: FindingSubtype,
+        squares: [Square] = [],
+        flags: Set<FindingFlag> = [],
+        magnitude: Double = 0,
+        themes: [TacticTheme] = []
+    ) {
+        self.detector = detector
+        self.subtype = subtype
+        self.squares = squares
+        self.flags = flags
+        self.magnitude = magnitude
+        self.themes = themes
+    }
+
+    public init(_ finding: Finding) {
+        self.init(
+            detector: finding.detector,
+            subtype: finding.subtype,
+            squares: finding.squares,
+            flags: finding.flags,
+            magnitude: finding.magnitude,
+            themes: finding.themes
+        )
+    }
+}
+
 /// One reviewable position, carrying everything the review screen, the drill
 /// generator and the spaced-repetition scheduler need.
 ///
@@ -84,6 +135,18 @@ public struct Moment: Sendable, Equatable, Codable {
     public let modifiers: [String]
     public let secondaryTags: [String]
     public let themeTags: [TacticTheme]
+    /// The primary finding's own facts. `nil` on a reinforcement, and on a
+    /// moment no detector explained.
+    public let evidence: MomentEvidence?
+
+    // MARK: Coaching
+
+    /// The coaching note for this moment, in plain English.
+    ///
+    /// Written here rather than by a later pass because this is the last place
+    /// the facts exist: the findings and the ``MoveContext`` are both in scope
+    /// when a moment is built, and neither survives the trip to the database.
+    public let coachText: String?
 
     // MARK: Meta
 
@@ -124,6 +187,8 @@ public struct Moment: Sendable, Equatable, Codable {
         modifiers: [String] = [],
         secondaryTags: [String] = [],
         themeTags: [TacticTheme] = [],
+        evidence: MomentEvidence? = nil,
+        coachText: String? = nil,
         thinkTimeMs: Int? = nil,
         score: MomentScore,
         kind: MomentKind,
@@ -155,6 +220,8 @@ public struct Moment: Sendable, Equatable, Codable {
         self.modifiers = modifiers
         self.secondaryTags = secondaryTags
         self.themeTags = themeTags
+        self.evidence = evidence
+        self.coachText = coachText
         self.thinkTimeMs = thinkTimeMs
         self.score = score
         self.kind = kind
@@ -226,14 +293,22 @@ public enum MomentBuilder {
     ) -> Moment {
         let gap = context.criticalityGap
         let solutionPlies = solutionLength(context)
+        let diagnosis = kind == .mistake ? mistake : praise(mistake)
 
         let severityInput = kind == .mistake ? context.deltaEP : gap
         let severity = min(max(severityInput, 0), severityCeiling) / severityCeiling
         let clarity = min(max(gap / clarityCeiling, clarityFloor), 1.0)
         let learnability = clarity * brevity(solutionPlies)
-        let relevance = relevanceScore(causeTag: mistake.causeTag, context: context, policy: policy)
+        let relevance = relevanceScore(causeTag: diagnosis.causeTag, context: context, policy: policy)
 
-        let primary = findings.min { CauseTagger.priority(of: $0) < CauseTagger.priority(of: $1) }
+        // The same finding the cause tag came from, so the moment's evidence, its
+        // label and its coaching note are three views of one observation.
+        let primary = CauseTagger.primary(of: findings)
+        // A reinforcement carries no evidence for the same reason it carries no
+        // cause tag: the findings that fired on a good move describe the position,
+        // not the decision, and a note written from "the piece you moved is en
+        // prise" belongs to a mistake.
+        let evidence = kind == .mistake ? primary.map(MomentEvidence.init) : nil
 
         return Moment(
             ply: context.ply,
@@ -257,15 +332,52 @@ public enum MomentBuilder {
             pvAlt: Array((context.secondLine?.pv ?? []).prefix(10)),
             criticalityGap: gap,
             detector: primary?.detector,
-            causeTag: mistake.causeTag,
-            stepTag: mistake.stepTag,
-            modifiers: mistake.modifiers,
-            secondaryTags: mistake.secondaryTags,
+            causeTag: diagnosis.causeTag,
+            stepTag: diagnosis.stepTag,
+            modifiers: diagnosis.modifiers,
+            secondaryTags: diagnosis.secondaryTags,
             themeTags: Array(Set(findings.flatMap(\.themes))).sorted { $0.rawValue < $1.rawValue },
+            evidence: evidence,
+            coachText: MomentExplainer.note(
+                findings: findings,
+                context: context,
+                diagnosis: diagnosis,
+                kind: kind
+            ),
             thinkTimeMs: context.thinkTimeMs,
             score: MomentScore(severity: severity, learnability: learnability, relevance: relevance),
             kind: kind,
-            srsEligible: isSRSEligible(kind: kind, mistake: mistake, solutionPlies: solutionPlies, gap: gap)
+            srsEligible: isSRSEligible(kind: kind, mistake: diagnosis, solutionPlies: solutionPlies, gap: gap)
+        )
+    }
+
+    /// The tag a reinforcement carries instead of the one the cause tagger
+    /// produced.
+    ///
+    /// Every value in ``CauseTag`` names something that went wrong, and every
+    /// value in ``StepTag`` except S3 names a step that broke down. A
+    /// reinforcement is the opposite claim — the player found the engine's move
+    /// in a position that genuinely branched — so the tagger's answer for it is
+    /// not a diagnosis of the move at all. It is whatever a detector happened to
+    /// notice about the *position*, and several of them can fire on a good move:
+    /// a piece can sit en prise behind a refutation that never comes, and an
+    /// exact endgame result can change under a move the engine still ranks
+    /// first. Passing that through would put "hung the piece you moved" and
+    /// "blunder check" on a moment the review screen captions as praise, and
+    /// hand the same words to the coach writing the copy.
+    ///
+    /// Clock pressure is the one overlay that survives, because it is a fact
+    /// about the position rather than a verdict on the move — and finding the
+    /// only move with seconds left is part of the praise. The findings
+    /// themselves are not lost: they still reach the moment through `detector`
+    /// and `themeTags`, which describe what was on the board.
+    static func praise(_ mistake: Mistake) -> Mistake {
+        Mistake(
+            causeTag: .generic,
+            stepTag: .s3Candidates,
+            modifiers: mistake.modifiers.filter { $0 == MistakeModifier.clockPressure.rawValue },
+            secondaryTags: [],
+            severity: 0
         )
     }
 

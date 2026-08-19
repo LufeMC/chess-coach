@@ -73,6 +73,40 @@ struct GameRepositoryTests {
         #expect(loadedMoves[1].thinkTimeMs == 1500)
     }
 
+    @Test("Per-move accuracy and the guided prompt round-trip on the move row")
+    func moveDetailRoundTrip() throws {
+        let database = try UserDatabase.inMemory()
+        let game = Game(mode: .guided, userColor: .white, opponentRating: 1250)
+        try database.games.insert(
+            game,
+            moves: [
+                GameMove(
+                    gameID: game.id,
+                    ply: 1,
+                    san: "e4",
+                    uci: "e2e4",
+                    classification: "best",
+                    winPctBefore: 50.5,
+                    winPctAfter: 50.9,
+                    thinkTimeMs: 1200,
+                    accuracy: 99.4,
+                    guidedPromptHabit: "scanThreats",
+                    guidedPromptHit: true
+                ),
+                // The opponent's move: evaluated, never judged, never prompted.
+                GameMove(gameID: game.id, ply: 2, san: "e5", uci: "e7e5"),
+            ]
+        )
+
+        let moves = try database.games.moves(forGame: game.id)
+        #expect(moves[0].accuracy == 99.4)
+        #expect(moves[0].guidedPromptHabit == "scanThreats")
+        #expect(moves[0].guidedPromptHit == true)
+        #expect(moves[1].accuracy == nil)
+        #expect(moves[1].guidedPromptHabit == nil)
+        #expect(moves[1].guidedPromptHit == nil)
+    }
+
     @Test("Insert is atomic: a bad move list rolls the game back too")
     func insertIsAtomic() throws {
         let database = try UserDatabase.inMemory()
@@ -269,6 +303,89 @@ struct MomentRepositoryTests {
         var moment = makeMoment(gameID: UUID())
         moment.modifiers = "{not json"
         #expect(moment.modifierList == [])
+    }
+
+    /// Stands in for `AnalysisKit.Moment`, which this package deliberately cannot
+    /// see. What matters is that an arbitrary `Codable` value survives the trip.
+    private struct Payload: Codable, Equatable {
+        var pvRefutation: [String]
+        var themeTags: [String]
+        var winPctAfter: Double
+        var judgment: String
+    }
+
+    @Test("The payload survives a write and a read intact")
+    func payloadRoundTrip() throws {
+        let database = try UserDatabase.inMemory()
+        let game = Game(mode: .guided, userColor: .white, opponentRating: 1250)
+        try database.games.insert(game)
+
+        let payload = Payload(
+            pvRefutation: ["d1h5", "g7g6", "h5e5"],
+            themeTags: ["fork", "hangingPiece"],
+            winPctAfter: 18.25,
+            judgment: "blunder"
+        )
+        var moment = makeMoment(gameID: game.id)
+        moment.payload = Moment.encodePayload(payload)
+        moment.srsEligible = true
+        try database.moments.insert([moment])
+
+        let loaded = try #require(try database.moments.moments(forGame: game.id).first)
+        #expect(loaded.decodePayload(as: Payload.self) == payload)
+        #expect(loaded.srsEligible)
+        // The flat columns keep saying the same thing they always did.
+        #expect(loaded.causeTag == "missedFork")
+        #expect(loaded.deltaEP == -0.62)
+    }
+
+    @Test("Re-encoding the same payload produces the same bytes")
+    func payloadIsStable() throws {
+        // A re-analysis that changed nothing must not look like an edit to the
+        // sync engine, which is why the encoder sorts its keys.
+        let payload = Payload(
+            pvRefutation: ["d1h5"],
+            themeTags: ["fork"],
+            winPctAfter: 40,
+            judgment: "mistake"
+        )
+        #expect(Moment.encodePayload(payload) == Moment.encodePayload(payload))
+        #expect(Moment.encodePayload(payload).contains(#""judgment":"mistake""#))
+    }
+
+    @Test("An absent or undecodable payload degrades to nil, never to a throw")
+    func payloadDegrades() throws {
+        var moment = makeMoment(gameID: UUID())
+        #expect(moment.payload.isEmpty)
+        #expect(moment.decodePayload(as: Payload.self) == nil)
+
+        moment.payload = "{not json"
+        #expect(moment.decodePayload(as: Payload.self) == nil)
+
+        // Shaped like a payload from a build that knows fields this one does not.
+        moment.payload = #"{"pvRefutation":["d1h5"],"unknownFuture":42}"#
+        #expect(moment.decodePayload(as: Payload.self) == nil)
+    }
+
+    @Test("SRS-eligible moments are queryable without recomputing eligibility")
+    func srsEligibleQuery() throws {
+        let database = try UserDatabase.inMemory()
+        let game = Game(mode: .guided, userColor: .white, opponentRating: 1250)
+        try database.games.insert(game)
+
+        var eligible = makeMoment(gameID: game.id, ply: 10, score: 0.5)
+        eligible.srsEligible = true
+        var better = makeMoment(gameID: game.id, ply: 14, score: 0.9)
+        better.srsEligible = true
+        let ineligible = makeMoment(gameID: game.id, ply: 18, score: 0.95)
+        try database.moments.insert([eligible, better, ineligible])
+
+        #expect(try database.moments.srsEligible().map(\.id) == [better.id, eligible.id])
+        #expect(try database.moments.srsEligible(limit: 1).map(\.id) == [better.id])
+
+        // Worked-through moments have already had their chance to become cards.
+        try database.moments.setStatus(.reviewed, forMoment: better.id)
+        #expect(try database.moments.srsEligible().map(\.id) == [eligible.id])
     }
 
     @Test("Moments for a game come back in board order")
@@ -524,6 +641,207 @@ struct MetricsRepositoryTests {
     }
 }
 
+@Suite("Metric sample history")
+struct MetricSampleTests {
+
+    /// Midday UTC, so every offset these tests apply stays inside the same day
+    /// unless it is meant to cross one.
+    static let noon = Date(timeIntervalSince1970: 1_784_980_800)
+
+    /// UTC rather than the device's zone: a day boundary that moves with the
+    /// machine running the tests would make the coalescing assertions flaky.
+    static var calendar: Calendar {
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = TimeZone(identifier: "UTC")!
+        return calendar
+    }
+
+    private static let key = "ladder.rating"
+    private static let window = "allTime"
+
+    private static func record(
+        _ database: UserDatabase,
+        _ value: Double,
+        measuredAt: Date,
+        now: Date
+    ) throws {
+        try database.metrics.recordSample(
+            key: key,
+            window: window,
+            value: value,
+            measuredAt: measuredAt,
+            now: now,
+            calendar: calendar
+        )
+    }
+
+    private static func stored(_ database: UserDatabase) throws -> [MetricSample] {
+        try database.metrics.samples(key: key, window: window)
+    }
+
+    @Test("A value that moved is stamped when it moved, not when it was recorded")
+    func changedValueKeepsItsMeasurementTime() throws {
+        // The point belongs on the day the game was played. The recompute that
+        // notices the change can be minutes or hours later.
+        let database = try UserDatabase.inMemory()
+        let gameEnd = Self.noon
+        try Self.record(database, 1187, measuredAt: gameEnd, now: gameEnd.addingTimeInterval(900))
+
+        let samples = try Self.stored(database)
+        #expect(samples.count == 1)
+        expectSameInstant(samples.first?.recordedAt, gameEnd)
+    }
+
+    @Test("Fifty recomputes on one afternoon record one point")
+    func repeatedRecomputesCoalesce() throws {
+        // The failure this rule exists to prevent: `MetricsService.refresh()`
+        // runs on every Profile load, and an unguarded append would turn fifty
+        // glances at the chart into fifty points on it.
+        let database = try UserDatabase.inMemory()
+        for index in 0..<50 {
+            try Self.record(
+                database,
+                1187,
+                measuredAt: Self.noon,
+                now: Self.noon.addingTimeInterval(Double(index) * 60)
+            )
+        }
+        #expect(try Self.stored(database).count == 1)
+    }
+
+    @Test("An unchanged value still earns one point a day")
+    func unchangedValueTicksOncePerDay() throws {
+        // Without this a rating that held steady for six weeks would leave the
+        // one-month window empty, and the chart would claim there was nothing
+        // to show about a perfectly well-known rating.
+        let database = try UserDatabase.inMemory()
+        for day in 0..<3 {
+            try Self.record(
+                database,
+                1187,
+                measuredAt: Self.noon,
+                now: Self.noon.addingTimeInterval(Double(day) * 86_400)
+            )
+        }
+        let samples = try Self.stored(database)
+        #expect(samples.count == 3)
+        #expect(Set(samples.map(\.day)).count == 3)
+    }
+
+    @Test("A value that moves twice in a day earns a point for each move")
+    func everyMovementIsKept() throws {
+        let database = try UserDatabase.inMemory()
+        try Self.record(database, 1187, measuredAt: Self.noon, now: Self.noon)
+        try Self.record(
+            database,
+            1195,
+            measuredAt: Self.noon.addingTimeInterval(3_600),
+            now: Self.noon.addingTimeInterval(3_660)
+        )
+        try Self.record(
+            database,
+            1190,
+            measuredAt: Self.noon.addingTimeInterval(7_200),
+            now: Self.noon.addingTimeInterval(7_260)
+        )
+        #expect(try Self.stored(database).map(\.value) == [1187, 1195, 1190])
+    }
+
+    @Test("A sample is never filed behind the one before it")
+    func samplesStayInOrder() throws {
+        // A clock that went backwards, or a metric row synced from a device
+        // whose clock did, must not make the line double back on itself.
+        let database = try UserDatabase.inMemory()
+        try Self.record(database, 1187, measuredAt: Self.noon, now: Self.noon)
+        try Self.record(
+            database,
+            1195,
+            measuredAt: Self.noon.addingTimeInterval(-7_200),
+            now: Self.noon.addingTimeInterval(60)
+        )
+
+        let dates = try Self.stored(database).map(\.recordedAt)
+        #expect(dates == dates.sorted())
+    }
+
+    @Test("Duplicate rows from sync converge on the next write")
+    func duplicatesConverge() throws {
+        // Two devices offline on the same day both record that day's rating,
+        // and no unique index may stop them. The earliest row wins so both
+        // devices reach the same answer.
+        let database = try UserDatabase.inMemory()
+        let day = DailyLoop.dayKey(for: Self.noon, calendar: Self.calendar)
+        try database.writer.write { db in
+            try MetricSample.insert {
+                [
+                    MetricSample(
+                        key: Self.key,
+                        window: Self.window,
+                        day: day,
+                        value: 1187,
+                        recordedAt: Self.noon
+                    ),
+                    MetricSample(
+                        key: Self.key,
+                        window: Self.window,
+                        day: day,
+                        value: 1187,
+                        recordedAt: Self.noon.addingTimeInterval(120)
+                    ),
+                ]
+            }
+            .execute(db)
+        }
+        #expect(try Self.stored(database).count == 2)
+
+        try Self.record(
+            database,
+            1187,
+            measuredAt: Self.noon,
+            now: Self.noon.addingTimeInterval(300)
+        )
+
+        let remaining = try Self.stored(database)
+        #expect(remaining.count == 1)
+        expectSameInstant(remaining.first?.recordedAt, Self.noon)
+    }
+
+    @Test("Keys and windows keep separate histories")
+    func seriesAreIndependent() throws {
+        let database = try UserDatabase.inMemory()
+        try database.metrics.recordSample(
+            key: "ladder.rating", window: "allTime", value: 1187,
+            measuredAt: Self.noon, now: Self.noon, calendar: Self.calendar
+        )
+        try database.metrics.recordSample(
+            key: "puzzle.rating", window: "allTime", value: 1420,
+            measuredAt: Self.noon, now: Self.noon, calendar: Self.calendar
+        )
+        try database.metrics.recordSample(
+            key: "ladder.rating", window: "last20", value: 1201,
+            measuredAt: Self.noon, now: Self.noon, calendar: Self.calendar
+        )
+
+        #expect(try database.metrics.samples(key: "ladder.rating", window: "allTime")
+            .map(\.value) == [1187])
+        #expect(try database.metrics.samples(key: "puzzle.rating", window: "allTime")
+            .map(\.value) == [1420])
+        #expect(try database.metrics.samples(key: "ladder.rating", window: "last20")
+            .map(\.value) == [1201])
+    }
+
+    @Test("The read cap drops the distant past, not the present")
+    func limitCountsBackFromTheNewest() throws {
+        let database = try UserDatabase.inMemory()
+        for index in 0..<5 {
+            let at = Self.noon.addingTimeInterval(Double(index) * 3_600)
+            try Self.record(database, 1100 + Double(index), measuredAt: at, now: at)
+        }
+        let recent = try database.metrics.samples(key: Self.key, window: Self.window, limit: 2)
+        #expect(recent.map(\.value) == [1103, 1104])
+    }
+}
+
 @Suite("Settings repository")
 struct SettingsRepositoryTests {
 
@@ -536,7 +854,11 @@ struct SettingsRepositoryTests {
         #expect(settings.claudeModel == "claude-opus-5")
         #expect(settings.effort == "medium")
         #expect(settings.boardTheme == "classic")
-        #expect(settings.pieceSet == "cburnett")
+        // Staunty, matching `PieceRenderer.staunty` being the default everywhere
+        // in BoardUI: it is the set drawn to survive phone-size squares, and a
+        // stored default that disagreed with the renderer's meant a fresh
+        // install rendered a set nothing else in the app considered default.
+        #expect(settings.pieceSet == "staunty")
         #expect(settings.soundOn)
         #expect(settings.hapticsOn)
         #expect(settings.userRating == 1100)

@@ -26,20 +26,20 @@ struct SessionProgressBar: View {
     var body: some View {
         VStack(spacing: 5) {
             Text(progress.counterLabel)
-                .font(.subheadline.weight(.semibold).monospacedDigit())
+                .typeRole(.headline, monospacedDigits: true)
                 .contentTransition(.numericText())
 
             GeometryReader { proxy in
                 ZStack(alignment: .leading) {
-                    Capsule().fill(.quaternary)
+                    Capsule().fill(Palette.surfaceSunken.dynamic)
                     Capsule()
-                        .fill(Color.accentColor)
+                        .fill(Palette.accent.dynamic)
                         .frame(width: max(0, proxy.size.width * progress.fraction))
                 }
             }
             .frame(width: 132, height: 2)
         }
-        .animation(.snappy(duration: 0.25), value: progress.fraction)
+        .animation(Motion.snappy, value: progress.fraction)
         .accessibilityElement(children: .ignore)
         .accessibilityLabel("Puzzle \(progress.counterLabel)")
     }

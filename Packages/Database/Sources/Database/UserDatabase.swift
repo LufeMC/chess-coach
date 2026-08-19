@@ -26,6 +26,7 @@ public struct UserDatabase: Sendable {
     public var metrics: MetricsRepository { MetricsRepository(writer: writer) }
     public var settings: SettingsRepository { SettingsRepository(writer: writer) }
     public var dailyLoop: DailyLoopRepository { DailyLoopRepository(writer: writer) }
+    public var calibrationDrafts: CalibrationDraftRepository { CalibrationDraftRepository(writer: writer) }
 
     // MARK: - Opening
 
@@ -81,6 +82,7 @@ public struct UserDatabase: Sendable {
         SRSCard.tableName,
         ReviewLog.tableName,
         SkillMetric.tableName,
+        MetricSample.tableName,
         DailyLoop.tableName,
         AppSettings.tableName,
     ]
@@ -92,6 +94,7 @@ public struct UserDatabase: Sendable {
     public static let localOnlyTableNames: [String] = [
         PlyEval.tableName,
         DeviceCalibration.tableName,
+        CalibrationDraft.tableName,
     ]
 
     // MARK: - Migrations
@@ -123,6 +126,10 @@ public struct UserDatabase: Sendable {
         // it silently destroys the local database, which is indistinguishable
         // from data loss once sync is on.
         migrator.registerMigration("v1.createUserSchema", migrate: createUserSchema)
+        migrator.registerMigration("v2.analysisDetail", migrate: addAnalysisDetail)
+        migrator.registerMigration("v3.ladderAssistedRetry", migrate: addLadderAssistedRetry)
+        migrator.registerMigration("v4.metricSampleHistory", migrate: addMetricSampleHistory)
+        migrator.registerMigration("v5.calibrationDraft", migrate: addCalibrationDraft)
         return migrator
     }
 
@@ -274,7 +281,7 @@ public struct UserDatabase: Sendable {
               "claudeModel" TEXT NOT NULL ON CONFLICT REPLACE DEFAULT 'claude-opus-5',
               "effort" TEXT NOT NULL ON CONFLICT REPLACE DEFAULT 'medium',
               "boardTheme" TEXT NOT NULL ON CONFLICT REPLACE DEFAULT 'classic',
-              "pieceSet" TEXT NOT NULL ON CONFLICT REPLACE DEFAULT 'cburnett',
+              "pieceSet" TEXT NOT NULL ON CONFLICT REPLACE DEFAULT 'staunty',
               "soundOn" INTEGER NOT NULL ON CONFLICT REPLACE DEFAULT 1,
               "hapticsOn" INTEGER NOT NULL ON CONFLICT REPLACE DEFAULT 1,
               "userRating" REAL NOT NULL ON CONFLICT REPLACE DEFAULT 1100,
@@ -346,6 +353,177 @@ public struct UserDatabase: Sendable {
         try #sql(#"CREATE INDEX "idx_dailyLoops_day" ON "dailyLoops"("day")"#).execute(db)
         try #sql(#"CREATE INDEX "idx_plyEvals_gameID" ON "plyEvals"("gameID", "ply")"#).execute(db)
     }
+
+    /// Stops the analysis pass from throwing away what it computed.
+    ///
+    /// `moments` gains the full analysis payload plus the spaced-repetition
+    /// eligibility flag, and `gameMoves` gains per-move accuracy and the guided
+    /// prompt that preceded a move. See the property documentation on ``Moment``
+    /// and ``GameMove`` for why each one is a column rather than a derivation.
+    ///
+    /// # Why this is a second migration and not an edit to v1
+    ///
+    /// Nothing has shipped and sync has never run, so it is tempting to rewrite
+    /// `createUserSchema` and pretend v2 never existed. That is wrong for a
+    /// reason that has nothing to do with CloudKit: ``DatabaseMigrator`` records
+    /// which identifiers it has applied and **skips those it has already run**.
+    /// Every database already created on a simulator or a development device has
+    /// `v1.createUserSchema` in `grdb_migrations`, so an edited v1 would never
+    /// execute there — leaving a `moments` table with no `payload` column while
+    /// the Swift record type selects one, i.e. `no such column` on every read of
+    /// every existing local database. The only ways out of that would be erasing
+    /// the file (data loss) or a migration, which is what this is.
+    ///
+    /// Additive `ALTER TABLE ADD COLUMN` is also the shape the sync rules above
+    /// demand: no column is renamed or dropped, every new `NOT NULL` column
+    /// carries `ON CONFLICT REPLACE DEFAULT`, and the nullable ones need no
+    /// default because a peer that never heard of them sends `NULL`, which is
+    /// exactly what "this build did not measure that" means.
+    /// Records that a finished game contained a level-2 assisted retry — the
+    /// coach did not merely nudge, it showed the move and let the user take it
+    /// back.
+    ///
+    /// The flag exists on the in-memory record already, and the live rating
+    /// write consumes it there. It has to be *stored* as well because
+    /// `MetricComputer` recomputes the ladder performance rating from history,
+    /// and a metric derived from stored rows that disagrees with the rating
+    /// actually applied is worse than no metric: the drift guard exists
+    /// specifically to notice when the rating and the results have come apart,
+    /// so feeding it games the rating deliberately ignored would make it fire on
+    /// its own blind spot.
+    ///
+    /// Defaults to 0, which is the truth for every game recorded before the
+    /// column existed — second-try hints were not tracked at all then, so no
+    /// historical game can be known to have used one.
+    private static func addLadderAssistedRetry(_ db: Database) throws {
+        try #sql(
+            """
+            ALTER TABLE "games"
+            ADD COLUMN "usedAssistedRetry" INTEGER NOT NULL ON CONFLICT REPLACE DEFAULT 0
+            """
+        )
+        .execute(db)
+    }
+
+    private static func addAnalysisDetail(_ db: Database) throws {
+        try #sql(
+            """
+            ALTER TABLE "moments"
+            ADD COLUMN "payload" TEXT NOT NULL ON CONFLICT REPLACE DEFAULT ''
+            """
+        )
+        .execute(db)
+
+        try #sql(
+            """
+            ALTER TABLE "moments"
+            ADD COLUMN "srsEligible" INTEGER NOT NULL ON CONFLICT REPLACE DEFAULT 0
+            """
+        )
+        .execute(db)
+
+        try #sql(#"ALTER TABLE "gameMoves" ADD COLUMN "accuracy" REAL"#).execute(db)
+        try #sql(#"ALTER TABLE "gameMoves" ADD COLUMN "guidedPromptHabit" TEXT"#).execute(db)
+        try #sql(#"ALTER TABLE "gameMoves" ADD COLUMN "guidedPromptHit" INTEGER"#).execute(db)
+
+        // No index on "srsEligible": `idx_moments_status` already narrows to the
+        // handful of moments that have not been worked through, and a table
+        // holding at most three rows per game would spend more on maintaining a
+        // second index than it could ever save on scanning.
+    }
+
+    /// Gives the metrics layer a memory.
+    ///
+    /// `skillMetrics` holds one row per `(key, window)`, so each recompute
+    /// overwrites the number it replaces: the schema could say what the rating
+    /// *is* and never what it *was*. That is a gap in the product, not only in
+    /// the data — the app exists to move one number over about a year, and a
+    /// year-long goal whose trend line cannot be drawn has lost its primary
+    /// feedback signal. ``MetricSample`` is the missing half.
+    ///
+    /// # Why a second table rather than columns on `skillMetrics`
+    ///
+    /// The two have opposite lifecycles. A skill metric is a *singleton*,
+    /// updated in place and merged field by field across devices; a sample is
+    /// *immutable* once written and merges by not colliding in the first place.
+    /// A table that tried to be both would force every curriculum gate to
+    /// filter history rows out of its lookup, and the first filter anyone
+    /// forgot would gate advancement on a value from March.
+    ///
+    /// # Write volume
+    ///
+    /// An append-only table with an eager writer is a disk-space bug waiting to
+    /// happen: `MetricsService.refresh()` runs on app foreground and on every
+    /// Profile load, so "a row per recompute" would give a user who checks their
+    /// rating fifty times an afternoon a fifty-point flat line and no signal.
+    /// Hence `day`, the coalescing bucket:
+    /// ``MetricsRepository/recordSample(key:window:value:measuredAt:now:calendar:)``
+    /// keeps at most one row per `(key, window, day, value)`, so the ceiling is
+    /// one row per day a value stood still plus one per time it moved. A few
+    /// hundred rows a year per plotted metric is small enough to be worth
+    /// synchronising, which matters: a rating history that did not survive onto
+    /// a new device would be a year of evidence lost to an upgrade.
+    ///
+    /// # Sync shape
+    ///
+    /// `(key, window, day, value)` is logically unique and deliberately carries
+    /// no unique index, for the reason the rules above give: two devices offline
+    /// on the same day will both record that day's rating, and a unique index
+    /// turns an ordinary merge into an unresolvable failure. Duplicates converge
+    /// on the next write instead.
+    /// Somewhere to keep a calibration that has not finished yet.
+    ///
+    /// Calibration gates the whole app: the rating and starting rung it produces
+    /// are what every other screen reads, so it runs before anything else and it
+    /// runs exactly once. Holding its five games and twenty puzzles only in
+    /// memory meant a force-quit — or a phone call during game three — threw the
+    /// lot away and started the diagnostic over, which is the single worst first
+    /// impression the app can make.
+    ///
+    /// One row, one blob. The draft is a private shape that changes whenever the
+    /// calibration flow changes, and a column per field would mean a migration
+    /// every time; a blob that is written and read by one type cannot drift from
+    /// itself. It is deleted the moment calibration completes, so this table is
+    /// empty for all but the first few minutes of the app's life.
+    private static func addCalibrationDraft(_ db: Database) throws {
+        try #sql(
+            """
+            CREATE TABLE "calibrationDrafts" (
+              "id" TEXT PRIMARY KEY NOT NULL ON CONFLICT REPLACE DEFAULT (uuid()),
+              "payload" TEXT NOT NULL ON CONFLICT REPLACE DEFAULT '',
+              "updatedAt" TEXT NOT NULL ON CONFLICT REPLACE DEFAULT (datetime('now'))
+            ) STRICT
+            """
+        )
+        .execute(db)
+    }
+
+    private static func addMetricSampleHistory(_ db: Database) throws {
+        try #sql(
+            """
+            CREATE TABLE "metricSamples" (
+              "id" TEXT PRIMARY KEY NOT NULL ON CONFLICT REPLACE DEFAULT (uuid()),
+              "key" TEXT NOT NULL ON CONFLICT REPLACE DEFAULT '',
+              "window" TEXT NOT NULL ON CONFLICT REPLACE DEFAULT '',
+              "day" TEXT NOT NULL ON CONFLICT REPLACE DEFAULT '',
+              "value" REAL NOT NULL ON CONFLICT REPLACE DEFAULT 0,
+              "recordedAt" TEXT NOT NULL ON CONFLICT REPLACE DEFAULT (datetime('now'))
+            ) STRICT
+            """
+        )
+        .execute(db)
+
+        // Ordered by time rather than by `day`, because both queries the table
+        // has are "one series, newest first": the chart's read, and the newest
+        // sample the de-duplicating write compares against.
+        try #sql(
+            """
+            CREATE INDEX "idx_metricSamples_key"
+            ON "metricSamples"("key", "window", "recordedAt")
+            """
+        )
+        .execute(db)
+    }
 }
 
 // MARK: - CloudKit
@@ -387,6 +565,7 @@ public struct UserDatabase: Sendable {
                 SRSCard.self,
                 ReviewLog.self,
                 SkillMetric.self,
+                MetricSample.self,
                 DailyLoop.self,
                 AppSettings.self,
                 containerIdentifier: containerIdentifier

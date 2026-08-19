@@ -3,6 +3,7 @@
 //  ChessCoach
 //
 
+import BoardUI
 import SwiftUI
 import TrainingCore
 
@@ -68,18 +69,22 @@ struct PositioningScaleGeometry: Sendable, Hashable {
 
 /// The positioning scale.
 ///
-/// Binance's asset-positioning bar: a horizontal gradient with its endpoints
+/// Binance's asset-positioning bar: a recessed track with its endpoints
 /// labelled, a circular marker, and a floating chip naming the band. One visual
-/// on the whole reveal screen — the rest is a sentence and a ladder section,
-/// because a placement result is one number and dressing it up would suggest
-/// otherwise.
+/// on the whole reveal screen — the rest is a number, a sentence and the rung,
+/// because a placement result is one measurement and dressing it up would
+/// suggest otherwise.
+///
+/// The track carries no gradient. A colour ramp along it would say "right is
+/// better", which the endpoint labels already say in numbers, and would spend
+/// the screen's accent on the two thirds of the scale the user is not on. All
+/// the colour goes to the one thing being reported: where they are, and how
+/// wide that is.
 struct PositioningScale: View {
 
     let geometry: PositioningScaleGeometry
     var lowLabel: String
     var highLabel: String
-
-    @Environment(\.colorScheme) private var colorScheme
 
     var body: some View {
         VStack(spacing: 8) {
@@ -91,11 +96,12 @@ struct PositioningScale: View {
                     // the point, so it tracks the marker without an alignment
                     // guide; the inset keeps it inside the track at the extremes.
                     Text(geometry.bandName())
-                        .font(.caption.weight(.semibold))
+                        .typeRole(.label, appliesForeground: false)
+                        .foregroundStyle(Palette.accent.dynamic)
                         .padding(.horizontal, 9)
                         .padding(.vertical, 4)
-                        .background(Capsule().fill(Color.accentColor.opacity(0.18)))
-                        .overlay(Capsule().strokeBorder(Color.accentColor.opacity(0.4), lineWidth: 1))
+                        .background(Capsule().fill(Palette.accent.opacity(0.14).dynamic))
+                        .overlay(Capsule().strokeBorder(Palette.accent.opacity(0.4).dynamic, lineWidth: 1))
                         .fixedSize()
                         .position(x: chipCentre(in: width), y: 12)
 
@@ -110,8 +116,7 @@ struct PositioningScale: View {
                 Spacer()
                 Text(highLabel)
             }
-            .font(.caption.monospacedDigit())
-            .foregroundStyle(.secondary)
+            .typeRole(.caption, monospacedDigits: true)
         }
     }
 
@@ -127,27 +132,21 @@ struct PositioningScale: View {
     private func track(width: CGFloat) -> some View {
         ZStack(alignment: .leading) {
             Capsule()
-                .fill(
-                    LinearGradient(
-                        colors: [
-                            Color.accentColor.opacity(0.25),
-                            Color.accentColor.opacity(0.85)
-                        ],
-                        startPoint: .leading,
-                        endPoint: .trailing
-                    )
-                )
+                .fill(Palette.surfaceSunken.dynamic)
                 .frame(height: 10)
 
-            // The ±1σ region.
+            // The ±1σ region. Tinted rather than lightened: on a recessed track
+            // a white overlay is the same value as the ground in one appearance
+            // and invisible in the other, and the band is the honest half of
+            // this drawing — it cannot be the half that disappears.
             Capsule()
-                .fill(.white.opacity(colorScheme == .dark ? 0.28 : 0.55))
+                .fill(Palette.accent.opacity(0.28).dynamic)
                 .frame(width: max(2, width * geometry.bandWidthFraction), height: 10)
                 .offset(x: width * geometry.bandStartFraction)
 
             Circle()
-                .fill(Color.accentColor)
-                .overlay(Circle().strokeBorder(.background, lineWidth: 2.5))
+                .fill(Palette.accent.dynamic)
+                .overlay(Circle().strokeBorder(Palette.surfaceGround.dynamic, lineWidth: 2.5))
                 .frame(width: 16, height: 16)
                 .offset(x: width * geometry.markerFraction - 8)
         }
@@ -162,4 +161,5 @@ struct PositioningScale: View {
         highLabel: "2000"
     )
     .padding(32)
+    .background(Palette.surfaceGround.dynamic)
 }

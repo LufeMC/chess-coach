@@ -169,6 +169,39 @@ public struct MomentRepository: Sendable {
         }
     }
 
+    /// Unworked moments that earned a spaced-repetition card, best first.
+    ///
+    /// The scheduler cannot decide eligibility itself: it is settled during
+    /// analysis from the length of the solution, the criticality gap and the
+    /// cause tag, and none of that survives into the moment row except as the
+    /// flag this reads. Recomputing it here would mean re-running the engine.
+    public func srsEligible(limit: Int = 10) throws -> [Moment] {
+        try writer.read { db in
+            try Moment
+                .where { $0.status.eq(MomentStatus.new.rawValue) }
+                .where { $0.srsEligible }
+                .order { $0.score.desc() }
+                .limit(limit)
+                .fetchAll(db)
+        }
+    }
+
+    /// How many of one game's moments are still worth reviewing.
+    ///
+    /// A count rather than a fetch: the Today screen needs the number on every
+    /// load to size its promise, and decoding the moment payloads to get
+    /// `count` would read the largest column in the table for a figure the
+    /// index alone can answer.
+    public func eligibleCount(forGame gameID: Game.ID) throws -> Int {
+        try writer.read { db in
+            try Moment
+                .where { $0.gameID.eq(gameID) }
+                .where { $0.status.eq(MomentStatus.new.rawValue) }
+                .where { $0.srsEligible }
+                .fetchCount(db)
+        }
+    }
+
     public func setStatus(_ status: MomentStatus, forMoment id: Moment.ID) throws {
         try writer.write { db in
             try Moment.find(id).update { $0.status = #bind(status.rawValue) }.execute(db)
@@ -367,6 +400,122 @@ public struct MetricsRepository: Sendable {
             try SkillMetric.order(by: \.key).fetchAll(db)
         }
     }
+
+    // MARK: Sample history
+
+    /// Two sample values closer together than this are the same number arriving
+    /// twice, not a movement worth a point on a chart.
+    ///
+    /// Float identity, not a significance threshold: the metrics this history
+    /// tracks are stored doubles read straight back out, so anything larger
+    /// would start swallowing real rating movement.
+    private static let sampleEpsilon = 1e-6
+
+    /// Records one observation into the append-only history — see
+    /// ``MetricSample``.
+    ///
+    /// Two rules, and the interesting part is that they are deliberately
+    /// different rules:
+    ///
+    /// * **A value that moved is stamped `measuredAt`**, the `updatedAt` of the
+    ///   metric row it came from — for the playing rating, the end of the game
+    ///   that moved it. Stamping it "now" would file every point at the moment
+    ///   the user happened to open the app, which is not when they earned it.
+    /// * **A value that did not move is stamped `now`, and kept at most once a
+    ///   day.** "Still 1187 today" is a real observation, and it is what keeps a
+    ///   flat month from emptying the chart's one-month window; recording it
+    ///   fifty times because Profile was opened fifty times is not.
+    ///
+    /// Never files a sample behind the newest one already stored: a point out of
+    /// order would draw a line that doubles back on itself.
+    ///
+    /// - Parameters:
+    ///   - measuredAt: When the value was last written.
+    ///   - now: The clock, as a parameter so tests need not sleep.
+    ///   - calendar: Decides which local day a timestamp falls in.
+    public func recordSample(
+        key: String,
+        window: String,
+        value: Double,
+        measuredAt: Date,
+        now: Date = Date(),
+        calendar: Calendar = .current
+    ) throws {
+        try writer.write { db in
+            let newest =
+                try MetricSample
+                .where { $0.key.eq(key) }
+                .where { $0.window.eq(window) }
+                .order { $0.recordedAt.desc() }
+                .limit(1)
+                .fetchOne(db)
+
+            let moved = newest.map { abs($0.value - value) >= Self.sampleEpsilon } ?? true
+            let stamp = moved ? measuredAt : now
+            let at = max(stamp, newest?.recordedAt ?? stamp)
+            let day = DailyLoop.dayKey(for: at, calendar: calendar)
+
+            guard moved || newest?.day != day else {
+                try Self.convergeDuplicates(db, key: key, window: window, day: day, value: value)
+                return
+            }
+
+            try MetricSample.insert {
+                MetricSample(key: key, window: window, day: day, value: value, recordedAt: at)
+            }
+            .execute(db)
+        }
+    }
+
+    /// Recorded observations of one metric, oldest first.
+    ///
+    /// `limit` counts back from the newest rather than forward from the oldest:
+    /// a series that hit its cap must lose the distant past, not this week.
+    public func samples(
+        key: String,
+        window: String,
+        limit: Int = 5_000
+    ) throws -> [MetricSample] {
+        try writer.read { db in
+            let newestFirst =
+                try MetricSample
+                .where { $0.key.eq(key) }
+                .where { $0.window.eq(window) }
+                .order { $0.recordedAt.desc() }
+                .limit(limit)
+                .fetchAll(db)
+            return Array(newestFirst.reversed())
+        }
+    }
+
+    /// Collapses rows two devices both wrote for the same day and value.
+    ///
+    /// The table carries no unique index by policy, so convergence happens in
+    /// code, the same way `DailyLoopRepository.loop(for:)` merges duplicate
+    /// days. The *earliest* row wins so the result does not depend on which
+    /// device ran the merge, and the id breaks ties the clock cannot.
+    private static func convergeDuplicates(
+        _ db: Database,
+        key: String,
+        window: String,
+        day: String,
+        value: Double
+    ) throws {
+        let sameDay =
+            try MetricSample
+            .where { $0.key.eq(key) }
+            .where { $0.window.eq(window) }
+            .where { $0.day.eq(day) }
+            .fetchAll(db)
+
+        let equivalent = sameDay
+            .filter { abs($0.value - value) < sampleEpsilon }
+            .sorted { ($0.recordedAt, $0.id.uuidString) < ($1.recordedAt, $1.id.uuidString) }
+
+        for duplicate in equivalent.dropFirst() {
+            try MetricSample.find(duplicate.id).delete().execute(db)
+        }
+    }
 }
 
 // MARK: - SettingsRepository
@@ -465,6 +614,46 @@ public struct DailyLoopRepository: Sendable {
     public func recent(limit: Int = 30) throws -> [DailyLoop] {
         try writer.read { db in
             try DailyLoop.order { $0.day.desc() }.limit(limit).fetchAll(db)
+        }
+    }
+}
+
+// MARK: - Calibration drafts
+
+/// Reads and writes the single in-progress calibration.
+public struct CalibrationDraftRepository: Sendable {
+    private let writer: any DatabaseWriter
+
+    public init(writer: any DatabaseWriter) {
+        self.writer = writer
+    }
+
+    /// The draft, or `nil` when no calibration is in progress.
+    public func current() throws -> CalibrationDraft? {
+        try writer.read { db in
+            try CalibrationDraft.find(CalibrationDraft.singletonID).fetchOne(db)
+        }
+    }
+
+    /// Replaces the draft wholesale.
+    ///
+    /// A whole-row write rather than a merge because the payload is one
+    /// self-consistent snapshot: a games list and a puzzles list that disagreed
+    /// about how far the measurement had got would produce a resumed
+    /// calibration that asks the wrong questions.
+    public func save(payload: String, at date: Date = Date()) throws {
+        try writer.write { db in
+            try CalibrationDraft.upsert {
+                CalibrationDraft(payload: payload, updatedAt: date)
+            }
+            .execute(db)
+        }
+    }
+
+    /// Drops the draft once the measurement is finished.
+    public func clear() throws {
+        try writer.write { db in
+            try CalibrationDraft.delete().where { $0.id.eq(CalibrationDraft.singletonID) }.execute(db)
         }
     }
 }

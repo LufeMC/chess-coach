@@ -37,7 +37,7 @@ public struct AllowedTacticDetector: Detector, Sendable {
             ?? (first.givesCheck ? 1 : steps.count)
         let subtype: FindingSubtype = resolution <= Self.shallowHorizon ? .shallow : .deep
 
-        let theme = TacticThemeClassifier.classify(
+        let theme = TacticThemeClassifier.detail(
             steps: steps,
             from: context.positionAfter,
             score: context.refutationLine?.score,
@@ -52,8 +52,8 @@ public struct AllowedTacticDetector: Detector, Sendable {
             Finding(
                 detector: id,
                 subtype: subtype,
-                squares: [first.move.start, first.move.end],
-                themes: [theme],
+                squares: [first.move.start, first.move.end] + theme.squares,
+                themes: [theme.theme],
                 flags: flags,
                 magnitude: context.deltaEP,
                 detail: "Refutation \(first.uci) resolves in \(resolution) plies"

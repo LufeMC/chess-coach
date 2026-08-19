@@ -19,23 +19,65 @@ struct DailyProgress: Equatable, Sendable {
     var momentsReviewed: Int
     var puzzlesDone: Int
 
+    /// How many reviewable moments the latest analysed game actually produced.
+    ///
+    /// **Nil means not yet known** — no game has been analysed, or the pass is
+    /// still running — and the nominal target stands. A number means the app has
+    /// counted, and the step promises exactly what it can deliver.
+    ///
+    /// This exists because the moments step is the one step whose work the user
+    /// does not create by showing up: a game is always playable and puzzles
+    /// always exist, but moments are a *residue* of a game going wrong. A clean
+    /// game, or a two-move resignation, leaves none. Advertising a fixed "review
+    /// 3 moments" and then opening a review with nothing in it is the worst
+    /// thing this screen can do, because the CTA is the one promise the whole
+    /// daily loop rests on.
+    var momentsAvailable: Int?
+
+    /// The nominal target — what a normal game is expected to yield, and the
+    /// ceiling on a day's review work regardless of how badly a game went.
     static let momentsTarget = 3
     static let puzzlesTarget = 10
 
     static let zero = DailyProgress(gamePlayed: false, momentsReviewed: 0, puzzlesDone: 0)
 
-    init(gamePlayed: Bool = false, momentsReviewed: Int = 0, puzzlesDone: Int = 0) {
+    init(
+        gamePlayed: Bool = false,
+        momentsReviewed: Int = 0,
+        puzzlesDone: Int = 0,
+        momentsAvailable: Int? = nil
+    ) {
         self.gamePlayed = gamePlayed
         self.momentsReviewed = momentsReviewed
         self.puzzlesDone = puzzlesDone
+        self.momentsAvailable = momentsAvailable
     }
 
-    init(_ loop: DailyLoop) {
+    init(_ loop: DailyLoop, momentsAvailable: Int? = nil) {
         self.init(
             gamePlayed: loop.gamePlayed,
             momentsReviewed: loop.momentsReviewed,
-            puzzlesDone: loop.puzzlesDone
+            puzzlesDone: loop.puzzlesDone,
+            momentsAvailable: momentsAvailable
         )
+    }
+
+    /// The moments target this particular day can honour.
+    ///
+    /// Never below what has already been reviewed: a user who worked through
+    /// two moments and emptied the queue has *finished* the step, and must not
+    /// be shown a `2 of 0` for it.
+    var momentsTarget: Int {
+        guard let momentsAvailable else { return Self.momentsTarget }
+        return max(momentsReviewed, min(Self.momentsTarget, momentsAvailable))
+    }
+
+    /// The target for a step on this day. Only `moments` varies.
+    func target(_ step: TodayStep) -> Int {
+        switch step {
+        case .moments: momentsTarget
+        default: step.target
+        }
     }
 
     /// Nothing has happened today.
@@ -51,7 +93,10 @@ struct DailyProgress: Equatable, Sendable {
     func isDone(_ step: TodayStep) -> Bool {
         switch step {
         case .game: gamePlayed
-        case .moments: momentsReviewed >= Self.momentsTarget
+        // `>=` and not `==`, so a game that produced nothing to review (target
+        // 0) counts as done rather than parking the loop on a step with no work
+        // in it.
+        case .moments: momentsReviewed >= momentsTarget
         case .puzzles: puzzlesDone >= Self.puzzlesTarget
         }
     }
@@ -59,13 +104,13 @@ struct DailyProgress: Equatable, Sendable {
     func completed(_ step: TodayStep) -> Int {
         switch step {
         case .game: gamePlayed ? 1 : 0
-        case .moments: min(momentsReviewed, Self.momentsTarget)
+        case .moments: min(momentsReviewed, momentsTarget)
         case .puzzles: min(puzzlesDone, Self.puzzlesTarget)
         }
     }
 
     func remaining(_ step: TodayStep) -> Int {
-        max(step.target - completed(step), 0)
+        max(target(step) - completed(step), 0)
     }
 
     var completedStepCount: Int {
@@ -95,11 +140,18 @@ enum TodayStep: Int, CaseIterable, Identifiable, Sendable {
 
     /// The row label. Deliberately a noun phrase, not an imperative — the rows
     /// are status, and only the CTA gives an order.
-    var title: String {
+    var title: String { title(target: target) }
+
+    /// The row label for a target this day can actually honour.
+    ///
+    /// Takes the number rather than reading a constant, because `moments` is
+    /// only worth as much as the game produced and the row must not name a
+    /// quantity the review screen cannot show.
+    func title(target: Int) -> String {
         switch self {
         case .game: "1 game"
-        case .moments: "3 moments"
-        case .puzzles: "10 puzzles"
+        case .moments: target == 0 ? "No moments to review" : "\(target) moment\(target == 1 ? "" : "s")"
+        case .puzzles: "\(target) puzzles"
         }
     }
 
@@ -174,6 +226,9 @@ enum StepStatus: Equatable, Sendable {
 struct StepRowState: Equatable, Identifiable, Sendable {
     let step: TodayStep
     let status: StepStatus
+    /// Resolved here rather than read off `step` by the view, because the
+    /// moments row's label depends on the day's data.
+    let title: String
     /// `2` `of 3`. Nil on a locked row, which shows its reason instead — a
     /// `0/3` on a step you cannot start is a score you were never able to move.
     let tally: Denominator?
@@ -225,8 +280,10 @@ enum ActionEmphasis: Equatable, Sendable {
 }
 
 struct TodayAction: Equatable, Sendable {
-    /// Names the step **and its cost**. Never `Continue` — a generic verb makes
-    /// the user tap to find out what they agreed to.
+    /// Names the step, **who it is against**, and **its cost**. Never
+    /// `Continue` — a generic verb makes the user tap to find out what they
+    /// agreed to, and a bare `Play` hides the half of the decision that is
+    /// actually interesting.
     let title: String
     /// An optional second line, e.g. flagging a shorter alternative.
     let subtitle: String?
@@ -343,11 +400,21 @@ enum TodayPlanner {
         let currentStep = nextStep(for: progress, phase: phase)
 
         return TodayStep.allCases.map { step in
+            let target = progress.target(step)
             let status: StepStatus
-            if progress.isDone(step) {
-                status = .done
-            } else if let required = step.requires, !progress.isDone(required) {
+            // Locked is tested *before* done, and only while nothing has been
+            // done toward the step. Otherwise a zero target — the honest state
+            // after a game with nothing to review — would tick the moments row
+            // green tomorrow morning, before today's game has even been played.
+            // The second clause keeps the legitimate case working: moments
+            // reviewed today from a game played yesterday are done, not locked.
+            if let required = step.requires,
+                !progress.isDone(required),
+                progress.completed(step) == 0
+            {
                 status = .locked
+            } else if progress.isDone(step) {
+                status = .done
             } else if step == currentStep {
                 status = .current
             } else {
@@ -357,9 +424,10 @@ enum TodayPlanner {
             return StepRowState(
                 step: step,
                 status: status,
+                title: step.title(target: target),
                 tally: status == .locked
                     ? nil
-                    : .of(progress.completed(step), step.target),
+                    : .of(progress.completed(step), target),
                 lockedReason: status == .locked ? step.lockedReason : nil
             )
         }
@@ -394,35 +462,71 @@ enum TodayPlanner {
 
     // MARK: Copy
 
-    /// `Play 1 game · ~10 min`.
+    /// `Play Oscar · ~10 min`.
     ///
     /// Both halves are load-bearing. The verb and object say what happens; the
     /// duration is the price. A `Continue` gives neither, so the user has to
     /// spend the tap to find out — and after they have been surprised once,
     /// they stop tapping it when they are short on time.
-    static func actionTitle(for step: TodayStep, progress: DailyProgress, firstRun: Bool) -> String {
+    ///
+    /// - Parameter opponentName: who the next game is against. The object of
+    ///   `Play` is a person, not a quantity: `Play Oscar` is a concrete thing to
+    ///   agree to, and it is also the name the Play screen is about to put above
+    ///   the board. Nil is the honest fallback for a screen that could not find
+    ///   out who is next — a vaguer promise beats a wrong name.
+    static func actionTitle(
+        for step: TodayStep,
+        progress: DailyProgress,
+        firstRun: Bool,
+        opponentName: String? = nil
+    ) -> String {
         let remaining = progress.remaining(step)
-        let minutes = estimatedMinutes(for: step, remaining: remaining)
+        let minutes = estimatedMinutes(
+            for: step,
+            remaining: remaining,
+            target: progress.target(step)
+        )
 
         let phrase: String
         switch step {
         case .game:
-            phrase = firstRun ? "Play your first game" : "Play 1 game"
+            if let opponentName {
+                phrase = "Play \(opponentName)"
+            } else {
+                phrase = firstRun ? "Play your first game" : "Play 1 game"
+            }
         case .moments:
             phrase = "Review \(remaining) moment\(remaining == 1 ? "" : "s")"
         case .puzzles:
             phrase = "\(remaining) puzzle\(remaining == 1 ? "" : "s")"
         }
-        return "\(phrase) · ~\(minutes) min"
+        return priced(phrase, minutes: minutes)
+    }
+
+    /// The label for an extra game on a day that is already finished.
+    ///
+    /// Named like every other CTA — who, and how long — because the bordered
+    /// weight is already saying "optional" and the words do not have to say it a
+    /// second time. With nobody to name it falls back to describing the game.
+    static func extraGameTitle(opponentName: String?) -> String {
+        guard let opponentName else { return "Play a free game" }
+        return priced("Play \(opponentName)", minutes: TodayStep.game.estimatedMinutes)
+    }
+
+    /// Every CTA states its price in the same shape, so the number reads as the
+    /// same kind of promise wherever it appears.
+    private static func priced(_ phrase: String, minutes: Int) -> String {
+        "\(phrase) · ~\(minutes) min"
     }
 
     /// Cost scaled to what is actually left, never to the whole step.
     ///
     /// Telling someone with 8 of 10 puzzles done that it will take 4 minutes is
     /// a small lie, and small lies about time are how a daily habit loses trust.
-    static func estimatedMinutes(for step: TodayStep, remaining: Int) -> Int {
-        guard step.target > 0, remaining > 0 else { return step.estimatedMinutes }
-        let fraction = Double(remaining) / Double(step.target)
+    static func estimatedMinutes(for step: TodayStep, remaining: Int, target: Int? = nil) -> Int {
+        let target = target ?? step.target
+        guard target > 0, remaining > 0 else { return step.estimatedMinutes }
+        let fraction = Double(remaining) / Double(target)
         return max(1, Int((Double(step.estimatedMinutes) * fraction).rounded(.up)))
     }
 
@@ -430,7 +534,8 @@ enum TodayPlanner {
 
     static func actions(
         phase: TodayPhase,
-        progress: DailyProgress
+        progress: DailyProgress,
+        opponentName: String? = nil
     ) -> (primary: TodayAction, alternative: TodayAction?) {
 
         if phase == .complete {
@@ -440,7 +545,7 @@ enum TodayPlanner {
             // learned everywhere in the app.
             return (
                 TodayAction(
-                    title: "Play a free game",
+                    title: extraGameTitle(opponentName: opponentName),
                     subtitle: nil,
                     destination: .play,
                     emphasis: .secondary,
@@ -456,13 +561,22 @@ enum TodayPlanner {
 
         guard let next = nextStep(for: progress, phase: phase) else {
             return (
-                TodayAction(title: "Play a free game", destination: .play, emphasis: .secondary),
+                TodayAction(
+                    title: extraGameTitle(opponentName: opponentName),
+                    destination: .play,
+                    emphasis: .secondary
+                ),
                 nil
             )
         }
 
         let primary = TodayAction(
-            title: actionTitle(for: next, progress: progress, firstRun: phase == .firstRun),
+            title: actionTitle(
+                for: next,
+                progress: progress,
+                firstRun: phase == .firstRun,
+                opponentName: opponentName
+            ),
             subtitle: nil,
             destination: next.destination,
             emphasis: .primary,
@@ -475,13 +589,23 @@ enum TodayPlanner {
         let shortest = unblockedSteps(for: progress)
             .filter { $0 != next }
             .min { lhs, rhs in
-                estimatedMinutes(for: lhs, remaining: progress.remaining(lhs))
-                    < estimatedMinutes(for: rhs, remaining: progress.remaining(rhs))
+                estimatedMinutes(
+                    for: lhs, remaining: progress.remaining(lhs), target: progress.target(lhs)
+                )
+                    < estimatedMinutes(
+                        for: rhs, remaining: progress.remaining(rhs), target: progress.target(rhs)
+                    )
             }
 
         let alternative = shortest.map { step in
             TodayAction(
-                title: "Short on time? " + actionTitle(for: step, progress: progress, firstRun: false),
+                title: "Short on time? "
+                    + actionTitle(
+                        for: step,
+                        progress: progress,
+                        firstRun: false,
+                        opponentName: opponentName
+                    ),
                 destination: step.destination,
                 emphasis: .tertiary,
                 step: step
@@ -493,13 +617,17 @@ enum TodayPlanner {
 
     // MARK: Plan
 
+    /// - Parameter opponentName: who the next sparring game is against, so the
+    ///   CTA can name them. Nil when nothing could be read — the copy degrades
+    ///   to naming the step instead of the person rather than guessing.
     static func plan(
         progress: DailyProgress,
         hasHistory: Bool,
-        streakBroken: Bool
+        streakBroken: Bool,
+        opponentName: String? = nil
     ) -> TodayPlan {
         let phase = phase(today: progress, hasHistory: hasHistory, streakBroken: streakBroken)
-        let actions = actions(phase: phase, progress: progress)
+        let actions = actions(phase: phase, progress: progress, opponentName: opponentName)
 
         return TodayPlan(
             phase: phase,

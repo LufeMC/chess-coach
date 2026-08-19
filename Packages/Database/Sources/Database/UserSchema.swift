@@ -45,6 +45,15 @@ public struct Game: Hashable, Identifiable, Sendable {
     public var userAccuracy: Double?
     public var analysisState: String
     public var isRated: Bool
+    /// The game contained a level-2 assisted retry: the coach showed the move
+    /// and the user took the blunder back.
+    ///
+    /// Stored rather than derived because nothing else in a finished game
+    /// records that it happened, and the rating ladder treats such a game as
+    /// unrated — the result is partly the coach's. A rating recomputed from
+    /// history without this column would disagree with the rating that was
+    /// actually applied.
+    public var usedAssistedRetry: Bool
 
     public init(
         id: UUID = UUID(),
@@ -59,7 +68,8 @@ public struct Game: Hashable, Identifiable, Sendable {
         pgn: String = "",
         userAccuracy: Double? = nil,
         analysisState: String = AnalysisState.pending.rawValue,
-        isRated: Bool = true
+        isRated: Bool = true,
+        usedAssistedRetry: Bool = false
     ) {
         self.id = id
         self.startedAt = startedAt
@@ -74,6 +84,7 @@ public struct Game: Hashable, Identifiable, Sendable {
         self.userAccuracy = userAccuracy
         self.analysisState = analysisState
         self.isRated = isRated
+        self.usedAssistedRetry = usedAssistedRetry
     }
 }
 
@@ -91,7 +102,8 @@ extension Game {
         pgn: String = "",
         userAccuracy: Double? = nil,
         analysisState: AnalysisState = .pending,
-        isRated: Bool = true
+        isRated: Bool = true,
+        usedAssistedRetry: Bool = false
     ) {
         self.init(
             id: id,
@@ -106,7 +118,8 @@ extension Game {
             pgn: pgn,
             userAccuracy: userAccuracy,
             analysisState: analysisState.rawValue,
-            isRated: isRated
+            isRated: isRated,
+            usedAssistedRetry: usedAssistedRetry
         )
     }
 
@@ -133,6 +146,29 @@ public struct GameMove: Hashable, Identifiable, Sendable {
     public var winPctBefore: Double?
     public var winPctAfter: Double?
     public var thinkTimeMs: Int
+    /// Lichess move accuracy (0...100), user moves only.
+    ///
+    /// Recomputable from the two win percentages, and stored anyway: the formula
+    /// is only correct when both of them are mover-relative, so every reader that
+    /// re-derived it would have to re-derive that contract too. The game accuracy
+    /// in ``Game/userAccuracy`` is built from these, and a review screen that
+    /// wants a per-move number should not have to re-open the analysis layer to
+    /// get one.
+    public var accuracy: Double?
+    /// Raw value of the `TrainingCore.Habit` a guided-mode prompt asked about
+    /// immediately before this move, or `nil` when the player was not interrupted.
+    ///
+    /// Nothing else records that a prompt happened: the pause is long over by the
+    /// time the game is written. It matters afterwards because erring right after
+    /// being asked about that exact idea is independent evidence the lesson has
+    /// not landed, which is what the moment scorer weights.
+    public var guidedPromptHabit: String?
+    /// Whether the move that followed the prompt counted as answering it.
+    ///
+    /// Stored with the habit rather than left for a later migration: the
+    /// curriculum gates on a *hit rate*, so a stretch of games carrying prompts
+    /// with no verdict would be indistinguishable from a stretch of misses.
+    public var guidedPromptHit: Bool?
 
     public init(
         id: UUID = UUID(),
@@ -143,7 +179,10 @@ public struct GameMove: Hashable, Identifiable, Sendable {
         classification: String? = nil,
         winPctBefore: Double? = nil,
         winPctAfter: Double? = nil,
-        thinkTimeMs: Int = 0
+        thinkTimeMs: Int = 0,
+        accuracy: Double? = nil,
+        guidedPromptHabit: String? = nil,
+        guidedPromptHit: Bool? = nil
     ) {
         self.id = id
         self.gameID = gameID
@@ -154,6 +193,9 @@ public struct GameMove: Hashable, Identifiable, Sendable {
         self.winPctBefore = winPctBefore
         self.winPctAfter = winPctAfter
         self.thinkTimeMs = thinkTimeMs
+        self.accuracy = accuracy
+        self.guidedPromptHabit = guidedPromptHabit
+        self.guidedPromptHit = guidedPromptHit
     }
 }
 
@@ -186,6 +228,37 @@ public struct Moment: Hashable, Identifiable, Sendable {
     public var coachText: String?
     public var status: String
     public var createdAt: Date
+    /// The whole analysis moment, as JSON.
+    ///
+    /// The columns above are a *projection*: enough to list, sort and filter
+    /// moments, and nothing more. A moment also carries its principal variation,
+    /// the refutation of the move played, an alternative line, theme tags, win
+    /// percentages and a judgment — and a review screen that cannot show the
+    /// refutation line is not a review screen. Modelling each of those as a column
+    /// would mean a CloudKit-visible migration every time the coaching taxonomy
+    /// gains a field, so the producing layer writes the complete value here
+    /// instead, exactly as ``Game/opponentParams`` does for opponent tuning.
+    ///
+    /// Opaque to this package on purpose — the vocabulary belongs to the analysis
+    /// layer. Empty for a row written before the column existed, and
+    /// ``decodePayload(as:)`` answers `nil` rather than throwing when a payload
+    /// from a newer build cannot be decoded, so the worst case is a review that
+    /// falls back to the flat columns rather than a moment that will not open.
+    ///
+    /// One blob rather than a dozen columns is also the right *sync* shape: a
+    /// moment is produced atomically by one analysis pass, and per-column
+    /// last-write-wins across two devices could otherwise stitch half of one pass
+    /// onto half of another and call the result a moment.
+    public var payload: String
+    /// Whether this moment earned a spaced-repetition card.
+    ///
+    /// A real column rather than a field inside ``payload`` because it is a query
+    /// predicate: the scheduler asks "which moments can become cards" and must not
+    /// have to decode every moment ever recorded to find out. It is also not
+    /// recoverable from the other columns — eligibility is decided from the
+    /// solution length, the criticality gap and the cause tag, and two of those
+    /// three are gone by the time a card comes due.
+    public var srsEligible: Bool
 
     public init(
         id: UUID = UUID(),
@@ -204,7 +277,9 @@ public struct Moment: Hashable, Identifiable, Sendable {
         score: Double,
         coachText: String? = nil,
         status: String = MomentStatus.new.rawValue,
-        createdAt: Date = Date()
+        createdAt: Date = Date(),
+        payload: String = "",
+        srsEligible: Bool = false
     ) {
         self.id = id
         self.gameID = gameID
@@ -223,6 +298,8 @@ public struct Moment: Hashable, Identifiable, Sendable {
         self.coachText = coachText
         self.status = status
         self.createdAt = createdAt
+        self.payload = payload
+        self.srsEligible = srsEligible
     }
 }
 
@@ -244,6 +321,35 @@ extension Moment {
             let data = try? JSONEncoder().encode(modifiers),
             let json = String(data: data, encoding: .utf8)
         else { return "[]" }
+        return json
+    }
+
+    /// Decodes ``payload`` back into whatever value produced it.
+    ///
+    /// Generic because this package must not know the analysis vocabulary — see
+    /// ``payload``. `nil` covers every way the detail can be unavailable (no
+    /// payload, malformed JSON, a shape written by a build that knows a tag this
+    /// one does not), and they all have the same answer at the call site: show
+    /// what the flat columns say.
+    public func decodePayload<T: Decodable>(as type: T.Type = T.self) -> T? {
+        guard !payload.isEmpty, let data = payload.data(using: .utf8) else { return nil }
+        return try? JSONDecoder().decode(T.self, from: data)
+    }
+
+    /// Encodes a value for ``payload``, or `""` if it cannot be encoded — a
+    /// moment with no detail is still worth storing.
+    ///
+    /// Keys are sorted so that re-running analysis over an unchanged game
+    /// produces a byte-identical blob. Without that, every re-analysis would look
+    /// like an edit to the sync engine and push a record for a moment nothing
+    /// about had actually changed.
+    public static func encodePayload(_ value: some Encodable) -> String {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys]
+        guard
+            let data = try? encoder.encode(value),
+            let json = String(data: data, encoding: .utf8)
+        else { return "" }
         return json
     }
 }
@@ -379,6 +485,66 @@ public struct SkillMetric: Hashable, Identifiable, Sendable {
     }
 }
 
+// MARK: - MetricSample
+
+/// One observation of a metric, kept forever.
+///
+/// ``SkillMetric`` answers "what is it *now*": one row per `(key, window)`, and
+/// every write destroys the number it replaces. That is the right shape for a
+/// curriculum gate, which only ever asks whether the current value clears a
+/// threshold, and the wrong shape for the one thing this app exists to show —
+/// a rating moving over a year. The two cannot share a row, so history gets its
+/// own table.
+///
+/// Append-only. Rows are inserted, never edited, and the only deletion is the
+/// duplicate convergence in `MetricsRepository.recordSample`.
+///
+/// Keyed by the same `(key, window)` vocabulary as ``SkillMetric`` rather than
+/// by a column per plotted quantity, for the reason given there: a `ratings`
+/// table with a `puzzleRating` column would need a CloudKit-visible migration
+/// every time the chart learned to plot something new.
+@Table("metricSamples")
+public struct MetricSample: Hashable, Identifiable, Sendable {
+    public var id: UUID
+    /// Matches ``SkillMetric/key``, e.g. `"ladder.rating"`.
+    public var key: String
+    /// Matches ``SkillMetric/window``, e.g. `"allTime"`.
+    public var window: String
+    /// `"YYYY-MM-DD"` in the user's local calendar, formatted by
+    /// ``DailyLoop/dayKey(for:calendar:)``.
+    ///
+    /// The coalescing bucket, and the reason opening Profile fifty times in an
+    /// afternoon does not write fifty identical points. Stored rather than
+    /// derived from ``recordedAt`` on read, so the de-duplicating lookup hits an
+    /// index instead of scanning every sample ever taken, and so the bucket a
+    /// row was filed under cannot move when the device changes time zone.
+    public var day: String
+    public var value: Double
+    /// When the value this row records was measured.
+    ///
+    /// Not "when the row was written". A rating that moved is stamped with the
+    /// end of the game that moved it, which is the only timestamp that puts the
+    /// point on the day the user remembers playing rather than on the day they
+    /// next opened the app.
+    public var recordedAt: Date
+
+    public init(
+        id: UUID = UUID(),
+        key: String,
+        window: String,
+        day: String,
+        value: Double,
+        recordedAt: Date = Date()
+    ) {
+        self.id = id
+        self.key = key
+        self.window = window
+        self.day = day
+        self.value = value
+        self.recordedAt = recordedAt
+    }
+}
+
 // MARK: - DailyLoop
 
 /// One day's progress through the train/play/review loop.
@@ -434,6 +600,13 @@ public struct AppSettings: Hashable, Identifiable, Sendable {
     /// do exactly the right thing: the most recently changed setting wins,
     /// field by field.
     public var id: UUID
+    /// Read by nothing.
+    ///
+    /// Coaching notes are derived on this device from analysis the app has
+    /// already run, so there is no model to choose and no thinking budget to
+    /// spend. The columns stay because this row syncs: dropping a column is a
+    /// schema change every device has to agree on before it can read the row
+    /// again, and two unread strings are cheaper than that agreement.
     public var claudeModel: String
     public var effort: String
     public var boardTheme: String
@@ -454,7 +627,7 @@ public struct AppSettings: Hashable, Identifiable, Sendable {
         claudeModel: String = "claude-opus-5",
         effort: String = "medium",
         boardTheme: String = "classic",
-        pieceSet: String = "cburnett",
+        pieceSet: String = "staunty",
         soundOn: Bool = true,
         hapticsOn: Bool = true,
         userRating: Double = 1100,
@@ -555,5 +728,35 @@ public struct DeviceCalibration: Hashable, Identifiable, Sendable {
         self.threads = threads
         self.hashMB = hashMB
         self.calibratedAt = calibratedAt
+    }
+}
+
+
+// MARK: - Calibration draft
+
+/// A calibration that has been started but not finished.
+///
+/// Exactly one row, keyed by ``singletonID``, deleted the moment calibration
+/// completes — so this table is empty for all but the first few minutes of the
+/// app's life. The measurement itself lives in ``payload`` as an opaque blob
+/// written and read by the calibration flow: its shape changes whenever that
+/// flow changes, and a column per field would mean a migration each time.
+@Table("calibrationDrafts")
+public struct CalibrationDraft: Hashable, Identifiable, Sendable {
+    public var id: UUID
+    /// JSON, owned entirely by the calibration flow.
+    public var payload: String
+    public var updatedAt: Date
+
+    public static let singletonID = UUID(uuidString: "00000000-0000-0000-0000-000000000002")!
+
+    public init(
+        id: UUID = CalibrationDraft.singletonID,
+        payload: String,
+        updatedAt: Date = Date()
+    ) {
+        self.id = id
+        self.payload = payload
+        self.updatedAt = updatedAt
     }
 }

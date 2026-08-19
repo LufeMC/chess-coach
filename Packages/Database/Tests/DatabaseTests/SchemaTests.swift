@@ -47,6 +47,177 @@ struct SchemaTests {
         #expect(firstSchema == secondSchema)
         #expect(firstApplied == secondApplied)
         #expect(secondApplied.contains("v1.createUserSchema"))
+        #expect(secondApplied.contains("v2.analysisDetail"))
+        #expect(secondApplied.contains("v3.ladderAssistedRetry"))
+        #expect(secondApplied.contains("v4.metricSampleHistory"))
+    }
+
+    @Test("v2 adds columns to an existing v1 database without touching its rows")
+    func v2IsAdditive() throws {
+        // The whole argument for v2 existing at all (see `addAnalysisDetail`):
+        // databases created before it exist locally, the migrator will never
+        // re-run v1 on them, and they must end up with the new columns anyway.
+        var configuration = Configuration()
+        configuration.foreignKeysEnabled = true
+        let queue = try DatabaseQueue(configuration: configuration)
+        try UserDatabase.migrator.migrate(queue, upTo: "v1.createUserSchema")
+
+        // Written as raw SQL, not through the repositories: the record types now
+        // name columns a v1 database does not have, which is the entire failure
+        // mode this migration exists to avoid.
+        let database = UserDatabase(writer: queue)
+        let game = Game(mode: .sparring, userColor: .white, opponentRating: 1200)
+        let gameKey = game.id.uuidString.lowercased()
+        try queue.write { db in
+            try #sql(
+                """
+                INSERT INTO "games" ("id", "mode", "userColor", "opponentRating")
+                VALUES (\(bind: gameKey), 'sparring', 'white', 1200)
+                """
+            )
+            .execute(db)
+            try #sql(
+                """
+                INSERT INTO "gameMoves" ("gameID", "ply", "san", "uci")
+                VALUES (\(bind: gameKey), 1, 'e4', 'e2e4')
+                """
+            )
+            .execute(db)
+            try #sql(
+                """
+                INSERT INTO "moments" ("gameID", "ply", "kind", "causeTag", "stepTag")
+                VALUES (\(bind: gameKey), 4, 'blunder', 'missedFork', 'S5')
+                """
+            )
+            .execute(db)
+        }
+
+        try UserDatabase.migrator.migrate(queue)
+
+        // The pre-existing rows are still there, now carrying the defaults.
+        let moment = try #require(try database.moments.moments(forGame: game.id).first)
+        #expect(moment.ply == 4)
+        #expect(moment.payload.isEmpty)
+        #expect(!moment.srsEligible)
+
+        let move = try #require(try database.games.moves(forGame: game.id).first)
+        #expect(move.san == "e4")
+        #expect(move.accuracy == nil)
+        #expect(move.guidedPromptHabit == nil)
+        #expect(move.guidedPromptHit == nil)
+
+        // And the widened schema is still writable end to end.
+        try database.moments.insert([
+            Moment(
+                gameID: game.id,
+                ply: 6,
+                fen: "startpos",
+                kind: "mistake",
+                causeTag: "hungMovedPiece",
+                stepTag: "S5",
+                playedSAN: "Nf6",
+                playedUCI: "g8f6",
+                bestSAN: "Nc6",
+                bestUCI: "b8c6",
+                deltaEP: 0.4,
+                score: 0.9,
+                payload: #"{"ply":6}"#,
+                srsEligible: true
+            )
+        ])
+        #expect(try database.moments.srsEligible().count == 1)
+    }
+
+    @Test("v4 adds the sample history to a v3 database without touching its rows")
+    func v4IsAdditive() throws {
+        // Same argument as v2: a v3 database exists on every device that has
+        // run this app, the migrator will never re-run v1 there, and the chart
+        // has to start working on it anyway.
+        var configuration = Configuration()
+        configuration.foreignKeysEnabled = true
+        let queue = try DatabaseQueue(configuration: configuration)
+        try UserDatabase.migrator.migrate(queue, upTo: "v3.ladderAssistedRetry")
+
+        // Written through the repository rather than as raw SQL, unlike the v2
+        // test: v4 adds a table and changes no existing column, so `SkillMetric`
+        // still describes a v3 `skillMetrics` exactly.
+        let database = UserDatabase(writer: queue)
+        let measuredAt = Date(timeIntervalSince1970: 1_784_980_800)
+        try database.metrics.upsert(
+            key: "ladder.rating",
+            window: "allTime",
+            value: 1187.5,
+            sampleCount: 1,
+            updatedAt: measuredAt
+        )
+        #expect(try Self.tableExists(queue, "metricSamples") == false)
+
+        try UserDatabase.migrator.migrate(queue)
+
+        // The pre-existing metric is untouched — the history is beside it, not
+        // instead of it.
+        let metric = try #require(
+            try database.metrics.metric(key: "ladder.rating", window: "allTime")
+        )
+        #expect(metric.value == 1187.5)
+        #expect(metric.sampleCount == 1)
+
+        // And the new table is writable end to end.
+        try database.metrics.recordSample(
+            key: "ladder.rating",
+            window: "allTime",
+            value: 1187.5,
+            measuredAt: measuredAt,
+            now: measuredAt
+        )
+        let samples = try database.metrics.samples(key: "ladder.rating", window: "allTime")
+        #expect(samples.map(\.value) == [1187.5])
+    }
+
+    @Test("The sample history accepts an explicit NULL from an older peer")
+    func metricSampleColumnsFallBackToDefaults() throws {
+        // Every NOT NULL column on a synced table has to survive the sync
+        // engine writing NULL for a column the sending build never had.
+        let database = try UserDatabase.inMemory()
+        let stored = try database.writer.write { db in
+            try #sql(
+                """
+                INSERT INTO "metricSamples" ("key", "window", "day", "value")
+                VALUES ('ladder.rating', 'allTime', NULL, NULL)
+                RETURNING "day", "value"
+                """,
+                as: (String, Double).self
+            )
+            .fetchOne(db)
+        }
+        let (day, value) = try #require(stored)
+        #expect(day.isEmpty)
+        #expect(value == 0)
+    }
+
+    @Test("The columns added in v2 accept an explicit NULL from an older peer")
+    func v2ColumnsFallBackToDefaults() throws {
+        // Same contract as the v1 columns: the sync engine writes NULL for
+        // anything the sending build did not know about, and NOT NULL columns
+        // have to land on their default rather than reject the record.
+        let database = try UserDatabase.inMemory()
+        let game = Game(mode: .sparring, userColor: .white, opponentRating: 1200)
+        try database.games.insert(game)
+
+        let stored = try database.writer.write { db in
+            try #sql(
+                """
+                INSERT INTO "moments" ("gameID", "ply", "payload", "srsEligible")
+                VALUES (\(bind: game.id.uuidString.lowercased()), 9, NULL, NULL)
+                RETURNING "payload", "srsEligible"
+                """,
+                as: (String, Int).self
+            )
+            .fetchOne(db)
+        }
+        let (payload, eligible) = try #require(stored)
+        #expect(payload.isEmpty)
+        #expect(eligible == 0)
     }
 
     @Test("Migration reports itself complete")
@@ -317,6 +488,20 @@ struct SchemaTests {
     }
 
     // MARK: - Helpers
+
+    private static func tableExists(_ writer: any DatabaseWriter, _ table: String) throws -> Bool {
+        try writer.read { db in
+            let count = try #sql(
+                """
+                SELECT count(*) FROM "sqlite_master"
+                WHERE "type" = 'table' AND "name" = \(bind: table)
+                """,
+                as: Int.self
+            )
+            .fetchOne(db)
+            return (count ?? 0) > 0
+        }
+    }
 
     /// Canonical form of the schema, used to prove a re-run changed nothing.
     private static func schemaFingerprint(_ writer: any DatabaseWriter) throws -> [String] {

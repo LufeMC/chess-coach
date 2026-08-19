@@ -215,7 +215,7 @@ struct TodayStepRow: View {
             glyph
                 .frame(width: 22, height: 22)
 
-            Text(state.step.title)
+            Text(state.title)
                 // Completed rows shift to secondary and keep the check filled.
                 // No strikethrough: a line through finished work reads as
                 // cancellation, which is the opposite of what happened.

@@ -152,6 +152,82 @@ struct MomentBuilderTests {
         #expect(context.accuracy >= 0)
     }
 
+    /// Several detectors can fire on a move the player got *right*: a piece can
+    /// sit en prise behind a refutation the opponent never plays, and an exact
+    /// endgame result can change under the engine's own first choice. The cause
+    /// tagger has no vocabulary for "this was good", so it answers with an error
+    /// label — which must not reach a moment the review screen captions as
+    /// praise, or the coach that writes the copy from it.
+    @Test("A reinforcement never carries a mistake's diagnosis")
+    func reinforcementIsNotDiagnosed() throws {
+        let context = try Fixture.context(
+            fen: "r3k3/8/8/1N6/8/8/8/4K3 w - - 0 1",
+            played: "b5c7",
+            best: ["b5c7", "e8e7", "c7a8"],
+            bestScore: .centipawns(400),
+            refutationScore: .centipawns(-400),
+            thinkTimeMs: 1_000,
+            criticality: CriticalityResult(isCritical: true, gap: 0.2, suppressedBy: nil)
+        )
+        #expect(MomentBuilder.isReinforcementCandidate(context))
+
+        let diagnosis = Mistake(
+            causeTag: .hungMovedPiece,
+            stepTag: .s5BlunderCheck,
+            modifiers: [MistakeModifier.impulse.rawValue, MistakeModifier.clockPressure.rawValue],
+            secondaryTags: ["openingPrinciple.delayedCastling"],
+            severity: 0.4
+        )
+
+        let praise = MomentBuilder.make(
+            context: context,
+            findings: [],
+            mistake: diagnosis,
+            kind: .reinforcement
+        )
+        #expect(praise.causeTag == .generic)
+        #expect(praise.stepTag == .s3Candidates)
+        #expect(praise.secondaryTags.isEmpty)
+        // Finding the move with seconds left is part of the praise. "Impulse" is
+        // a verdict on an error and has no business on one.
+        #expect(praise.modifiers == [MistakeModifier.clockPressure.rawValue])
+        #expect(praise.srsEligible == false)
+
+        // The identical inputs judged as a mistake keep the whole diagnosis.
+        let mistake = MomentBuilder.make(
+            context: context,
+            findings: [],
+            mistake: diagnosis,
+            kind: .mistake
+        )
+        #expect(mistake.causeTag == .hungMovedPiece)
+        #expect(mistake.stepTag == .s5BlunderCheck)
+        #expect(mistake.secondaryTags == ["openingPrinciple.delayedCastling"])
+    }
+
+    /// Relevance is scored from the tag the moment actually carries, so praise
+    /// cannot borrow the weekly-focus weighting of an error label it does not
+    /// have — which would let it outrank the mistakes it is supposed to yield to.
+    @Test("A reinforcement does not inherit the focus weighting of a cause it dropped")
+    func reinforcementRelevanceIsNeutral() throws {
+        let context = try Fixture.context(
+            fen: "r3k3/8/8/1N6/8/8/8/4K3 w - - 0 1",
+            played: "b5c7",
+            best: ["b5c7", "e8e7", "c7a8"],
+            bestScore: .centipawns(400),
+            refutationScore: .centipawns(-400),
+            criticality: CriticalityResult(isCritical: true, gap: 0.2, suppressedBy: nil)
+        )
+        let moment = MomentBuilder.make(
+            context: context,
+            findings: [],
+            mistake: Mistake(causeTag: .hungMovedPiece, stepTag: .s5BlunderCheck, severity: 0.4),
+            policy: MomentPolicy(weeklyFocusTags: [.hungMovedPiece]),
+            kind: .reinforcement
+        )
+        #expect(moment.score.relevance == 1.0)
+    }
+
     @Test("Knowledge-shaped and vague causes do not become flashcards")
     func srsEligibility() {
         let drillable = Mistake(causeTag: .hungMovedPiece, stepTag: .s5BlunderCheck, severity: 0.3)

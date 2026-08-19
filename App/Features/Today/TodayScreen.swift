@@ -16,8 +16,9 @@ import SwiftUI
 /// recognises where they are, and the rung card and the week strip are still
 /// exactly where they left them.
 ///
-/// One filled button, and it names the next incomplete step and its cost rather
-/// than offering a menu. The three steps are status, not buttons.
+/// One filled button, and it names the next incomplete step, who it is against,
+/// and what it costs, rather than offering a menu. The three steps are status,
+/// not buttons.
 struct TodayScreen: View {
 
     @Environment(AppModel.self) private var model
@@ -206,7 +207,11 @@ private struct TodayPreview: View {
         let plan = TodayPlanner.plan(
             progress: progress,
             hasHistory: hasHistory,
-            streakBroken: streakBroken
+            streakBroken: streakBroken,
+            // Named, because the un-named copy is the fallback for a screen that
+            // could not read one — previewing it would be previewing the
+            // degraded state and calling it the design.
+            opponentName: "Oscar"
         )
 
         ScrollView {

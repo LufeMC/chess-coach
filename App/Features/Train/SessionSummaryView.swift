@@ -15,9 +15,16 @@ import SwiftUI
 ///
 /// The `Missed` section sits *below* the action deliberately: it is material to
 /// come back to, not a gate on leaving. The heading carries the semantic colour
-/// and the chips stay neutral — a list where every chip is orange is a list of
+/// and the chips stay neutral — a list where every chip is amber is a list of
 /// accusations, and the design conventions call that out by name (a badge on
 /// 100% of rows conveys tone, not data).
+///
+/// The rating row is **not tinted**. A signed monospaced `+12` already says
+/// which way it went, and the two tokens that could carry it are both spoken
+/// for: green is the eval bar's "advantage gained" and amber is "note this",
+/// neither of which is what a session's rating delta means. The direction is
+/// encoded in the row's glyph instead, which is also the rule about never
+/// encoding with colour alone, applied honestly rather than in reverse.
 struct SessionSummaryView: View {
 
     let progress: SessionProgress
@@ -34,20 +41,13 @@ struct SessionSummaryView: View {
                     Divider().padding(.leading, 34)
                     SummaryRow(symbol: "clock", label: "Time", value: progress.timeLabel)
                     Divider().padding(.leading, 34)
-                    SummaryRow(
-                        symbol: "chart.line.uptrend.xyaxis",
-                        label: "Rating",
-                        value: progress.ratingLabel,
-                        valueTint: ratingTint
-                    )
+                    SummaryRow(symbol: ratingSymbol, label: "Rating", value: progress.ratingLabel)
                 }
+                .padding(.horizontal, 16)
+                .elevation(.raised, cornerRadius: CornerRadius.card)
 
-                Button(action: onContinue) {
-                    Text("Continue")
-                        .frame(maxWidth: .infinity)
-                }
-                .buttonStyle(.borderedProminent)
-                .controlSize(.large)
+                Button("Continue", action: onContinue)
+                    .buttonStyle(.primaryAction)
 
                 if !missed.isEmpty {
                     missedSection
@@ -57,24 +57,25 @@ struct SessionSummaryView: View {
             .padding(.top, 12)
             .padding(.bottom, 24)
         }
+        .background(Palette.surfaceGround.dynamic.ignoresSafeArea())
         .navigationTitle("Session")
         #if os(iOS)
             .navigationBarTitleDisplayMode(.inline)
         #endif
     }
 
-    private var ratingTint: Color? {
-        if progress.ratingDelta > 0 { return .green }
-        if progress.ratingDelta < 0 { return .orange }
-        return nil
+    private var ratingSymbol: String {
+        if progress.ratingDelta > 0 { return "arrow.up.right" }
+        if progress.ratingDelta < 0 { return "arrow.down.right" }
+        return "equal"
     }
 
     private var missedSection: some View {
         VStack(alignment: .leading, spacing: 10) {
             Text("Missed")
-                .font(.subheadline.weight(.semibold))
+                .typeRole(.label, appliesForeground: false)
                 // The heading is the only coloured thing here.
-                .foregroundStyle(.orange)
+                .foregroundStyle(Palette.caution.dynamic)
 
             FlowChips(items: missed)
         }
@@ -87,23 +88,21 @@ private struct SummaryRow: View {
     let symbol: String
     let label: String
     let value: String
-    var valueTint: Color?
 
     var body: some View {
         HStack(spacing: 10) {
             Image(systemName: symbol)
-                .font(.footnote)
+                .typeRole(.caption, appliesForeground: false)
                 .foregroundStyle(.secondary)
                 .frame(width: 24, alignment: .leading)
 
             Text(label)
-                .font(.body)
+                .typeRole(.body)
 
             Spacer(minLength: 12)
 
             Text(value)
-                .font(.body.monospacedDigit())
-                .foregroundStyle(valueTint ?? .primary)
+                .typeRole(.body, monospacedDigits: true)
         }
         .padding(.vertical, 11)
     }
@@ -121,11 +120,11 @@ private struct FlowChips: View {
         FlowLayout(spacing: 8) {
             ForEach(items) { item in
                 Text(item.concept)
-                    .font(.footnote)
+                    .typeRole(.caption, appliesForeground: false)
                     .foregroundStyle(.primary)
                     .padding(.horizontal, 10)
                     .padding(.vertical, 6)
-                    .background(Capsule().fill(.quaternary))
+                    .background(Capsule().fill(Palette.surfaceSunken.dynamic))
             }
         }
     }

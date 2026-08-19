@@ -59,19 +59,44 @@ private struct PhoneRootView: View {
     var body: some View {
         @Bindable var model = model
 
-        TabView {
-            Tab("Today", systemImage: "target") {
-                NavigationStack { TodayScreen() }
+        TabView(selection: $model.selectedTab) {
+            Tab("Today", systemImage: "target", value: AppModel.Tab.today) {
+                NavigationStack(path: $model.todayPath) {
+                    TodayScreen()
+                        .navigationDestination(for: AppModel.Route.self) { route in
+                            destination(for: route)
+                        }
+                }
             }
-            Tab("Play", systemImage: "play.circle") {
+            Tab("Play", systemImage: "play.circle", value: AppModel.Tab.play) {
                 NavigationStack { PlayScreen() }
             }
-            Tab("Train", systemImage: "square.grid.3x3") {
+            Tab("Train", systemImage: "square.grid.3x3", value: AppModel.Tab.train) {
                 NavigationStack { TrainHomeScreen() }
             }
-            Tab("Profile", systemImage: "chart.line.uptrend.xyaxis") {
+            Tab("Profile", systemImage: "chart.line.uptrend.xyaxis", value: AppModel.Tab.profile) {
                 NavigationStack { ProfileView() }
             }
+        }
+    }
+
+    /// The Today stack's push targets.
+    ///
+    /// Only routes that are genuinely *pushes* appear here — tab roots are
+    /// handled by `AppModel.navigate(to:)` changing the selection instead.
+    @ViewBuilder
+    private func destination(for route: AppModel.Route) -> some View {
+        switch route {
+        case .review(let gameID):
+            ReviewScreen(gameID: gameID)
+        case .moment(let gameID, let momentID):
+            ReviewScreen(gameID: gameID, focusMomentID: momentID)
+        case .settings:
+            SettingsScreen()
+        case .play, .train, .profile:
+            // Unreachable: these change the tab rather than pushing. Rendering
+            // nothing is better than a crash if a future deep link says otherwise.
+            EmptyView()
         }
     }
 }

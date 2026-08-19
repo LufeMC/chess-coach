@@ -16,7 +16,14 @@ import TrainingCore
 /// in cards, data in rows": the chart is a self-contained instrument and gets a
 /// card; the ladder and the leak table are data and sit in the open, separated
 /// by rules rather than boxed.
+///
+/// This is the screen that answers "is a year of this working", so it is the one
+/// screen allowed to spend words. The chart says what the number means in a
+/// sentence, and the leak table says what to do about it — both of which the
+/// user would otherwise have to infer from a shape.
 struct ProfileView: View {
+
+    @Environment(AppModel.self) private var appModel
 
     @State private var model = ProfileModel()
     @State private var selectedLeak: LeakRow?
@@ -34,7 +41,7 @@ struct ProfileView: View {
 
     private var content: some View {
         ScrollView {
-            VStack(alignment: .leading, spacing: 24) {
+            VStack(alignment: .leading, spacing: 28) {
                 RatingChartCard(model: model)
 
                 CurriculumLadderSection(
@@ -46,29 +53,44 @@ struct ProfileView: View {
                     leaks: model.snapshot.leaks,
                     windowGames: model.snapshot.leakWindowGames,
                     state: model.snapshot.leakState,
-                    onSelect: { selectedLeak = $0 }
+                    trends: model.leakTrends,
+                    onSelect: { selectedLeak = $0 },
+                    onTrain: { train($0) }
                 )
 
                 if let loadError = model.loadError {
                     Text(loadError)
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
+                        .typeRole(.caption)
                 }
             }
             .padding(.horizontal)
             .padding(.top, 8)
             .padding(.bottom, 32)
-            .animation(.snappy(duration: 0.22), value: model.snapshot.ladder.expandedRungID)
+            .animation(Motion.standard, value: model.snapshot.ladder.expandedRungID)
         }
+        .background(Palette.surfaceGround.dynamic.ignoresSafeArea())
         .navigationTitle("Profile")
         .navigationDestination(item: $selectedLeak) { leak in
             LeakDetailScreen(
                 leak: leak,
-                occurrences: model.snapshot.occurrences(for: leak.causeTag)
+                occurrences: model.snapshot.occurrences(for: leak.causeTag),
+                onTrain: { train(leak) }
             )
         }
         .task { await model.load() }
         .refreshable { await model.load() }
+    }
+
+    /// The diagnosis's one exit. Naming *where the user wants to go* and letting
+    /// `AppModel` decide how the app gets there is what keeps this screen from
+    /// knowing that training is a tab.
+    private func train(_ leak: LeakRow) {
+        selectedLeak = nil
+        // The leak's habit rides along, so the session that opens drills the
+        // thing the row just diagnosed. A row that only reached the queue's
+        // front page would leave the user to translate a cause tag into the
+        // right practice themselves, which is the whole job of this screen.
+        appModel.navigate(toTrain: leak.habit)
     }
 }
 
@@ -148,11 +170,11 @@ extension ProfileSnapshot {
             leakWindowGames: 40,
             leakState: .measured,
             occurrences: [
-                CauseTag.hungMovedPiece.rawValue: (0..<5).map { index in
+                CauseTag.hungMovedPiece.rawValue: (0..<9).map { index in
                     LeakOccurrence(
                         id: UUID(),
                         gameID: UUID(),
-                        playedAt: now.addingTimeInterval(-Double(index) * 3 * 86_400),
+                        playedAt: now.addingTimeInterval(-Double(index) * 9 * 86_400),
                         ply: 27 + index * 4,
                         playedSAN: "Nf3",
                         bestSAN: "Qe2",
@@ -180,13 +202,17 @@ extension ProfileSnapshot {
 }
 
 /// Preview shell that drives the same sections with an injected model.
+///
+/// Deliberately does not build an `AppModel`: constructing one boots services,
+/// and a preview that boots the engine is a preview that takes forty seconds to
+/// show a chart.
 private struct ProfilePreviewHost: View {
     @State var model: ProfileModel
     @State private var selectedLeak: LeakRow?
 
     var body: some View {
         ScrollView {
-            VStack(alignment: .leading, spacing: 24) {
+            VStack(alignment: .leading, spacing: 28) {
                 RatingChartCard(model: model)
                 CurriculumLadderSection(
                     state: model.snapshot.ladder,
@@ -196,12 +222,14 @@ private struct ProfilePreviewHost: View {
                     leaks: model.snapshot.leaks,
                     windowGames: model.snapshot.leakWindowGames,
                     state: model.snapshot.leakState,
+                    trends: model.leakTrends,
                     onSelect: { selectedLeak = $0 }
                 )
             }
             .padding(.horizontal)
             .padding(.vertical, 8)
         }
+        .background(Palette.surfaceGround.dynamic.ignoresSafeArea())
         .navigationTitle("Profile")
         .navigationDestination(item: $selectedLeak) { leak in
             LeakDetailScreen(leak: leak, occurrences: model.snapshot.occurrences(for: leak.causeTag))

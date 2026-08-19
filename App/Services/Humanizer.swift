@@ -32,12 +32,47 @@ struct Humanizer: Sendable {
 
         /// Calibration anchors. Values between anchors are interpolated, so the
         /// ladder is continuous rather than stepping at band boundaries.
+        ///
+        /// ## These are measured, and the measurement is in the repo
+        ///
+        /// `AppTests/HumanizerSelfPlay` plays adjacent anchors against each
+        /// other and inverts the score into an Elo gap. Run it before changing
+        /// anything here — see `Docs/humanizer-calibration.md`, which also
+        /// records how these numbers were got wrong twice.
+        ///
+        /// The short version, because it is the more useful warning: the first
+        /// two rounds of "calibration" were performed against a harness whose
+        /// game loop could not finish a game containing a pawn promotion, and
+        /// scored every such game as a draw. That biases against the stronger
+        /// profile, so the ladder measured far flatter than it was, and the
+        /// widening applied to "fix" the compression made a mildly over-spread
+        /// ladder wildly over-spread. The numbers below are the original values,
+        /// re-measured against the fixed harness and found to be close to right,
+        /// with only the top two anchors softened.
+        ///
+        /// ## What each lever is worth
+        ///
+        /// Measured, not assumed, and the reason the steps are uneven:
+        ///
+        /// - **Depth is steep.** Two extra plies plus a temperature cut was a
+        ///   clean sweep over 20 games — more than 800 Elo. Depth is the lever
+        ///   that models the calculation horizon, so it earns its place, but it
+        ///   cannot be stepped uniformly.
+        /// - **Temperature is the tractable one.** Halving it at a *fixed*
+        ///   depth measured +512 with no sweep, which makes it the lever to
+        ///   reach for when a step needs adjusting by a few hundred points.
+        /// - **MultiPV is a floor, not a dial.** The sampler can only pick from
+        ///   the lines the search returned, so a narrow list caps how badly a
+        ///   profile can play regardless of temperature.
         static let anchors: [Profile] = [
             Profile(rating: 800, depth: 5, temperature: 11.0, blunderProbability: 0.13, openingRandomPlies: 12, multiPV: 12),
             Profile(rating: 1200, depth: 8, temperature: 6.0, blunderProbability: 0.08, openingRandomPlies: 8, multiPV: 10),
             Profile(rating: 1600, depth: 11, temperature: 4.0, blunderProbability: 0.04, openingRandomPlies: 6, multiPV: 10),
-            Profile(rating: 2000, depth: 13, temperature: 2.0, blunderProbability: 0.02, openingRandomPlies: 4, multiPV: 8),
-            Profile(rating: 2200, depth: 16, temperature: 1.0, blunderProbability: 0.015, openingRandomPlies: 2, multiPV: 8),
+            // Softened from depth 13 / temperature 2.0: that step measured as a
+            // clean sweep over 1600, which is the one place the original ladder
+            // was genuinely wrong.
+            Profile(rating: 2000, depth: 12, temperature: 3.0, blunderProbability: 0.028, openingRandomPlies: 4, multiPV: 9),
+            Profile(rating: 2200, depth: 14, temperature: 2.2, blunderProbability: 0.020, openingRandomPlies: 2, multiPV: 8),
         ]
 
         /// Piecewise-linear interpolation between anchors, clamped at the ends.
@@ -90,10 +125,46 @@ struct Humanizer: Sendable {
         ply: Int,
         using rng: inout some RandomNumberGenerator
     ) -> Selection? {
-        let candidates = lines.filter { $0.bestMove != nil }
-        guard !candidates.isEmpty else { return nil }
+        let returned = lines.filter { $0.bestMove != nil }
+        guard !returned.isEmpty else { return nil }
+
+        // Lines the search reported as a forced loss are dropped before any
+        // sampling — the mirror of the mate rule below, and for the same
+        // reason. A line scored `mate(-n)` is one the opponent calculated all
+        // the way to being mated; no rating plays that on purpose. Keeping it
+        // in the pool made the loosest profile walk into mate on ~3.6% of the
+        // moves where one was on the list, which is not weak play, it is
+        // suicide. If *every* line loses by force the position is lost anyway,
+        // and the opponent picks among them normally rather than returning nil.
+        let survivable = returned.filter { line in
+            if case .mate(let moves) = line.score, moves <= 0 { return false }
+            return true
+        }
+        let candidates = survivable.isEmpty ? returned : survivable
         guard candidates.count > 1 else {
             return Selection(move: candidates[0].bestMove!, wasBlunderEvent: false, rankChosen: 1, candidateCount: 1)
+        }
+
+        // A forced mate the opponent has *already seen* is played, at every
+        // rating, and is not sampled over.
+        //
+        // This is the depth cap's philosophy taken seriously. The horizon is
+        // what makes a weak opponent miss things: at depth 3 a mate in 2 is at
+        // the very edge of what the search returns at all, so a weak profile
+        // misses most mates by never having them in this list. But when the
+        // mate *is* in the list, the model's claim is that the opponent
+        // calculated it — and there is no rating at which a player calculates a
+        // forced mate and then plays something else. Sampling it away would be
+        // exactly the alien noise this type exists to avoid, and it would also
+        // corrupt the training signal: a user who escapes a lost position
+        // because the opponent flipped a coin learns nothing they can repeat.
+        if let mate = shortestMate(in: candidates) {
+            return Selection(
+                move: candidates[mate].bestMove!,
+                wasBlunderEvent: false,
+                rankChosen: candidates[mate].multipv,
+                candidateCount: candidates.count
+            )
         }
 
         // Win% from the opponent's own perspective; engine scores are already
@@ -140,6 +211,22 @@ struct Humanizer: Sendable {
             rankChosen: candidates[last].multipv,
             candidateCount: candidates.count
         )
+    }
+
+    /// The index of the fastest forced mate among the candidates, if any.
+    ///
+    /// Shortest rather than first: the engine orders by score, and two mates of
+    /// different lengths both score as wins, so "first mate found" could pick a
+    /// mate in 5 over a mate in 1. Nobody who saw both plays the longer one.
+    private func shortestMate(in candidates: [UCIInfo]) -> Int? {
+        var best: (index: Int, moves: Int)?
+        for (index, line) in candidates.enumerated() {
+            guard case .mate(let moves) = line.score, moves > 0 else { continue }
+            if best == nil || moves < best!.moves {
+                best = (index, moves)
+            }
+        }
+        return best?.index
     }
 
     /// Lichess's centipawn-to-win-percentage curve, duplicated here rather than

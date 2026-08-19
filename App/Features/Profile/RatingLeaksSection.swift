@@ -9,34 +9,48 @@ import TrainingCore
 /// Where the user's rating is going.
 ///
 /// **Before changing anything here, read the rules at the top of
-/// `Logic/LeakPresentation.swift`.** In particular: there are no bars, there is
-/// no red, and there is no chip on every row. Each of those is a decision, not
-/// an omission — the section is a triage list ("this is where the points are"),
-/// and every one of those three additions turns it back into a scolding.
+/// `Logic/LeakPresentation.swift`.** In particular: there is no red, the bars
+/// are one hue fading by rank, and there is no chip on every row. Each of those
+/// is a decision, not an omission — the section is a triage list ("this is where
+/// the points are"), and every one of those additions turns it back into a
+/// scolding.
 ///
-/// Row geometry follows Oura's Contributors list: name and chip on the first
-/// line, the measurement on the second, a chevron on the right, and a hairline
-/// rule beneath whose *width* — never its colour — carries magnitude.
+/// ## Shape
+///
+/// A reading, then the evidence for it. The block on top says how much is going
+/// out and whether it is going out through one hole or several; the rows below
+/// rank the holes. Row geometry follows Eight Sleep's score contributors: name
+/// and chip, a line of plain English saying what the cause actually is, the
+/// measurement on the right, and a bar underneath whose length — never its hue —
+/// carries magnitude.
 struct RatingLeaksSection: View {
 
     let leaks: [LeakRow]
     let windowGames: Int
     let state: ProfileMeasurementState
+
+    /// Per-cause history, keyed by cause tag raw value. Absent for a cause with
+    /// too little behind it to make a shape.
+    var trends: [String: LeakTrend] = [:]
+
     let onSelect: (LeakRow) -> Void
+
+    /// Opens training for a cause. The section's whole argument is that the top
+    /// row is worth a fortnight, and an argument with no way to act on it is an
+    /// observation.
+    var onTrain: (LeakRow) -> Void = { _ in }
+
+    private var diagnosis: LeakDiagnosis? {
+        LeakDiagnosis.make(rows: leaks, windowGames: windowGames)
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
-            HStack(alignment: .firstTextBaseline) {
-                Text("Rating leaks")
-                    .font(.headline)
-                Spacer()
-                if windowGames > 0 {
-                    Text("Last \(windowGames) games")
-                        .font(.footnote.monospacedDigit())
-                        .foregroundStyle(.secondary)
-                }
-            }
-            .padding(.bottom, 10)
+            SectionHeader(
+                title: "Rating leaks",
+                qualifier: windowGames > 0 ? "Last \(windowGames) games" : nil
+            )
+            .padding(.bottom, 14)
 
             if let message = state.message {
                 MeasurementPlaceholder(message: message, symbol: "chart.bar.doc.horizontal")
@@ -48,107 +62,233 @@ struct RatingLeaksSection: View {
                 )
                 .padding(.vertical, 4)
             } else {
+                if let diagnosis {
+                    DiagnosisBlock(diagnosis: diagnosis)
+                        .padding(.bottom, 6)
+                }
+
                 ForEach(Array(leaks.enumerated()), id: \.element.id) { index, leak in
+                    if index > 0 {
+                        Rectangle()
+                            .fill(Palette.hairline.dynamic)
+                            .frame(height: 1)
+                    }
                     LeakRowView(
                         leak: leak,
-                        // The unit is spelled out once, on the top row, and
-                        // abbreviated below it. Repeating "expected points per
-                        // game" five times turns the column into wallpaper.
-                        spellOutUnit: index == 0,
+                        rank: index,
+                        trend: trends[leak.causeTag.rawValue],
                         onSelect: { onSelect(leak) }
                     )
                 }
+
+                trainAction
             }
         }
     }
+
+    /// The screen's single filled button, and the only place its accent is spent
+    /// on an action.
+    ///
+    /// Absent when the top row is noise: a filled CTA proposing a fortnight of
+    /// work against 0.04 expected points a game teaches the user that the app's
+    /// urgency is decorative.
+    @ViewBuilder
+    private var trainAction: some View {
+        if let focus = leaks.first, focus.impact != .low {
+            Button {
+                onTrain(focus)
+            } label: {
+                Text(LeakTable.trainActionTitle(for: focus))
+            }
+            .buttonStyle(.primaryAction)
+            .padding(.top, 16)
+        }
+    }
 }
+
+// MARK: - The reading
+
+/// The block above the table: how much, and what shape it is in.
+private struct DiagnosisBlock: View {
+
+    let diagnosis: LeakDiagnosis
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(alignment: .firstTextBaseline, spacing: 10) {
+                // A tier below the chart's headline on purpose: the screen has
+                // one hero number and it is the rating. Two 44pt figures on one
+                // scroll makes the reader choose which one the screen is about.
+                DenominatorText(
+                    Denominator(value: diagnosis.formattedPoints, denominator: "pts / game"),
+                    role: .title
+                )
+                Spacer(minLength: 8)
+                Text(diagnosis.shape.word)
+                    .typeRole(.headline, appliesForeground: false)
+                    .foregroundStyle(Palette.accent.dynamic)
+            }
+
+            Text(diagnosis.headline)
+                .typeRole(.headline)
+                .fixedSize(horizontal: false, vertical: true)
+
+            Text(diagnosis.explanation)
+                .typeRole(.body, appliesForeground: false)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .padding(.bottom, 10)
+        .accessibilityElement(children: .combine)
+    }
+}
+
+// MARK: - One cause
 
 private struct LeakRowView: View {
 
     let leak: LeakRow
-    let spellOutUnit: Bool
+    /// Position in the table, which sets the bar's alpha and nothing else.
+    let rank: Int
+    let trend: LeakTrend?
     let onSelect: () -> Void
 
     var body: some View {
         Button(action: onSelect) {
-            VStack(alignment: .leading, spacing: 6) {
-                HStack(alignment: .firstTextBaseline, spacing: 8) {
-                    Text(leak.title)
-                        .font(.subheadline.weight(.medium))
-                        .foregroundStyle(.primary)
-                    Spacer(minLength: 8)
-                    if let chip = leak.impact.chipTitle {
-                        ProfileChip(
-                            text: chip,
-                            // Amber for high, plain grey for medium. Never red:
-                            // impact says where the leverage is, not that the
-                            // user is failing.
-                            tint: leak.impact == .high ? ProfileStyle.impactAmber : .secondary
-                        )
+            VStack(alignment: .leading, spacing: 9) {
+                HStack(alignment: .top, spacing: 8) {
+                    VStack(alignment: .leading, spacing: 3) {
+                        HStack(spacing: 6) {
+                            Text(leak.title)
+                                .typeRole(.headline)
+                            if let chip = leak.impact.chipTitle {
+                                ProfileChip(
+                                    text: chip,
+                                    // Amber for high, plain grey for medium.
+                                    // Never red: impact says where the leverage
+                                    // is, not that the user is failing.
+                                    tint: leak.impact == .high
+                                        ? Palette.caution.dynamic
+                                        : Color.secondary
+                                )
+                            }
+                        }
+
+                        Text(leak.detail)
+                            .typeRole(.caption)
+                            .fixedSize(horizontal: false, vertical: true)
+
+                        if let typical = leak.typicalCount {
+                            // A measurement next to a reference makes a leak
+                            // measurable rather than judged. Rendered only when
+                            // the reference is real — see `LeakRow.typicalCount`.
+                            Text("\(typical) typical at your rating")
+                                .typeRole(.label, monospacedDigits: true)
+                        }
                     }
-                }
-
-                HStack(alignment: .firstTextBaseline, spacing: 6) {
-                    Text(measurement)
-                        .font(.footnote.monospacedDigit())
-                        .foregroundStyle(.secondary)
-                        .fixedSize(horizontal: false, vertical: true)
 
                     Spacer(minLength: 8)
+
+                    VStack(alignment: .trailing, spacing: 2) {
+                        Text(points)
+                            .typeRole(.headline, monospacedDigits: true)
+                        Text("\(leak.count) time\(leak.count == 1 ? "" : "s")")
+                            .typeRole(.caption, monospacedDigits: true)
+                    }
 
                     Image(systemName: "chevron.right")
-                        .font(.caption2.weight(.semibold))
+                        .typeRole(.caption, appliesForeground: false)
                         .foregroundStyle(.tertiary)
+                        .padding(.top, 2)
                 }
 
-                if let typical = leak.typicalCount {
-                    // Superpower's markers grid: a measurement next to a
-                    // reference makes a leak measurable rather than judged.
-                    // Rendered only when the reference is real — see
-                    // `LeakRow.typicalCount`.
-                    Text("\(typical) typical at your rating")
-                        .font(.caption.monospacedDigit())
-                        .foregroundStyle(.tertiary)
-                }
+                bar
 
-                hairline
+                if let trend {
+                    SparkBars(trend: trend)
+                }
             }
-            .padding(.vertical, 9)
+            .padding(.vertical, 12)
             .contentShape(Rectangle())
         }
-        .buttonStyle(.plain)
+        .buttonStyle(.pressable)
         .accessibilityElement(children: .combine)
+        .accessibilityLabel(spokenLabel)
+        .accessibilityHint("Shows every position where this happened")
     }
 
-    private var measurement: String {
-        let points = String(format: "%.2f", leak.epLostPerGame)
-        let occurrences = "\(leak.count) occurrence\(leak.count == 1 ? "" : "s")"
-        return spellOutUnit
-            ? "−\(points) expected points per game · \(occurrences)"
-            : "−\(points) · \(occurrences)"
+    private var points: String {
+        String(format: "−%.2f", leak.epLostPerGame)
     }
 
-    /// The one permitted visual encoding: 2pt, one desaturated colour, width
-    /// proportional to magnitude. A full-width saturated bar would read as an
-    /// alarm and would encode nothing the ordering does not already carry.
-    private var hairline: some View {
+    private var spokenLabel: String {
+        "\(leak.title). \(points) expected points per game across \(leak.count) occurrences. \(leak.detail)"
+    }
+
+    /// Length is magnitude; alpha is rank. One hue all the way down, because a
+    /// second hue would invent a severity scale nobody encoded.
+    private var bar: some View {
         GeometryReader { proxy in
             ZStack(alignment: .leading) {
-                Rectangle()
-                    .fill(.quaternary)
-                    .frame(height: 1)
-                Rectangle()
-                    .fill(ProfileStyle.hairline)
-                    .frame(width: proxy.size.width * leak.magnitude, height: 2)
+                Capsule().fill(Palette.surfaceSunken.dynamic)
+                Capsule()
+                    .fill(Palette.accent.dynamic.opacity(LeakTable.barOpacity(rank: rank)))
+                    // Never narrower than its own cap radius, or the smallest
+                    // leak renders as a dot and reads as a rendering fault.
+                    .frame(
+                        width: max(
+                            proxy.size.width * leak.magnitude,
+                            ProfileStyle.leakBarHeight
+                        )
+                    )
             }
-            .frame(height: 2, alignment: .center)
         }
-        .frame(height: 2)
-        .padding(.top, 3)
+        .frame(height: ProfileStyle.leakBarHeight)
+        .accessibilityHidden(true)
     }
 }
 
-/// The drill-in: every position where this leak actually happened.
+/// The one element on this screen that can say *it is working*.
+///
+/// Drawn in plain grey with no trend line and no verdict: the shape falling away
+/// is the whole message, and a colour on top of it would be the app claiming
+/// credit for a change the user made.
+private struct SparkBars: View {
+
+    let trend: LeakTrend
+
+    private let barWidth: CGFloat = 4
+    private let maxHeight: CGFloat = 18
+
+    var body: some View {
+        HStack(alignment: .bottom, spacing: 8) {
+            HStack(alignment: .bottom, spacing: 3) {
+                ForEach(Array(trend.buckets.enumerated()), id: \.offset) { _, value in
+                    Capsule()
+                        .fill(Palette.inactiveMark.dynamic)
+                        .frame(width: barWidth, height: height(for: value))
+                }
+            }
+            .frame(height: maxHeight, alignment: .bottom)
+
+            Text(trend.spanLabel)
+                .typeRole(.label, monospacedDigits: true)
+
+            Spacer(minLength: 0)
+        }
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel("Last \(trend.spanLabel)")
+    }
+
+    private func height(for value: Double) -> CGFloat {
+        guard trend.peak > 0 else { return barWidth }
+        return max(barWidth, CGFloat(value / trend.peak) * maxHeight)
+    }
+}
+
+// MARK: - Drill-in
+
+/// Every position where this leak actually happened.
 ///
 /// The chevron's promise. A leak row is an aggregate, and an aggregate the user
 /// cannot open is an accusation they cannot check.
@@ -156,46 +296,78 @@ struct LeakDetailScreen: View {
 
     let leak: LeakRow
     let occurrences: [LeakOccurrence]
+    var onTrain: () -> Void = {}
 
     var body: some View {
-        List {
-            Section {
-                VStack(alignment: .leading, spacing: 6) {
-                    Text(String(format: "−%.2f expected points per game", leak.epLostPerGame))
-                        .font(.title3.weight(.semibold))
-                        .monospacedDigit()
-                    Text("\(leak.count) occurrence\(leak.count == 1 ? "" : "s") in this window")
-                        .font(.footnote)
-                        .foregroundStyle(.secondary)
-                    if let habit = leak.habit {
-                        // Names the fix, not the failure.
-                        Text(habit.microGoalTitle)
-                            .font(.footnote.weight(.medium))
-                            .padding(.horizontal, 8)
-                            .padding(.vertical, 4)
-                            .background(Capsule().fill(.quaternary))
-                            .padding(.top, 2)
-                    }
-                }
-                .padding(.vertical, 4)
-            }
+        ScrollView {
+            VStack(alignment: .leading, spacing: 20) {
+                summary
 
-            Section("Where it happened") {
-                if occurrences.isEmpty {
-                    Text("The positions for these moves are no longer stored.")
-                        .font(.footnote)
-                        .foregroundStyle(.secondary)
-                } else {
-                    ForEach(occurrences) { occurrence in
-                        OccurrenceRow(occurrence: occurrence)
+                VStack(alignment: .leading, spacing: 0) {
+                    SectionHeader(
+                        title: "Where it happened",
+                        qualifier: occurrences.isEmpty ? nil : "\(occurrences.count)"
+                    )
+                    .padding(.bottom, 10)
+
+                    if occurrences.isEmpty {
+                        MeasurementPlaceholder(
+                            message: "The positions for these moves are no longer stored.",
+                            symbol: "tray"
+                        )
+                    } else {
+                        VStack(spacing: 0) {
+                            ForEach(Array(occurrences.enumerated()), id: \.element.id) { index, occurrence in
+                                if index > 0 {
+                                    Rectangle()
+                                        .fill(Palette.hairline.dynamic)
+                                        .frame(height: 1)
+                                }
+                                OccurrenceRow(occurrence: occurrence)
+                            }
+                        }
+                        .padding(.horizontal, 14)
+                        .elevation(.raised, cornerRadius: CornerRadius.card)
                     }
                 }
             }
+            .padding(.horizontal)
+            .padding(.top, 8)
+            .padding(.bottom, 32)
         }
+        .background(Palette.surfaceGround.dynamic.ignoresSafeArea())
         .navigationTitle(leak.title)
         #if os(iOS)
             .navigationBarTitleDisplayMode(.inline)
         #endif
+    }
+
+    private var summary: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            DenominatorText(
+                Denominator(
+                    value: String(format: "−%.2f", leak.epLostPerGame),
+                    denominator: "pts / game"
+                ),
+                role: .display
+            )
+
+            Text(leak.detail)
+                .typeRole(.body, appliesForeground: false)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+
+            Button {
+                onTrain()
+            } label: {
+                Text(LeakTable.trainActionTitle(for: leak))
+            }
+            .buttonStyle(.primaryAction)
+            .padding(.top, 4)
+        }
+        .padding(16)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .elevation(.raised, cornerRadius: CornerRadius.card)
     }
 }
 
@@ -207,23 +379,22 @@ private struct OccurrenceRow: View {
         HStack(spacing: 12) {
             VStack(alignment: .leading, spacing: 3) {
                 Text("Move \(occurrence.moveNumber): \(occurrence.playedSAN)")
-                    .font(.subheadline.monospacedDigit())
+                    .typeRole(.body, monospacedDigits: true)
                 Text("Better: \(occurrence.bestSAN)")
-                    .font(.caption.monospacedDigit())
-                    .foregroundStyle(.secondary)
+                    .typeRole(.caption, monospacedDigits: true)
             }
 
             Spacer(minLength: 8)
 
             VStack(alignment: .trailing, spacing: 3) {
                 Text(String(format: "−%.2f", occurrence.epLost))
-                    .font(.subheadline.monospacedDigit())
+                    .typeRole(.body, monospacedDigits: true, appliesForeground: false)
                     .foregroundStyle(.secondary)
                 Text(occurrence.playedAt.formatted(.dateTime.day().month(.abbreviated)))
-                    .font(.caption.monospacedDigit())
-                    .foregroundStyle(.tertiary)
+                    .typeRole(.label, monospacedDigits: true)
             }
         }
-        .padding(.vertical, 2)
+        .padding(.vertical, 11)
+        .accessibilityElement(children: .combine)
     }
 }

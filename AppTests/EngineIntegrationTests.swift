@@ -28,7 +28,14 @@ struct EngineIntegrationTests {
         "c1g5", "b8d7", "c4d5", "e6d5", "c3d5", "f6d5"
     ]
 
-    static let networks = URL(fileURLWithPath: "/Users/luis/Personal Projects/chess/App/Resources/Networks")
+    /// Resolved relative to this file rather than to one machine's home
+    /// directory, so the suite runs on any checkout.
+    static var networks: URL {
+        URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()   // AppTests
+            .deletingLastPathComponent()   // repo root
+            .appending(path: "App/Resources/Networks")
+    }
 
     /// Small enough to stay fast, large enough that the engine sees a two-move
     /// tactic. The app's own budget is calibrated per device and is far larger.
@@ -113,6 +120,26 @@ struct EngineIntegrationTests {
         #expect(moment.judgment == .blunder)
         #expect(moment.deltaEP > 0.30)
 
+        // The coaching note, generated from this pass's own findings.
+        //
+        // This is the end of the chain the app actually shows: engine search →
+        // detector findings → `MomentExplainer` → the `coachText` column →
+        // `ReviewScreen`'s coach card. Every link is unit-tested against
+        // fixtures, and fixtures are exactly where a note can look right while
+        // being generated from numbers no real engine would produce. Asserting
+        // it here means the note the user reads was written from a real
+        // Stockfish evaluation of a real blunder.
+        let note = try #require(moment.coachText, "a real blunder must produce a note")
+        #expect(!note.isEmpty)
+        #expect(note.count <= MomentExplainer.characterBudget)
+        // It must name the move that punishes the blunder rather than talking
+        // around it — `Nxd5` is answered by `Nxd5`, and a note that cannot say
+        // so is not coaching.
+        #expect(note.contains("d5"), "the note should name the refutation: \(note)")
+        // And it must not read as a template with the numbers left in.
+        #expect(!note.contains("Optional("), "\(note)")
+        #expect(!note.contains("nil"), "\(note)")
+
         let accuracy = try #require(analyzed.userAccuracy)
         #expect(accuracy > 0 && accuracy < 100)
 
@@ -121,6 +148,7 @@ struct EngineIntegrationTests {
         #expect(elapsed < 25)
         print("Engine pass: \(replay.positions.count) positions in \(String(format: "%.2f", elapsed))s")
         print("Blunder ply 11: \(before) -> \(after) win%, accuracy \(accuracy)")
+        print("Coach note: \(note)")
 
         await engine.stop()
     }

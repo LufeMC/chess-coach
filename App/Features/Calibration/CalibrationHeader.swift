@@ -5,43 +5,61 @@
 
 import SwiftUI
 
-/// `Game 3 of 5 — Calibration games ⌄`, with the phase list behind the chevron.
+/// `Game 3 of 5 ⌄` on the left, `STEP 2 OF 4` on the right, and a sectioned bar
+/// under both.
 ///
-/// SoFi's onboarding header. The counter is monospaced so the digits do not
-/// jitter between items, and the whole line is `.secondary` — it is orientation,
-/// not content, and a bold progress line at the top of a board screen competes
-/// with the position.
+/// Every calibration screen carries this, including the question and the reveal,
+/// so the flow's length is never something the user has to infer from how tired
+/// they are. Two numbers, answering two different questions: the counter says
+/// where you are inside the thing you are doing right now, the qualifier says
+/// how much of the whole thing there is.
 ///
-/// The phase name is the disclosure. Making the *name* tappable rather than
-/// adding a separate control is the trick worth keeping: the user who wonders
-/// "what else is there?" is already looking straight at the phase name, so that
-/// is where the answer should be.
+/// The counter is the disclosure. Making the *number* tappable rather than
+/// adding a separate control is the trick worth keeping — the user who wonders
+/// "is any of this optional?" is already looking straight at it, so that is
+/// where the answer lives.
+///
+/// The whole line is `.caption` and `.secondary`: it is orientation, not
+/// content, and a bold progress line at the top of a board screen competes with
+/// the position.
 struct CalibrationHeader: View {
 
     let progress: CalibrationProgress
-    @State private var isShowingPhases = false
+    /// Defaults to the phase's own step so the two board screens need not
+    /// restate what their phase already says.
+    var step: CalibrationStep
+
+    @State private var isShowingSteps = false
+
+    init(progress: CalibrationProgress, step: CalibrationStep? = nil) {
+        self.progress = progress
+        self.step = step ?? progress.phase.step
+    }
 
     var body: some View {
         VStack(spacing: 8) {
             Button {
-                isShowingPhases.toggle()
+                isShowingSteps.toggle()
             } label: {
-                HStack(spacing: 4) {
-                    Text(progress.counterLabel)
-                        .monospacedDigit()
-                    Text("—")
-                    Text(progress.phase.title)
+                HStack(alignment: .firstTextBaseline, spacing: 6) {
+                    counter
                     Image(systemName: "chevron.down")
-                        .font(.caption2.weight(.semibold))
-                        .rotationEffect(.degrees(isShowingPhases ? 180 : 0))
+                        .font(.system(size: 9, weight: .semibold))
+                        .foregroundStyle(.tertiary)
+                        .rotationEffect(.degrees(isShowingSteps ? 180 : 0))
+                    Spacer(minLength: 8)
+                    Text("Step \(step.position) of \(CalibrationStep.count)")
+                        .typeRole(.label, monospacedDigits: true, appliesForeground: false)
+                        .foregroundStyle(.tertiary)
                 }
-                .font(.footnote)
-                .foregroundStyle(.secondary)
+                .contentShape(Rectangle())
             }
-            .buttonStyle(.plain)
+            .buttonStyle(.pressable)
+            .accessibilityLabel(accessibilityLabel)
+            .accessibilityHint("Shows every step of calibration")
 
-            if isShowingPhases {
-                phaseList
+            if isShowingSteps {
+                stepList
                     .transition(.opacity.combined(with: .move(edge: .top)))
             }
 
@@ -50,39 +68,107 @@ struct CalibrationHeader: View {
                 weights: progress.sectionWeights
             )
         }
-        .animation(.snappy(duration: 0.22), value: isShowingPhases)
-        .animation(.snappy(duration: 0.28), value: progress)
+        .animation(Motion.snappy, value: isShowingSteps)
+        .animation(Motion.snappy, value: progress)
     }
 
-    private var phaseList: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            ForEach(Array(CalibrationPhase.allCases.enumerated()), id: \.element.id) { index, phase in
-                HStack(spacing: 8) {
-                    Image(systemName: symbol(forPhaseAt: index))
-                        .font(.caption)
-                        .foregroundStyle(index <= progress.phaseIndex ? Color.accentColor : .secondary)
-                        .frame(width: 16)
+    // MARK: Counter
 
-                    Text(phase.title)
-                        .font(.footnote)
-                        .foregroundStyle(index == progress.phaseIndex ? .primary : .secondary)
+    /// The item counter on the two working steps, and the step's own name on the
+    /// two that have nothing to count. Neither the question nor the reveal has
+    /// items, and inventing a `1 of 1` for them would be a number that carries
+    /// no information dressed as one that does.
+    @ViewBuilder
+    private var counter: some View {
+        switch step {
+        case .games, .puzzles:
+            HStack(alignment: .firstTextBaseline, spacing: 4) {
+                Text(progress.phase.itemNoun)
+                    .typeRole(.caption)
+                DenominatorText(
+                    .of(progress.currentPosition, progress.currentRequired),
+                    role: .caption
+                )
+            }
+        case .question, .result:
+            Text(step.title)
+                .typeRole(.caption)
+        }
+    }
 
-                    Spacer()
+    private var accessibilityLabel: String {
+        let position = "Step \(step.position) of \(CalibrationStep.count)"
+        switch step {
+        case .games, .puzzles: return "\(progress.counterLabel). \(position)"
+        case .question, .result: return "\(step.title). \(position)"
+        }
+    }
 
-                    Text("\(progress.completed[safe: index] ?? 0)/\(progress.required[safe: index] ?? 0)")
-                        .font(.footnote.monospacedDigit())
-                        .foregroundStyle(.secondary)
-                }
+    // MARK: Step list
+
+    private var stepList: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            ForEach(CalibrationStep.allCases) { entry in
+                stepRow(entry)
+            }
+
+            // The line the disclosure exists to deliver. A first-run user
+            // opening this is asking whether the twenty puzzles are a tax on
+            // top of the five games; they are not, and saying so is cheaper
+            // than letting them find out by finishing.
+            Text("Both halves feed one number. Nothing here is practice.")
+                .typeRole(.caption)
+                .fixedSize(horizontal: false, vertical: true)
+                .padding(.top, 2)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(12)
+        .elevation(.raised, cornerRadius: CornerRadius.card)
+    }
+
+    private func stepRow(_ entry: CalibrationStep) -> some View {
+        HStack(alignment: .firstTextBaseline, spacing: 8) {
+            Image(systemName: symbol(for: entry))
+                .font(.caption2)
+                // The accent marks the current step and nothing else here.
+                // Completed steps carry a filled check, which is a shape rather
+                // than a colour and therefore survives any vision difference.
+                .foregroundStyle(entry == step ? Palette.accent.dynamic : Color.secondary)
+                .frame(width: 14)
+
+            VStack(alignment: .leading, spacing: 1) {
+                Text(entry.title)
+                    .typeRole(.body, appliesForeground: false)
+                    .foregroundStyle(entry == step ? .primary : .secondary)
+                Text(entry.contribution)
+                    .typeRole(.caption)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
+            Spacer(minLength: 8)
+
+            if let tally = tally(for: entry) {
+                Text(tally)
+                    .typeRole(.caption, monospacedDigits: true)
             }
         }
-        .padding(12)
-        .background(RoundedRectangle(cornerRadius: 12, style: .continuous).fill(.quaternary))
+        .accessibilityElement(children: .combine)
     }
 
-    private func symbol(forPhaseAt index: Int) -> String {
-        if index < progress.phaseIndex { return "checkmark.circle.fill" }
-        if index == progress.phaseIndex { return "circle.dashed" }
+    private func symbol(for entry: CalibrationStep) -> String {
+        if entry.position < step.position { return "checkmark.circle.fill" }
+        if entry == step { return "circle.dashed" }
         return "circle"
+    }
+
+    /// Counts belong only to the steps that have items.
+    private func tally(for entry: CalibrationStep) -> String? {
+        guard let phase = CalibrationPhase.allCases.first(where: { $0.step == entry }) else {
+            return nil
+        }
+        let done = progress.completed[safe: phase.rawValue] ?? 0
+        let total = progress.required[safe: phase.rawValue] ?? 0
+        return "\(done)/\(total)"
     }
 }
 
@@ -109,9 +195,9 @@ struct SectionedProgressBar: View {
                 ForEach(Array(fractions.enumerated()), id: \.offset) { index, fill in
                     let width = available * (resolved[index] / totalWeight)
                     ZStack(alignment: .leading) {
-                        Capsule().fill(.quaternary)
+                        Capsule().fill(Palette.surfaceSunken.dynamic)
                         Capsule()
-                            .fill(Color.accentColor)
+                            .fill(Palette.accent.dynamic)
                             .frame(width: max(0, width * min(1, max(0, fill))))
                     }
                     .frame(width: width)
@@ -135,11 +221,20 @@ extension Array {
 #Preview {
     VStack(spacing: 30) {
         CalibrationHeader(
+            progress: CalibrationProgress(required: [5, 20], completed: [0, 0], phaseIndex: 0),
+            step: .question
+        )
+        CalibrationHeader(
             progress: CalibrationProgress(required: [5, 20], completed: [2, 0], phaseIndex: 0)
         )
         CalibrationHeader(
             progress: CalibrationProgress(required: [5, 20], completed: [5, 9], phaseIndex: 1)
         )
+        CalibrationHeader(
+            progress: CalibrationProgress(required: [5, 20], completed: [5, 20], phaseIndex: 1),
+            step: .result
+        )
     }
     .padding()
+    .background(Palette.surfaceGround.dynamic)
 }

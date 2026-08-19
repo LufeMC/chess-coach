@@ -256,9 +256,10 @@ enum AnalysisPipeline {
 
     /// Reads the two stored evaluations around one move.
     ///
-    /// Criticality is deliberately measured from the *base* MultiPV-2 pass rather
-    /// than from an enriched re-search, so the gap means the same thing at every
-    /// ply of the game.
+    /// Everything here is measured from the *base* MultiPV-2 pass rather than from
+    /// an enriched re-search, so a gap or a delta means the same thing at every
+    /// ply of the game. ``analyze(replay:evaluations:moveRows:userColor:timeControl:userFlagged:enrichments:policy:)``
+    /// states the rule in full.
     static func summarize(
         moveIndex: Int,
         replay: GameReplay,
@@ -323,6 +324,33 @@ enum AnalysisPipeline {
 
     // MARK: - The pass
 
+    /// Turns evaluated positions into judgments, moments and accuracy.
+    ///
+    /// ## Which pass is authoritative
+    ///
+    /// Two searches can have looked at the same position: the base MultiPV-2 walk
+    /// over every ply, and — for the dozen positions that earned it — a deeper
+    /// MultiPV-3 re-search. They disagree, and the rule for who wins is by
+    /// *category*, not by depth:
+    ///
+    /// * **Lines** come from the enriched search where it exists. It is deeper and
+    ///   wider, so it has the better opinion about which move is best and what the
+    ///   coaching alternative is — which is the only reason it was run.
+    /// * **Numbers** — `evalBefore`, and therefore `deltaEP`, the judgment, the
+    ///   classification, the win percentages and the accuracy — always come from
+    ///   the base pass. Both sides of `deltaEP` are a subtraction across two
+    ///   *different positions*, and a subtraction is only meaningful when both
+    ///   terms were measured the same way. Mixing an enriched `evalBefore` with
+    ///   the base-pass `evalAfter` of the next position leaks the depth difference
+    ///   into the delta, which flips classifications at the inaccuracy and mistake
+    ///   boundaries — and flips them for exactly the plies that were enriched,
+    ///   i.e. the ones the review screen is about to talk about.
+    ///
+    /// The same rule already governed criticality (see ``summarize(moveIndex:replay:evaluations:)``);
+    /// this is that rule applied consistently. The practical consequence worth
+    /// stating: the judgment that flagged a ply for enrichment is the judgment its
+    /// moment ends up carrying, so a moment can never contradict the pass that
+    /// selected it.
     static func analyze(
         replay: GameReplay,
         evaluations: [PositionEval],
@@ -381,12 +409,19 @@ enum AnalysisPipeline {
                     ply: row.ply,
                     positionBefore: replay.positions[index],
                     playedUCI: row.uci,
-                    // The enriched re-search is deeper and at wider MultiPV, so it
-                    // supersedes the base pass where it exists.
+                    // Lines from the enriched re-search where there was one: it is
+                    // deeper and at wider MultiPV, so it knows better which move
+                    // was best and what else there was.
                     bestLine: enrichment?.best ?? summary.bestLine,
                     secondLine: enrichment?.alternative ?? summary.secondLine,
                     refutationLine: summary.refutationLine,
-                    evalBefore: (enrichment?.best ?? summary.bestLine).score,
+                    // Numbers from the base pass, always — including when an
+                    // enriched line was just handed in above. See the note on this
+                    // function: `evalAfterEngine` can only come from the base pass
+                    // (the next position was never re-searched), so an enriched
+                    // `evalBefore` would make `deltaEP` a subtraction between two
+                    // depths.
+                    evalBefore: summary.bestLine.score,
                     // Raw, unflipped: `MoveContext` performs the conversion itself.
                     evalAfterEngine: summary.engineScoreAfter,
                     thinkTimeMs: row.thinkTimeMs,
@@ -396,9 +431,21 @@ enum AnalysisPipeline {
                     // after which the clock ran out.
                     didFlag: userFlagged && index == lastUserIndex,
                     threatProbe: enrichment?.threatProbe,
+                    // The same probe at the user's *previous* decision — two plies
+                    // back, one opponent move in between — which is what tells a
+                    // threat the player has now ignored twice from one they are
+                    // seeing for the first time. Only present when that ply was
+                    // enriched too, which is precisely the case the distinction is
+                    // about: two consecutive user moves both worth a second look.
+                    previousThreatProbe: enrichments[index - 2]?.threatProbe,
                     criticality: summary.criticality,
                     priorMoves: Array(replay.moves.prefix(index)),
-                    lastCaptureSquare: replay.lastCaptureSquares[index]
+                    lastCaptureSquare: replay.lastCaptureSquares[index],
+                    // Guided mode asked about an idea at this position and the
+                    // player moved anyway; the moment scorer weights that error
+                    // higher than the same error unprompted. The prompt itself is
+                    // long gone by now — the move row is the only record of it.
+                    guidedPromptShown: row.guidedPromptHabit != nil
                 )
             else {
                 analyzed.append(
@@ -416,7 +463,7 @@ enum AnalysisPipeline {
             let findings = DetectorSuite.run(context)
             let mistake = CauseTagger.tag(findings: findings, context: context)
 
-            if MomentBuilder.isMistakeCandidate(context) {
+            if MomentBuilder.isMistakeCandidate(context) || provesResultChange(findings, context: context) {
                 candidates.append(
                     MomentBuilder.make(
                         context: context,
@@ -440,8 +487,12 @@ enum AnalysisPipeline {
 
             let accuracy = context.accuracy
             accuracies.append(accuracy)
-            winPercents.append(EvalMath.winPercent(score: context.evalBefore))
+            winPercents.append(winPctBefore)
 
+            // The same two percentages the opponent's moves get, deliberately:
+            // now that `evalBefore` is the base-pass score, `context` and the
+            // locals above cannot disagree, and an eval graph that jumped at
+            // enriched plies would have been the visible symptom if they did.
             analyzed.append(
                 AnalyzedMove(
                     id: row.id,
@@ -449,8 +500,8 @@ enum AnalysisPipeline {
                     classification: MoveClassification
                         .classify(judgment: context.judgment, playedBestMove: context.playedBestMove)
                         .rawValue,
-                    winPctBefore: EvalMath.winPercent(score: context.evalBefore),
-                    winPctAfter: EvalMath.winPercent(score: context.evalAfter),
+                    winPctBefore: winPctBefore,
+                    winPctAfter: winPctAfter,
                     accuracy: accuracy
                 )
             )
@@ -461,6 +512,30 @@ enum AnalysisPipeline {
             moments: MomentSelector.select(candidates: candidates, policy: policy),
             userAccuracy: EvalMath.gameAccuracy(moveAccuracies: accuracies, winPercents: winPercents)
         )
+    }
+
+    // MARK: - Admission
+
+    /// The two flags that mean "the result itself changed, and that is provable".
+    static let resultProofFlags: Set<FindingFlag> = [.resultClassFlip, .exactBitbase]
+
+    /// Whether the detectors proved a change of result that the judgment cannot
+    /// see.
+    ///
+    /// `MomentBuilder.isMistakeCandidate` gates on the expected-points loss, and
+    /// that gate is blind to exactly the endgame errors this pass is *most*
+    /// certain about. In KPK the bitbase knows a win has become a draw while the
+    /// engine's centipawn score barely moves — that is the whole reason the
+    /// bitbase exists — so the judgment reads `.ok` and the one mistake in the
+    /// game that can be proved exactly would never become a moment at all.
+    ///
+    /// The engine's own first choice is still excluded. A depth-limited search is
+    /// at its least reliable in precisely these endings, so an exact result can
+    /// change under the move the engine ranked first, and a moment built from
+    /// that would name the played move as the move that would have saved it.
+    static func provesResultChange(_ findings: [Finding], context: MoveContext) -> Bool {
+        guard !context.playedBestMove else { return false }
+        return findings.contains { !$0.flags.isDisjoint(with: resultProofFlags) }
     }
 
     // MARK: - Clocks
@@ -536,6 +611,27 @@ enum AnalysisPipeline {
 
     // MARK: - Rows
 
+    /// The persisted form of a moment.
+    ///
+    /// `AnalysisKit.Moment` calls itself self-contained, and the row has to keep
+    /// that promise: a moment carries its principal variation, the refutation of
+    /// the move played, an alternative line, theme tags, a judgment and its
+    /// spaced-repetition eligibility, and every one of those is something the
+    /// review screen or the scheduler needs *after a relaunch*, when the engine
+    /// output that produced them is gone. So the whole value goes into
+    /// ``Database/Moment/payload``.
+    ///
+    /// The flat columns are not redundant with it. They are what SQL can sort and
+    /// filter on, they are readable by any build regardless of what the analysis
+    /// vocabulary looks like by then, and they are the fallback when a payload
+    /// cannot be decoded. `srsEligible` is promoted to a column of its own for the
+    /// first of those reasons: it is a query, not a display field.
+    ///
+    /// `coachText` is promoted for the third. The review screen reads the note
+    /// straight off the row and shows nothing where there is none, so a moment
+    /// whose payload this build cannot decode would otherwise lose its coaching
+    /// as well as its lines — and the note is the part of a moment that does not
+    /// need the vocabulary to be understood.
     static func row(for moment: AnalysisKit.Moment, gameID: UUID) -> MomentRow {
         MomentRow(
             gameID: gameID,
@@ -550,8 +646,23 @@ enum AnalysisPipeline {
             bestSAN: moment.bestSAN ?? "",
             bestUCI: moment.bestUCI ?? "",
             deltaEP: moment.deltaEP,
-            score: moment.total
+            score: moment.total,
+            coachText: moment.coachText,
+            payload: MomentRow.encodePayload(moment),
+            srsEligible: moment.srsEligible
         )
+    }
+
+    /// Rebuilds the full moment from a stored row.
+    ///
+    /// `nil` for a row written before moments carried a payload, or one whose
+    /// payload this build cannot decode — a moment from a newer build naming a
+    /// cause tag this one has never heard of. Both mean the same thing to a call
+    /// site: show what the flat columns say and leave out the line viewer. Never
+    /// throws, because a moment that will not open is worse than a moment shown
+    /// without its variations.
+    static func moment(from row: MomentRow) -> AnalysisKit.Moment? {
+        row.decodePayload(as: AnalysisKit.Moment.self)
     }
 }
 

@@ -33,6 +33,7 @@ struct AppDatabase: Sendable {
     var metrics: MetricsRepository { user.metrics }
     var settings: SettingsRepository { user.settings }
     var dailyLoop: DailyLoopRepository { user.dailyLoop }
+    var calibrationDrafts: CalibrationDraftRepository { user.calibrationDrafts }
     var puzzleQueries: PuzzleRepository? { puzzles?.puzzles }
 
     // MARK: - Shared instance
@@ -152,4 +153,5 @@ struct AppDatabaseError: Error, Sendable, CustomStringConvertible, Equatable {
 enum AppLog {
     static let persistence = Logger(subsystem: "com.usenivel.chesscoach", category: "persistence")
     static let analysis = Logger(subsystem: "com.usenivel.chesscoach", category: "analysis")
+    static let engine = Logger(subsystem: "com.usenivel.chesscoach", category: "engine")
 }
