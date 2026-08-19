@@ -79,6 +79,12 @@ struct AnalysisStore: Sendable {
     /// the delete happens here. Anything the user already worked through is left
     /// alone: a reviewed moment has earned its place in the history even if a
     /// deeper re-analysis would no longer pick it.
+    ///
+    /// The coaching note rides inside the row rather than being patched onto it
+    /// afterwards, which is what keeps a second pass honest: the note is replaced
+    /// together with the moment it describes, so there is no window in which a
+    /// deeper search has changed the verdict while the previous pass's
+    /// explanation is still on screen underneath it.
     func replaceMoments(_ moments: [MomentRow], forGame gameID: UUID) throws {
         try database.user.writer.write { db in
             try MomentRow
@@ -92,11 +98,23 @@ struct AnalysisStore: Sendable {
         }
     }
 
-    /// Writes classification and win percentages back onto the move rows.
+    /// Writes classification, win percentages and accuracy back onto the move
+    /// rows.
     ///
     /// One transaction for the whole game: a review screen that showed half the
     /// moves classified and half not would look broken, and there is no partial
     /// state worth preserving if the write fails.
+    ///
+    /// Accuracy is written rather than left to be recomputed from the two win
+    /// percentages. It is derivable, but only under a contract that lives in the
+    /// analysis layer — both percentages have to be mover-relative — and a reader
+    /// that re-derived it would have to restate that contract correctly or
+    /// produce plausible-looking garbage. Writing it once, next to the numbers it
+    /// came from, is the version that cannot drift.
+    ///
+    /// The opponent's rows are written too, with `nil`: accuracy is a user-move
+    /// measure, and re-analysis has to be able to clear a value it no longer
+    /// stands behind.
     func applyMoveOutcomes(_ outcomes: [AnalyzedMove]) throws {
         guard !outcomes.isEmpty else { return }
         try database.user.writer.write { db in
@@ -107,6 +125,7 @@ struct AnalysisStore: Sendable {
                         $0.classification = #bind(outcome.classification)
                         $0.winPctBefore = #bind(outcome.winPctBefore)
                         $0.winPctAfter = #bind(outcome.winPctAfter)
+                        $0.accuracy = #bind(outcome.accuracy)
                     }
                     .execute(db)
             }

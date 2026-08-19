@@ -29,6 +29,68 @@ enum CalibrationPhase: Int, CaseIterable, Sendable, Hashable, Identifiable {
         case .puzzles: "Puzzle"
         }
     }
+
+    var step: CalibrationStep {
+        switch self {
+        case .games: .games
+        case .puzzles: .puzzles
+        }
+    }
+}
+
+/// The four steps the user walks through, in order.
+///
+/// ## Why these are not the phases
+///
+/// ``CalibrationPhase`` names the two stretches that ask for *work*, which is
+/// what a progress bar needs. It is not what a first-run user needs, because it
+/// silently omits the two steps that bracket them: the question at the front and
+/// the result at the back. A flow that says `Game 3 of 5` has answered "where am
+/// I in this part" and left "how much of this is there" to be guessed — and the
+/// guess someone makes on their first three minutes with an app is always the
+/// pessimistic one, because they have no floor for it.
+///
+/// So every calibration screen, including the question and the reveal, carries
+/// `Step n of 4`. The number never moves backwards and the last step is the
+/// payoff, which is the shortest way to say that none of this is a detour.
+enum CalibrationStep: Int, CaseIterable, Sendable, Hashable, Identifiable {
+
+    case question
+    case games
+    case puzzles
+    case result
+
+    var id: Int { rawValue }
+
+    /// 1-based position, for `Step 2 of 4`.
+    var position: Int { rawValue + 1 }
+
+    /// How many steps there are, so the denominator has one source.
+    static var count: Int { allCases.count }
+
+    /// Name in the step list, and on the two screens that have no item counter.
+    var title: String {
+        switch self {
+        case .question: "Your experience"
+        case .games: "Games"
+        case .puzzles: "Puzzles"
+        case .result: "Your rating"
+        }
+    }
+
+    /// What this step contributes to the measurement.
+    ///
+    /// Shown in the expanded step list, because the question the disclosure is
+    /// really being asked is not "how many are left" but "is any of this
+    /// optional". Every line answers that the same way: it is all one number.
+    var contribution: String {
+        switch self {
+        case .question: "Sets the difficulty the first game starts at."
+        case .games: "Measures playing strength directly, with wide error."
+        case .puzzles: "Measures tactics precisely, then converts to the playing scale."
+        case .result: "Both halves, combined into one rating and a starting rung."
+        }
+    }
 }
 
 /// Progress across the whole calibration flow.
@@ -81,11 +143,15 @@ struct CalibrationProgress: Sendable, Hashable {
     var currentRequired: Int { required.indices.contains(phaseIndex) ? required[phaseIndex] : 0 }
     var currentCompleted: Int { completed.indices.contains(phaseIndex) ? completed[phaseIndex] : 0 }
 
-    /// `Game 3 of 5`. The number shown is the item being *worked on*, so it
-    /// reads 1 before the first game rather than 0.
+    /// The item being *worked on*, so it reads 1 before the first game rather
+    /// than 0.
+    var currentPosition: Int {
+        min(currentCompleted + 1, max(currentRequired, 1))
+    }
+
+    /// `Game 3 of 5`.
     var counterLabel: String {
-        let position = min(currentCompleted + 1, max(currentRequired, 1))
-        return "\(phase.itemNoun) \(position) of \(currentRequired)"
+        "\(phase.itemNoun) \(currentPosition) of \(currentRequired)"
     }
 
     /// Fill of each section, 0...1.

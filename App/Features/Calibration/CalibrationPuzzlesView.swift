@@ -186,31 +186,74 @@ struct CalibrationPuzzlesView: View {
                 .padding(.horizontal)
 
             if runner.exhausted {
-                ContentUnavailableView {
-                    Label("Not enough puzzles", systemImage: "square.grid.3x3")
-                } description: {
-                    Text("The corpus ran out at this difficulty.")
-                }
-            } else if let position = runner.position {
-                BoardView(
-                    position: displayedPosition(fallback: position),
-                    orientation: runner.orientation,
-                    interaction: interaction
-                )
-                .overlay {
-                    BoardAnnotationOverlay(orientation: runner.orientation, ring: runner.ring)
-                }
-                .padding(.horizontal, 12)
+                exhausted
             } else {
-                ProgressView()
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                boardSlot
             }
 
             Spacer(minLength: 0)
         }
         .padding(.top, 8)
+        .background(Palette.surfaceGround.dynamic.ignoresSafeArea())
         // Keyed on the puzzle count so each recorded result loads the next item.
         .task(id: flow.puzzles.count) { await advance() }
+    }
+
+    // MARK: Board
+
+    @ViewBuilder
+    private var boardSlot: some View {
+        Group {
+            if let position = runner.position {
+                BoardView(
+                    position: displayedPosition(fallback: position),
+                    orientation: runner.orientation,
+                    interaction: interaction,
+                    style: BoardAppearance.shared.style
+                )
+                .overlay {
+                    BoardAnnotationOverlay(orientation: runner.orientation, ring: runner.ring)
+                }
+            } else {
+                EmptyBoardSlot()
+            }
+        }
+        .skeleton(if: runner.position == nil) { BoardSkeleton() }
+    }
+
+    // MARK: Running out
+
+    /// The corpus has nothing left in band.
+    ///
+    /// This used to be a dead end, and on a screen that gates the entire app
+    /// that is the worst bug available: a first-run user with a thin corpus at
+    /// their difficulty could not reach Today at all. The games alone still
+    /// produce an estimate — with an honestly wider sigma — so the way forward
+    /// exists and only needed a button.
+    ///
+    /// Stated as a fact with a value, not as an illustrated failure. The
+    /// measurement is not ruined; it is shorter than planned.
+    private var exhausted: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text("That's as far as the puzzles go")
+                .typeRole(.headline)
+
+            Text(
+                "The corpus has nothing left near your level. Your \(flow.games.count) games and the puzzles you did answer carry the measurement between them — the rating just comes with a slightly wider margin."
+            )
+            .typeRole(.body, appliesForeground: false)
+            .foregroundStyle(.secondary)
+            .fixedSize(horizontal: false, vertical: true)
+
+            Button("Show my rating") { flow.finish() }
+                .buttonStyle(.primaryAction)
+                .padding(.top, 6)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(16)
+        .elevation(.raised, cornerRadius: CornerRadius.card)
+        .padding(.horizontal)
+        .padding(.top, 8)
     }
 
     private func advance() async {

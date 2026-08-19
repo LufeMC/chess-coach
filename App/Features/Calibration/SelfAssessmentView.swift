@@ -3,6 +3,7 @@
 //  ChessCoach
 //
 
+import BoardUI
 import SwiftUI
 
 /// `How much chess have you played?` — the question that opens calibration.
@@ -12,12 +13,21 @@ import SwiftUI
 /// gaps between them are not measurable, so bars claim "more than the one above"
 /// and stop there.
 ///
-/// The selected row gets all three of a tinted fill, an accent border and an
-/// accent label. Redundant on purpose — a single tint is easy to miss at a
-/// glance and impossible to see at all with a strong colour-vision deficiency,
-/// and this is the one control on the screen.
+/// The selected row gets a tinted fill, an accent border, and a filled radio
+/// glyph. Redundant on purpose — a single tint is easy to miss at a glance and
+/// impossible to see at all with a strong colour-vision deficiency, and the
+/// glyph is a *shape* change, which is the only redundancy that always works.
+///
+/// ## The escape hatch
+///
+/// The seed is genuinely optional: `CalibrationSeed.opponentRating(for: nil)`
+/// exists and starts the ladder at 1100. A user who does not want to place
+/// themselves — which is most people who have no idea, and some who do — must
+/// therefore be able to move on, or the app has gated itself behind a question
+/// it does not need answered.
 struct SelfAssessmentView: View {
 
+    let progress: CalibrationProgress
     let selection: ChessExperience?
     let onSelect: (ChessExperience) -> Void
     let onContinue: () -> Void
@@ -25,19 +35,24 @@ struct SelfAssessmentView: View {
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 20) {
-                VStack(alignment: .leading, spacing: 10) {
+                CalibrationHeader(progress: progress, step: .question)
+
+                VStack(alignment: .leading, spacing: 8) {
                     Text("Let's find your level")
-                        .font(.title2.bold())
+                        .typeRole(.title)
 
                     // Said once, here, and never repeated between phases.
                     Text(CalibrationModel.framingLine)
-                        .font(.subheadline)
+                        .typeRole(.body, appliesForeground: false)
                         .foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
                 }
 
+                // The question is the content of this screen, not a label on a
+                // section of it, so it keeps a content role rather than being
+                // demoted into small caps.
                 Text("How much chess have you played?")
-                    .font(.headline)
+                    .typeRole(.headline)
                     .padding(.top, 4)
 
                 VStack(spacing: 10) {
@@ -49,21 +64,34 @@ struct SelfAssessmentView: View {
                         )
                     }
                 }
+
+                // The escape hatch, said as a fact rather than offered as a
+                // second button. Leaving the question unanswered is a supported
+                // path, so the only thing missing was somebody saying so.
+                if selection == nil {
+                    Text(
+                        "Not sure? Leave it — the first opponent plays around \(CalibrationSeed.defaultOpponentRating) and the ladder moves after every result."
+                    )
+                    .typeRole(.caption)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .transition(.opacity)
+                }
             }
             .padding(.horizontal)
             .padding(.top, 12)
+            .animation(Motion.crossfade, value: selection)
         }
+        .background(Palette.surfaceGround.dynamic.ignoresSafeArea())
         .safeAreaInset(edge: .bottom) {
-            Button(action: onContinue) {
-                Text("Start")
-                    .frame(maxWidth: .infinity)
-            }
-            .buttonStyle(.borderedProminent)
-            .controlSize(.large)
-            .disabled(selection == nil)
-            .padding(.horizontal)
-            .padding(.vertical, 12)
-            .background(.regularMaterial)
+            // Names the step and its cost rather than saying `Continue`, and is
+            // never disabled: the question seeds the measurement, it does not
+            // gate it.
+            Button("Play the first game", action: onContinue)
+                .buttonStyle(.primaryAction)
+                .padding(.horizontal)
+                .padding(.top, 10)
+                .padding(.bottom, 6)
+                .background(.regularMaterial)
         }
     }
 }
@@ -77,59 +105,75 @@ private struct ExperienceRow: View {
     var body: some View {
         Button(action: onTap) {
             HStack(spacing: 12) {
-                SignalBars(filled: experience.bars, isSelected: isSelected)
+                SignalBars(filled: experience.bars)
                     .frame(width: 22, height: 18)
 
                 Text(experience.title)
-                    .font(.body)
-                    .foregroundStyle(isSelected ? Color.accentColor : .primary)
+                    .typeRole(.body)
                     .frame(maxWidth: .infinity, alignment: .leading)
 
                 Image(systemName: isSelected ? "largecircle.fill.circle" : "circle")
-                    .foregroundStyle(isSelected ? Color.accentColor : Color.secondary.opacity(0.5))
+                    .foregroundStyle(isSelected ? Palette.accent.dynamic : Color.secondary.opacity(0.5))
             }
             .padding(.horizontal, 14)
             .padding(.vertical, 13)
-            .background(
-                RoundedRectangle(cornerRadius: 12, style: .continuous)
-                    .fill(isSelected ? Color.accentColor.opacity(0.12) : Color.clear)
+            .elevation(
+                .raised,
+                cornerRadius: CornerRadius.card,
+                fill: isSelected ? Palette.accent.opacity(0.12) : nil
             )
             .overlay(
-                RoundedRectangle(cornerRadius: 12, style: .continuous)
+                RoundedRectangle(cornerRadius: CornerRadius.card, style: .continuous)
                     .strokeBorder(
-                        isSelected ? Color.accentColor : Color.secondary.opacity(0.25),
-                        lineWidth: isSelected ? 1.5 : 1
+                        isSelected ? Palette.accent.dynamic : Color.clear,
+                        lineWidth: 1.5
                     )
             )
         }
-        .buttonStyle(.plain)
+        .buttonStyle(.pressable)
         .accessibilityAddTraits(isSelected ? [.isButton, .isSelected] : .isButton)
     }
 }
 
 /// Four bars of increasing height, `filled` of them lit.
+///
+/// Never accented. The bars are a description of the answer, not the selection
+/// — tinting them too would spend the screen's accent on decoration and leave
+/// the radio glyph saying the same thing twice.
 private struct SignalBars: View {
 
     let filled: Int
-    let isSelected: Bool
 
     var body: some View {
         HStack(alignment: .bottom, spacing: 2) {
             ForEach(1...4, id: \.self) { index in
                 RoundedRectangle(cornerRadius: 1, style: .continuous)
-                    .fill(tint(for: index))
+                    .fill(
+                        index <= filled
+                            ? Color.primary.opacity(0.55)
+                            : Palette.inactiveMark.dynamic
+                    )
                     .frame(width: 3.5, height: 5 + CGFloat(index - 1) * 4.2)
             }
         }
         .accessibilityHidden(true)
     }
-
-    private func tint(for index: Int) -> Color {
-        guard index <= filled else { return Color.secondary.opacity(0.25) }
-        return isSelected ? Color.accentColor : Color.primary.opacity(0.55)
-    }
 }
 
-#Preview {
-    SelfAssessmentView(selection: .playsRegularly, onSelect: { _ in }, onContinue: {})
+#Preview("Answered") {
+    SelfAssessmentView(
+        progress: CalibrationProgress(),
+        selection: .playsRegularly,
+        onSelect: { _ in },
+        onContinue: {}
+    )
+}
+
+#Preview("Unanswered") {
+    SelfAssessmentView(
+        progress: CalibrationProgress(),
+        selection: nil,
+        onSelect: { _ in },
+        onContinue: {}
+    )
 }
