@@ -194,7 +194,11 @@ struct TrainHomeScreen: View {
             if let service = home.makeTrainingService() {
                 NavigationStack {
                     PuzzleSessionScreen(
-                        model: PuzzleSessionModel(driver: service, focus: requestedFocus ?? home.focus)
+                        model: PuzzleSessionModel(
+                            driver: service,
+                            focus: requestedFocus ?? home.focus,
+                            evaluator: EnginePuzzleEvaluator(service: model.engineService)
+                        )
                     )
                 }
             } else {

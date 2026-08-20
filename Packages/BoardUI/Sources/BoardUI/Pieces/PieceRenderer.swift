@@ -14,7 +14,7 @@ import SwiftUI
 
 /// Selects and configures the artwork used to draw pieces.
 ///
-/// The default ``vector`` set needs no bundled assets, which is what lets the
+/// The ``vector`` set needs no bundled assets, which lets the
 /// board render in previews from a clean checkout. ``images(named:prefix:bundleIdentifier:)``
 /// is the seam for a real piece set later: it resolves `Image(name, bundle:)` at
 /// draw time and silently falls back to the vector set when an asset is missing,
@@ -68,7 +68,16 @@ public struct PieceRenderer: Hashable, Sendable, Identifiable {
     self.outlineWidth = outlineWidth
   }
 
-  /// Staunty — the default set, bundled with this package.
+  /// Clay — the default set: soft, uneven toy pieces with a pale blue edge.
+  ///
+  /// The artwork carries its own fills, outlines and shading, so the
+  /// body/outline colours are unused for this set.
+  public static let clay = PieceRenderer(
+    name: "Clay",
+    source: .bundledImages(prefix: "clay-")
+  )
+
+  /// Staunty — the previous default, bundled with this package.
   ///
   /// Chunky, soft-edged and subtly shaded, which is what makes it survive at
   /// phone size: at a 45pt square, thin classic line art loses its outline to
@@ -101,10 +110,10 @@ public struct PieceRenderer: Hashable, Sendable, Identifiable {
 
   /// Every set that ships with the package, in presentation order.
   ///
-  /// The two bundled artwork sets first; the vector and glyph fallbacks are
+  /// The three bundled artwork sets come first. The vector and glyph fallbacks are
   /// listed after them because they exist for previews and thumbnails, not as
   /// something anyone would choose.
-  public static let builtIn: [PieceRenderer] = [.staunty, .cburnett, .vector, .unicode]
+  public static let builtIn: [PieceRenderer] = [.clay, .staunty, .cburnett, .vector, .unicode]
 
   /// An image-backed set. Falls back to vectors for any missing asset.
   public static func images(
@@ -194,7 +203,7 @@ public struct PieceView: View {
   public init(
     kind: Piece.Kind,
     color: Piece.Color,
-    renderer: PieceRenderer = .staunty,
+    renderer: PieceRenderer = .clay,
     size: CGFloat
   ) {
     self.kind = kind
@@ -203,7 +212,7 @@ public struct PieceView: View {
     self.size = size
   }
 
-  public init(piece: Piece, renderer: PieceRenderer = .staunty, size: CGFloat) {
+  public init(piece: Piece, renderer: PieceRenderer = .clay, size: CGFloat) {
     self.init(kind: piece.kind, color: piece.color, renderer: renderer, size: size)
   }
 
@@ -215,13 +224,21 @@ public struct PieceView: View {
       // nowhere to go.
       .padding(BoardMetrics.pieceInset(squareSide: size))
       .frame(width: size, height: size)
-      // A soft contact shadow, not an elevation shadow — very tight, almost no
-      // offset. On a board this pale it is what makes a piece read as an object
-      // resting on a surface rather than a sticker printed on it, and it is the
-      // last line of separation for a near-white piece on a near-white square.
+      // The toy assets contain their own contact shadows. Other sets need this
+      // small shadow to stay separate from pale squares.
       .compositingGroup()
-      .shadow(color: .black.opacity(0.20), radius: size * 0.022, x: 0, y: size * 0.018)
+      .shadow(
+        color: .black.opacity(usesEmbeddedDepth ? 0 : 0.20),
+        radius: size * 0.022,
+        x: 0,
+        y: size * 0.018
+      )
       .accessibilityLabel(Text("\(color.description) \(kind.description)"))
+  }
+
+  private var usesEmbeddedDepth: Bool {
+    guard case let .bundledImages(prefix) = renderer.source else { return false }
+    return prefix == "clay-"
   }
 
   @ViewBuilder
@@ -301,7 +318,7 @@ enum AssetProbe {
 
 // MARK: - Previews
 
-#Preview("Piece set — vector") {
+#Preview("Piece set — clay") {
   let kinds: [Piece.Kind] = [.king, .queen, .rook, .bishop, .knight, .pawn]
   return VStack(spacing: 0) {
     ForEach([Piece.Color.white, .black], id: \.self) { color in

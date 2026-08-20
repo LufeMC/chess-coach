@@ -3,14 +3,18 @@
 //  ChessCoach
 //
 
+import BoardUI
 import SwiftUI
 
-// MARK: - Rung card
+// MARK: - Rung banner
 
-/// Rung, weekly focus, and required-skill progress in one card.
+/// The section banner: rung, weekly focus, and required-skill progress on a
+/// solid violet card with a hard bottom lip, and the app's signature checker
+/// fading out of its top-right corner.
 ///
-/// The habit rides as a chip rather than claiming a card of its own, so the
-/// screen keeps a single hierarchy: where you are, then what today asks of you.
+/// This is the loudest surface on the home screen, which makes it the one place
+/// the identity has to be unambiguous — see ``CheckerMotif`` for why a coloured
+/// slab alone was not enough.
 struct RungCard: View {
     let rung: RungPresentation
     /// True while the progress figure is still being computed. Shows a skeleton
@@ -18,14 +22,18 @@ struct RungCard: View {
     /// claim of zero progress.
     let isMeasuring: Bool
 
-    private let barHeight: CGFloat = 6
+    private let barHeight: CGFloat = 8
+
+    private var shape: RoundedRectangle {
+        RoundedRectangle(cornerRadius: CornerRadius.card, style: .continuous)
+    }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 10) {
+        VStack(alignment: .leading, spacing: 8) {
             HStack(alignment: .firstTextBaseline) {
                 Text("Rung \(rung.rung)")
                     .typeRole(.label, appliesForeground: false)
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(.white.opacity(0.85))
                 Spacer(minLength: 8)
                 if let focusHabit = rung.focusHabit {
                     FocusChip(text: focusHabit)
@@ -33,12 +41,18 @@ struct RungCard: View {
             }
 
             Text(rung.title)
-                .typeRole(.headline)
+                .font(.system(.title3, design: .rounded, weight: .heavy))
+                .foregroundStyle(.white)
 
             progressArea
         }
         .padding(16)
-        .elevation(.raised, cornerRadius: CornerRadius.card)
+        // Motif first, fill second: successive `.background`s stack behind one
+        // another, so the checker lands between the violet and the text.
+        .checkerMotif(cornerRadius: CornerRadius.card)
+        .background(shape.fill(Palette.accent.dynamic))
+        .background(shape.fill(Palette.accentEdge.dynamic).offset(y: EdgeDepth.card))
+        .contentShape(shape)
     }
 
     @ViewBuilder
@@ -58,12 +72,13 @@ struct RungCard: View {
             HStack(spacing: 8) {
                 Capsule()
                     .strokeBorder(
-                        Palette.hairlinePending.dynamic,
-                        style: StrokeStyle(lineWidth: 1, dash: [4, 3])
+                        .white.opacity(0.5),
+                        style: StrokeStyle(lineWidth: 2, dash: [5, 4])
                     )
                     .frame(width: 44, height: barHeight)
                 Text(rung.unmeasuredNote)
-                    .typeRole(.caption)
+                    .typeRole(.caption, appliesForeground: false)
+                    .foregroundStyle(.white.opacity(0.85))
                     .fixedSize(horizontal: false, vertical: true)
                 Spacer(minLength: 0)
             }
@@ -71,15 +86,16 @@ struct RungCard: View {
     }
 }
 
+/// White-on-green progress, like the banner it lives on.
 private struct ProgressTrack: View {
     let progress: Double
 
     var body: some View {
         GeometryReader { proxy in
             ZStack(alignment: .leading) {
-                Capsule().fill(Palette.surfaceSunken.dynamic)
+                Capsule().fill(.white.opacity(0.30))
                 Capsule()
-                    .fill(Palette.accent.dynamic)
+                    .fill(.white)
                     .frame(width: proxy.size.width * min(max(progress, 0), 1))
             }
         }
@@ -92,23 +108,20 @@ private struct FocusChip: View {
     var body: some View {
         Text(text)
             .typeRole(.caption, appliesForeground: false)
-            .foregroundStyle(.secondary)
-            .padding(.horizontal, 8)
+            .foregroundStyle(.white)
+            .padding(.horizontal, 10)
             .padding(.vertical, 4)
-            .background(
-                Capsule().fill(Palette.surfaceSunken.dynamic)
-            )
+            .background(Capsule().fill(.white.opacity(0.22)))
             .accessibilityLabel("This week's focus: \(text)")
     }
 }
 
 // MARK: - Streak strip
 
-/// Seven day marks and, once there is one, the streak count.
+/// Seven day marks, and — once there is one — the streak count behind a flame.
 ///
-/// A training log, not a scoreboard. The count sits at caption size rather than
-/// as a 48pt hero, and there is no flame: heat metaphors escalate, and by day
-/// 40 the only moves left are louder or a let-down.
+/// The count stays honest: it appears only from day one, and a missed day is a
+/// plain grey circle, never a red X.
 struct StreakStrip: View {
     let slots: [DaySlot]
     /// Nil below one day — and nil is rendered as *nothing*, not as a zero.
@@ -136,8 +149,15 @@ struct StreakStrip: View {
             Spacer(minLength: 8)
 
             if let streak {
-                DenominatorText(streak, role: .caption)
-                    .transition(.opacity)
+                HStack(spacing: 5) {
+                    Image(systemName: "flame.fill")
+                        .font(.system(size: 17, weight: .bold))
+                        .foregroundStyle(Palette.streakFlame.dynamic)
+                    DenominatorText(streak, role: .headline)
+                }
+                .transition(.opacity)
+                .accessibilityElement(children: .ignore)
+                .accessibilityLabel("\(streak.accessibilityText) streak")
             }
         }
         .padding(14)
@@ -159,17 +179,17 @@ private struct DayMarkerView: View {
     let marker: DayMarker
     let todayStarted: Bool
 
-    private let size: CGFloat = 18
+    private let size: CGFloat = 20
 
     var body: some View {
         Group {
             switch marker {
             case .done:
                 Circle()
-                    .fill(Palette.accent.dynamic)
+                    .fill(Palette.gold.dynamic)
                     .overlay {
                         Image(systemName: "checkmark")
-                            .font(.system(size: 9, weight: .bold))
+                            .font(.system(size: 10, weight: .heavy))
                             .foregroundStyle(Color.white)
                     }
 
@@ -183,10 +203,10 @@ private struct DayMarkerView: View {
             case .today:
                 Circle()
                     .strokeBorder(
-                        Palette.accent.dynamic,
+                        Palette.gold.dynamic,
                         style: todayStarted
-                            ? StrokeStyle(lineWidth: 2)
-                            : StrokeStyle(lineWidth: 2, dash: [3, 2.5])
+                            ? StrokeStyle(lineWidth: 3)
+                            : StrokeStyle(lineWidth: 3, dash: [3, 3])
                     )
 
             case .tomorrow, .upcoming:
@@ -195,7 +215,7 @@ private struct DayMarkerView: View {
                     .strokeBorder(
                         Palette.hairlinePending.dynamic
                             .opacity(marker == .tomorrow ? 1 : 0.6),
-                        style: StrokeStyle(lineWidth: 1.5, dash: [3, 2.5])
+                        style: StrokeStyle(lineWidth: 2, dash: [3, 3])
                     )
             }
         }
@@ -203,82 +223,234 @@ private struct DayMarkerView: View {
     }
 }
 
-// MARK: - Step row
+// MARK: - The path
 
-/// One checklist row. Status, not a button — the CTA is the only thing on this
-/// screen that takes an order.
-struct TodayStepRow: View {
-    let state: StepRowState
+/// The daily loop drawn as a winding path of chunky nodes — game, moments,
+/// puzzles — with the day's opponent standing beside the first one.
+///
+/// Nodes are buttons where the step is startable and plain status where it is
+/// not; the CTA at the bottom of the screen still names the one step the loop
+/// wants next, so the path never has to shout.
+struct TodayPathView: View {
+    let steps: [StepRowState]
+    /// Who today's game is against. Drawn beside the game node so the path has
+    /// a face on it, exactly like the reference.
+    let opponentName: String?
+    let onTap: (TodayStep) -> Void
+
+    /// The winding: how far each node strays from the centre line.
+    private let sway: [CGFloat] = [0, -64, 52]
 
     var body: some View {
-        HStack(spacing: 12) {
-            glyph
-                .frame(width: 22, height: 22)
+        VStack(spacing: 26) {
+            ForEach(Array(steps.enumerated()), id: \.element.id) { index, step in
+                ZStack {
+                    PathNodeView(state: step, onTap: onTap)
+                        .offset(x: sway[index % sway.count])
 
-            Text(state.title)
-                // Completed rows shift to secondary and keep the check filled.
-                // No strikethrough: a line through finished work reads as
-                // cancellation, which is the opposite of what happened.
-                .typeRole(.headline, appliesForeground: false)
-                .foregroundStyle(foreground)
-
-            Spacer(minLength: 8)
-
-            if let reason = state.lockedReason {
-                Text(reason)
-                    .typeRole(.caption)
-            } else if let tally = state.tally {
-                DenominatorText(
-                    tally,
-                    role: .caption,
-                    valueStyle: AnyShapeStyle(
-                        state.status == .done ? AnyShapeStyle(.secondary) : AnyShapeStyle(.primary)
-                    )
-                )
+                    if index == 0, let opponentName {
+                        HStack {
+                            Spacer()
+                            OpponentAvatar(name: opponentName, size: 88)
+                                .padding(.trailing, 28)
+                        }
+                        .accessibilityHidden(true)
+                    }
+                }
+                .transition(.opacity.animation(Motion.staggered(index: index)))
             }
         }
-        .opacity(state.status.isDimmed ? 0.45 : 1)
+        .frame(maxWidth: .infinity)
+        .padding(.vertical, 12)
+    }
+}
+
+/// One path node: a fat 3D disc with the step's glyph, its label underneath,
+/// and a floating START bubble when it is the step the loop points at.
+private struct PathNodeView: View {
+    let state: StepRowState
+    let onTap: (TodayStep) -> Void
+
+    private var isTappable: Bool {
+        state.status == .current || state.status == .available
+    }
+
+    var body: some View {
+        VStack(spacing: 10) {
+            ZStack(alignment: .top) {
+                node
+                    // Room for the ring around the current node to breathe.
+                    .padding(.top, 14)
+
+                if state.status == .current {
+                    StartBubble()
+                        .offset(y: -22)
+                }
+            }
+
+            VStack(spacing: 2) {
+                Text(state.title)
+                    .typeRole(.headline, appliesForeground: false)
+                    .foregroundStyle(state.status == .locked ? AnyShapeStyle(.tertiary) : AnyShapeStyle(.primary))
+
+                if let reason = state.lockedReason {
+                    Text(reason)
+                        .typeRole(.caption)
+                } else if let tally = state.tally, state.status != .done {
+                    Text(tally.accessibilityText)
+                        .typeRole(.caption)
+                }
+            }
+        }
         .accessibilityElement(children: .combine)
         .accessibilityHint(state.status == .locked ? (state.lockedReason ?? "") : "")
     }
 
-    private var foreground: AnyShapeStyle {
-        state.status == .done ? AnyShapeStyle(.secondary) : AnyShapeStyle(.primary)
+    @ViewBuilder
+    private var node: some View {
+        if isTappable {
+            Button {
+                onTap(state.step)
+            } label: {
+                glyph
+            }
+            .buttonStyle(
+                PathNodeStyle(
+                    fill: Palette.accent,
+                    edge: Palette.accentEdge,
+                    ringed: state.status == .current
+                )
+            )
+        } else {
+            NodeDisc(
+                fill: state.status == .done ? Palette.gold : Palette.lockedFill,
+                edge: state.status == .done ? Palette.goldEdge : Palette.lockedEdge,
+                depressed: false
+            ) {
+                glyph
+            }
+        }
     }
 
-    @ViewBuilder
     private var glyph: some View {
+        Image(systemName: glyphName)
+            .font(.system(size: 26, weight: .heavy))
+            .foregroundStyle(glyphTint)
+    }
+
+    private var glyphName: String {
         switch state.status {
-        case .done:
-            Image(systemName: "checkmark.circle.fill")
-                .font(.system(size: 21))
+        case .done: "checkmark"
+        case .locked: "lock.fill"
+        default:
+            switch state.step {
+            case .game: "star.fill"
+            case .moments: "book.fill"
+            case .puzzles: "puzzlepiece.fill"
+            }
+        }
+    }
+
+    private var glyphTint: Color {
+        state.status == .locked
+            ? DualColor(light: 0xAFAFAF, dark: 0x52656D).dynamic
+            : .white
+    }
+}
+
+/// The disc itself: face, hard lip, optional depress — one construction shared
+/// by the tappable and static nodes so they cannot drift apart.
+private struct NodeDisc<Content: View>: View {
+    let fill: DualColor
+    let edge: DualColor
+    let depressed: Bool
+    @ViewBuilder var content: Content
+
+    static var diameter: CGFloat { 74 }
+
+    var body: some View {
+        content
+            .frame(width: Self.diameter, height: Self.diameter)
+            .background(Circle().fill(fill.dynamic))
+            // A soft top-light, which is what makes the disc read as a
+            // pressable clay button rather than a flat badge.
+            .overlay(
+                Circle()
+                    .fill(.white.opacity(0.16))
+                    .frame(width: Self.diameter * 0.72, height: Self.diameter * 0.34)
+                    .blur(radius: 4)
+                    .offset(y: -Self.diameter * 0.26)
+                    .allowsHitTesting(false)
+            )
+            .offset(y: depressed ? EdgeDepth.control : 0)
+            .background(Circle().fill(edge.dynamic).offset(y: EdgeDepth.control))
+            .animation(Motion.snappy, value: depressed)
+    }
+}
+
+/// The chunky press for a path node, plus the ring that singles out the
+/// current one.
+private struct PathNodeStyle: ButtonStyle {
+    let fill: DualColor
+    let edge: DualColor
+    let ringed: Bool
+
+    func makeBody(configuration: Configuration) -> some View {
+        NodeDisc(fill: fill, edge: edge, depressed: configuration.isPressed) {
+            configuration.label
+        }
+        .padding(6)
+        .overlay {
+            if ringed {
+                Circle()
+                    .strokeBorder(fill.dynamic.opacity(0.35), lineWidth: 5)
+            }
+        }
+    }
+}
+
+/// The floating "START" callout over the current node.
+private struct StartBubble: View {
+    @State private var bounce = false
+
+    var body: some View {
+        VStack(spacing: -1) {
+            Text("Start")
+                .font(.system(.footnote, design: .rounded, weight: .heavy))
+                .textCase(.uppercase)
+                .tracking(1)
                 .foregroundStyle(Palette.accent.dynamic)
-                .transition(.scale.combined(with: .opacity))
-
-        case .current:
-            Circle()
-                .strokeBorder(Palette.accent.dynamic, lineWidth: 2)
-                .overlay {
-                    Text("\(state.step.rawValue)")
-                        .typeRole(.label, appliesForeground: false)
-                        .foregroundStyle(Palette.accent.dynamic)
-                }
-
-        case .available:
-            Circle()
-                .strokeBorder(Palette.hairline.dynamic, lineWidth: 1.5)
-                .overlay {
-                    Text("\(state.step.rawValue)")
-                        .typeRole(.label, appliesForeground: false)
-                        .foregroundStyle(.secondary)
-                }
-
-        case .locked:
-            Circle()
-                .strokeBorder(
-                    Palette.hairlinePending.dynamic,
-                    style: StrokeStyle(lineWidth: 1.5, dash: [3, 2.5])
+                .padding(.horizontal, 14)
+                .padding(.vertical, 7)
+                .background(
+                    RoundedRectangle(cornerRadius: CornerRadius.chip, style: .continuous)
+                        .fill(Palette.surfaceRaised.dynamic)
                 )
+                .overlay(
+                    RoundedRectangle(cornerRadius: CornerRadius.chip, style: .continuous)
+                        .strokeBorder(Palette.hairline.dynamic, lineWidth: 2)
+                )
+
+            Triangle()
+                .fill(Palette.surfaceRaised.dynamic)
+                .frame(width: 12, height: 7)
+                .overlay(Triangle().stroke(Palette.hairline.dynamic, lineWidth: 2))
+                .clipShape(Triangle())
+        }
+        .offset(y: bounce ? -3 : 1)
+        .animation(.easeInOut(duration: 0.9).repeatForever(autoreverses: true), value: bounce)
+        .onAppear { bounce = true }
+        .accessibilityHidden(true)
+    }
+
+    private struct Triangle: Shape {
+        func path(in rect: CGRect) -> Path {
+            var path = Path()
+            path.move(to: CGPoint(x: rect.minX, y: rect.minY))
+            path.addLine(to: CGPoint(x: rect.maxX, y: rect.minY))
+            path.addLine(to: CGPoint(x: rect.midX, y: rect.maxY))
+            path.closeSubpath()
+            return path
         }
     }
 }

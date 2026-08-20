@@ -91,7 +91,12 @@ struct SelfAssessmentView: View {
                 .padding(.horizontal)
                 .padding(.top, 10)
                 .padding(.bottom, 6)
-                .background(.regularMaterial)
+                .background(Palette.surfaceGround.dynamic)
+                .overlay(alignment: .top) {
+                    Rectangle()
+                        .fill(Palette.hairline.dynamic)
+                        .frame(height: 2)
+                }
         }
     }
 }

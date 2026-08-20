@@ -274,6 +274,9 @@ struct EndgameDrillScreen: View {
     var body: some View {
         VStack(spacing: 12) {
             if let position = model.position {
+                CapturedTrayRow(perspective: model.orientation, position: position)
+                    .padding(.horizontal, 16)
+
                 BoardView(
                     position: position,
                     orientation: model.orientation,

@@ -29,7 +29,16 @@ final class ProfileModel {
         didSet { if metric != oldValue { rangeOffset = 0 } }
     }
 
-    var range: ProfileTimeRange = .threeMonths {
+    /// Opens on one month rather than three.
+    ///
+    /// Three months is the right *habit* window and the wrong *opening* one. A
+    /// new account has a few days of history, so a 91-day axis renders about
+    /// four points crushed against the right edge of an otherwise empty card —
+    /// which reads as a broken chart, not as an early one, and it is the first
+    /// thing on the screen. Thirty days is still long enough to show a trend
+    /// and short enough that a first week fills a usable share of it. The wider
+    /// windows are one tap away and remain the right answer later.
+    var range: ProfileTimeRange = .oneMonth {
         didSet { if range != oldValue { rangeOffset = 0 } }
     }
 

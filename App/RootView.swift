@@ -59,23 +59,50 @@ private struct PhoneRootView: View {
     var body: some View {
         @Bindable var model = model
 
-        TabView(selection: $model.selectedTab) {
-            Tab("Today", systemImage: "target", value: AppModel.Tab.today) {
+        // The system tab bar is hidden per tab and ``MainTabBar`` takes its place
+        // in a `VStack`. `TabView` is still what holds the tabs, so each one
+        // keeps its own navigation stack and its own lazily-built content —
+        // rebuilding that with a `switch` would throw away both.
+        //
+        // A `VStack` rather than a `safeAreaInset` on the `TabView`: with the
+        // system bar hidden, an inset is drawn *over* the tab content instead of
+        // shrinking it, which ate the bottom of every screen's action bar.
+        // Stacking makes the tab content genuinely shorter, which is the thing
+        // the screens inside need to be true.
+        VStack(spacing: 0) {
+            tabs
+            if !model.isPlayingGame {
+                MainTabBar(selection: $model.selectedTab)
+                    .transition(.move(edge: .bottom))
+            }
+        }
+        .animation(Motion.standard, value: model.isPlayingGame)
+    }
+
+    private var tabs: some View {
+        @Bindable var model = model
+
+        return TabView(selection: $model.selectedTab) {
+            Tab("Today", systemImage: "house.fill", value: AppModel.Tab.today) {
                 NavigationStack(path: $model.todayPath) {
                     TodayScreen()
                         .navigationDestination(for: AppModel.Route.self) { route in
                             destination(for: route)
                         }
                 }
+                .toolbar(.hidden, for: .tabBar)
             }
-            Tab("Play", systemImage: "play.circle", value: AppModel.Tab.play) {
+            Tab("Play", systemImage: "play.fill", value: AppModel.Tab.play) {
                 NavigationStack { PlayScreen() }
+                    .toolbar(.hidden, for: .tabBar)
             }
-            Tab("Train", systemImage: "square.grid.3x3", value: AppModel.Tab.train) {
+            Tab("Train", systemImage: "dumbbell.fill", value: AppModel.Tab.train) {
                 NavigationStack { TrainHomeScreen() }
+                    .toolbar(.hidden, for: .tabBar)
             }
-            Tab("Profile", systemImage: "chart.line.uptrend.xyaxis", value: AppModel.Tab.profile) {
+            Tab("Profile", systemImage: "person.fill", value: AppModel.Tab.profile) {
                 NavigationStack { ProfileView() }
+                    .toolbar(.hidden, for: .tabBar)
             }
         }
     }

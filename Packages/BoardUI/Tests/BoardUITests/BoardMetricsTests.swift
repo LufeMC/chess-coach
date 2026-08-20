@@ -279,15 +279,17 @@ struct BoardMetricsTests {
 
   // MARK: - Coordinates
 
-  @Test func coordinatesAreAboutNinePointsOnAPhoneBoard() {
+  @Test func coordinatesAreAboutElevenPointsOnAPhoneBoard() {
+    // ~11pt, not the ~9pt this once was: the labels were retuned for a reader
+    // learning notation from them, and at 9pt they were being politely ignored.
     let size = BoardMetrics.coordinateFontSize(squareSide: 45)
-    #expect(size == 9)
+    #expect(size == 45 * 0.24)
   }
 
   @Test func coordinatesGrowWithDynamicTypeButNeverSwallowTheirSquare() {
     let huge = BoardMetrics.coordinateFontSize(squareSide: 45, typeScale: 3)
-    #expect(huge > 9)
-    #expect(huge <= 45 * 0.30)
+    #expect(huge > 45 * 0.24)
+    #expect(huge <= 45 * 0.32)
   }
 
   @Test func coordinatesStayLegibleOnAThumbnail() {

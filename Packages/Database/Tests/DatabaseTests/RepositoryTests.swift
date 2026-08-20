@@ -853,12 +853,12 @@ struct SettingsRepositoryTests {
         #expect(settings.id == AppSettings.singletonID)
         #expect(settings.claudeModel == "claude-opus-5")
         #expect(settings.effort == "medium")
-        #expect(settings.boardTheme == "classic")
-        // Staunty, matching `PieceRenderer.staunty` being the default everywhere
-        // in BoardUI: it is the set drawn to survive phone-size squares, and a
-        // stored default that disagreed with the renderer's meant a fresh
-        // install rendered a set nothing else in the app considered default.
-        #expect(settings.pieceSet == "staunty")
+        #expect(settings.boardTheme == "clay")
+        // Clay, matching `PieceRenderer.clay` being the default everywhere in
+        // BoardUI since the toy redesign: a stored default that disagreed with
+        // the renderer's meant a fresh install rendered a set nothing else in
+        // the app considered default.
+        #expect(settings.pieceSet == "clay")
         #expect(settings.soundOn)
         #expect(settings.hapticsOn)
         #expect(settings.userRating == 1100)

@@ -107,7 +107,7 @@ public struct BoardStyle: Hashable, Sendable, Identifiable {
     showsCoordinates: Bool = false,
     showsMaterialFeedback: Bool = true,
     cornerRadius: CGFloat = 0,
-    pieceSet: PieceRenderer = .staunty
+    pieceSet: PieceRenderer = .clay
   ) {
     self.name = name
     self.lightSquare = lightSquare
@@ -149,20 +149,22 @@ public struct BoardStyle: Hashable, Sendable, Identifiable {
 
   /// The coordinate tone for a glyph sitting on a square of a given colour.
   ///
-  /// Normally the *opposing* square's tone at 40%: on a board this quiet, a
-  /// label drawn in the other square's colour is exactly as loud as the checker
-  /// pattern itself and no louder, which is the only weight a coordinate should
-  /// ever carry. It also means the labels retune themselves for free whenever
-  /// the squares do.
+  /// This used to be the *opposing* square's tone at reduced opacity — exactly
+  /// as loud as the checker pattern and no louder, which is the right weight
+  /// for a reader who already knows notation and wants the labels out of the
+  /// way. Two rounds of "I can hardly see it" feedback established that this
+  /// app's reader is not that reader: they are learning notation *from* these
+  /// labels, and a label tuned to vanish teaches nothing. So the per-square
+  /// colour now simply uses the theme's dedicated ``coordinate`` grey — a tone
+  /// every theme already carries, chosen to be read against both of its
+  /// squares, and still well below the pieces in contrast.
   ///
-  /// "Increase Contrast" is a request to stop being quiet, so that reader gets
-  /// the flat near-black/near-white instead — no opacity, no borrowing.
+  /// "Increase Contrast" keeps its flat near-black/near-white extreme.
   public func coordinateColor(
     on squareColor: Square.Color,
     contrast: ColorSchemeContrast
   ) -> DualColor {
-    guard contrast != .increased else { return coordinateColor(contrast) }
-    return opposingSquareColor(for: squareColor).opacity(BoardMetrics.coordinateOpacity)
+    coordinateColor(contrast)
   }
 
   /// Returns a copy with coordinates turned on.
@@ -246,9 +248,35 @@ extension BoardStyle {
     lastMove: DualColor(light: 0xD98E27, dark: 0xEFBB5F)
   )
 
+  /// Clay — the toy-like theme matching the bundled clay piece set.
+  ///
+  /// Sampled from the generated clay board art: a warm cream against a cool
+  /// blue-grey, a much bolder checker than the quiet themes above because the
+  /// clay pieces carry enough weight to sit on it.
+  ///
+  /// The accent is the app's brand violet. A selected square is the user saying
+  /// "I am moving this", which is the same sentence the primary button makes —
+  /// and a board whose selection colour disagrees with the app's action colour
+  /// teaches the user two different meanings for "you are doing this". Violet
+  /// also clears both square tones by a wide margin, which the old blue did not
+  /// on the cool dark squares.
+  public static let clay = BoardStyle(
+    name: "Clay",
+    lightSquare: DualColor(light: 0xF5F2ED, dark: 0x4B5A64),
+    darkSquare: DualColor(light: 0xCCD2D5, dark: 0x43505A),
+    accent: DualColor(light: 0x7B2FF7, dark: 0x9A63FF),
+    caution: DualColor(light: 0xE08A00, dark: 0xFFB020),
+    warning: DualColor(light: 0xFF7A2F, dark: 0xFFB020),
+    danger: DualColor(light: 0xE23B36, dark: 0xFF6B66),
+    success: DualColor(light: 0x1B9E52, dark: 0x3ECB7D),
+    coordinate: DualColor(light: 0x6E7C88, dark: 0xAAB8C3),
+    lastMove: DualColor(light: 0xFFB020, dark: 0xFFC85A),
+    cornerRadius: 16
+  )
+
   /// The theme used when a caller does not specify one.
-  public static let `default` = BoardStyle.slate
+  public static let `default` = BoardStyle.clay
 
   /// Every built-in theme, in presentation order.
-  public static let builtIn: [BoardStyle] = [.slate, .ink, .paper]
+  public static let builtIn: [BoardStyle] = [.clay, .slate, .ink, .paper]
 }

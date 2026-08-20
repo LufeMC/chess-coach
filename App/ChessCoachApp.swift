@@ -6,10 +6,36 @@ struct ChessCoachApp: App {
     @State private var model = AppModel()
     @Environment(\.scenePhase) private var scenePhase
 
+    init() {
+        #if canImport(UIKit)
+            // Navigation titles in the same rounded-heavy voice as everything
+            // else. SwiftUI exposes no font hook for bar titles, so this is the
+            // platform's own seam for it.
+            let large = UIFont.systemFont(ofSize: 34, weight: .heavy)
+            let inline = UIFont.systemFont(ofSize: 17, weight: .heavy)
+            UINavigationBar.appearance().largeTitleTextAttributes = [
+                .font: UIFont(
+                    descriptor: large.fontDescriptor.withDesign(.rounded) ?? large.fontDescriptor,
+                    size: 34
+                )
+            ]
+            UINavigationBar.appearance().titleTextAttributes = [
+                .font: UIFont(
+                    descriptor: inline.fontDescriptor.withDesign(.rounded) ?? inline.fontDescriptor,
+                    size: 17
+                )
+            ]
+        #endif
+    }
+
     var body: some Scene {
         WindowGroup {
             RootView()
                 .environment(model)
+                // Macaw blue for everything the button styles don't already
+                // paint: tab selection, links, toolbar glyphs. Green stays
+                // reserved for the primary action.
+                .tint(Palette.blue.dynamic)
                 .task {
                     await model.boot()
                 }

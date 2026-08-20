@@ -288,7 +288,7 @@ struct PuzzleSessionModelTests {
 
         let verdict = model.stage.verdict
         #expect(verdict?.solved == false)
-        #expect(verdict?.message == "Missed — the pin was on the e-file.")
+        #expect(verdict?.message == "Missed — the pawn to e5: a pin.")
         // The ring marks where the user actually went.
         #expect(verdict?.ring == BoardRing(square: .d5, tone: .wrong))
         // ...and the answer is drawn so they leave knowing the move.
@@ -474,5 +474,329 @@ struct DrillMasteryTests {
         #expect(mastery.label == "2 of 2 clean")
         #expect(mastery.fraction == 1)
         #expect(mastery.isMastered)
+    }
+}
+
+// MARK: - Why the move works
+
+/// The explanation is read off the board, never from the theme tag.
+///
+/// These pin the one property that makes the feature safe to ship: it says
+/// nothing it cannot prove from the position. A confidently wrong explanation
+/// teaches the wrong pattern, which is worse than the bare square it replaced.
+@Suite("Puzzle explanations")
+struct PuzzleReasonTests {
+
+    private func position(_ fen: String) -> Position {
+        guard let position = Position(fen: fen) else {
+            Issue.record("bad fixture FEN: \(fen)")
+            return .standard
+        }
+        return position
+    }
+
+    @Test("A knight fork names both pieces it hits")
+    func namesAFork() {
+        // Nb5–c7: the family fork, hitting the king on e8 and the rook on a8.
+        let clause = PuzzleReason.clause(
+            forAnswer: "b5c7",
+            in: position("r3k3/8/8/1N6/8/8/8/4K3 w - - 0 1")
+        )
+        #expect(clause == "it forks the king and rook — both attacked, and only one can move away")
+    }
+
+    @Test("Mate is the whole explanation")
+    func mateNeedsNothingElse() {
+        // Ra1–a8 is back-rank mate; the pawns the king is stuck behind are its own.
+        let clause = PuzzleReason.clause(
+            forAnswer: "a1a8",
+            in: position("6k1/5ppp/8/8/8/8/8/R3K3 w - - 0 1")
+        )
+        #expect(clause == "that is checkmate")
+    }
+
+    @Test("A capture names what it wins")
+    func namesTheCapture() {
+        let clause = PuzzleReason.clause(
+            forAnswer: "d1d8",
+            in: position("3q4/8/8/7k/8/8/8/3R2K1 w - - 0 1")
+        )
+        #expect(clause == "it wins the queen")
+    }
+
+    @Test("A move with nothing to say says nothing")
+    func silenceRatherThanFiller() {
+        // A quiet pawn push that captures nothing, checks nothing, hits nothing.
+        let clause = PuzzleReason.clause(
+            forAnswer: "e2e3",
+            in: position("4k3/8/8/8/8/8/4P3/4K3 w - - 0 1")
+        )
+        #expect(clause == nil, "an invented reason is worse than no reason")
+    }
+
+    @Test("A missing position or move explains nothing")
+    func degradesQuietly() {
+        #expect(PuzzleReason.clause(forAnswer: nil, in: .standard) == nil)
+        #expect(PuzzleReason.clause(forAnswer: "e2e4", in: nil) == nil)
+        // Not a legal move in this position.
+        #expect(PuzzleReason.clause(forAnswer: "a1a8", in: .standard) == nil)
+    }
+
+    @Test("The banner keeps its old wording when the position is unknown")
+    func copyIsUnchangedWithoutAPosition() {
+        // The pure copy tests above rely on this, and so does the summary.
+        #expect(
+            PuzzleConcept.verdictMessage(solved: false, theme: ThemeTag("crushing"), answer: "g1f3")
+                == "Missed — the move was to f3."
+        )
+    }
+
+    /// The user cannot be taught a word by having it used at them. Every clause
+    /// that names a pattern has to define it in the same breath.
+    @Test("Naming a pattern always defines it")
+    func jargonIsAlwaysExplained() {
+        let clause = PuzzleReason.clause(
+            forAnswer: "b5c7",
+            in: position("r3k3/8/8/1N6/8/8/8/4K3 w - - 0 1")
+        )
+        #expect(clause?.contains("forks") == true, "the word is still worth learning")
+        #expect(clause?.contains("only one can move away") == true, "and it has to be explained")
+    }
+
+    /// `attacks the king, with check` says the same thing twice.
+    @Test("A check is not also announced as an attack on the king")
+    func checkIsNotDoubled() {
+        // Ra1–a5 checks the king on a6 up the file. (a8 would have to pass
+        // through the king to get there, which is not a move.)
+        let clause = PuzzleReason.clause(
+            forAnswer: "a1a5",
+            in: position("8/8/k7/8/8/8/8/R3K3 w - - 0 1")
+        )
+        #expect(clause == "it puts the king in check")
+    }
+
+    // MARK: The move the user played
+
+    @Test("A move that hangs a piece says so")
+    func namesTheHangingPiece() {
+        // Qd1–d5, where a pawn on e6 can simply take it.
+        let mistake = PuzzleReason.mistake(
+            inMove: "d1d5",
+            from: position("4k3/8/4p3/8/8/8/8/3QK3 w - - 0 1")
+        )
+        #expect(mistake == "your queen could be taken by the pawn")
+    }
+
+    @Test("A safe move is not accused of anything")
+    func staysSilentOnASoundMove() {
+        let mistake = PuzzleReason.mistake(
+            inMove: "d1d4",
+            from: position("4k3/8/4p3/8/8/8/8/3QK3 w - - 0 1")
+        )
+        #expect(mistake == nil, "a guess dressed as coaching costs more than silence")
+    }
+
+    /// Being recaptured is not the same as blundering: taking a queen with a
+    /// rook is correct even when the rook is then taken.
+    @Test("A capture that wins more than it risks is not a mistake")
+    func profitableCapturesAreLeftAlone() {
+        let mistake = PuzzleReason.mistake(
+            inMove: "d1d8",
+            from: position("3q1k2/8/8/8/8/8/8/3R2K1 w - - 0 1")
+        )
+        #expect(mistake == nil)
+    }
+
+    @Test("A solve is never told what was wrong with it")
+    func solvesCarryNoMistake() {
+        let board = position("4k3/8/4p3/8/8/8/8/3QK3 w - - 0 1")
+        let solved = PuzzleConcept.verdictMessage(
+            solved: true, theme: .fork, answer: "d1d5", position: board, mistake: "your queen could be taken by the pawn"
+        )
+        #expect(!solved.contains("But"))
+    }
+
+    @Test("A miss explains the answer and the move that was played")
+    func missExplainsBothMoves() {
+        let board = position("4k3/8/4p3/8/8/8/8/3QK3 w - - 0 1")
+        let missed = PuzzleConcept.verdictMessage(
+            solved: false, theme: .fork, answer: "d1d4", position: board,
+            mistake: PuzzleReason.mistake(inMove: "d1d5", from: board)
+        )
+        #expect(missed.contains("But your queen could be taken by the pawn."))
+    }
+
+    @Test("Success and failure still share a sentence shape once a reason is added")
+    func shapeSurvivesTheExplanation() {
+        let board = position("r3k3/8/8/1N6/8/8/8/4K3 w - - 0 1")
+        let missed = PuzzleConcept.verdictMessage(
+            solved: false, theme: .fork, answer: "b5c7", position: board
+        )
+        let solved = PuzzleConcept.verdictMessage(
+            solved: true, theme: .fork, answer: "b5c7", position: board
+        )
+        #expect(missed.contains("forks the king and rook — both attacked, and only one can move away"))
+        #expect(missed.dropFirst("Missed".count) == solved.dropFirst("Solved".count))
+    }
+}
+
+// MARK: - Orientation
+
+@Suite("Board orientation")
+@MainActor
+struct PuzzleOrientationTests {
+
+    /// The bug: orientation was derived from `sideToMove`, so the board span
+    /// round the instant an answer landed — while the user was still reading the
+    /// result of the puzzle they had just finished.
+    @Test("Solving a puzzle does not spin the board")
+    func orientationHoldsThroughTheVerdict() async {
+        let driver = FakeDriver(plans: [makePlan(line: ["e2e4", "e7e5"])])
+        let model = PuzzleSessionModel(driver: driver)
+        await model.start()
+
+        let solving = model.orientation
+        #expect(solving == .black)
+
+        _ = model.attemptMove(from: .e7, to: .e5)
+        await model.waitForGrading()
+
+        guard case .verdict = model.stage else {
+            Issue.record("expected a verdict")
+            return
+        }
+        #expect(model.orientation == solving, "the board must not turn under the banner")
+    }
+}
+
+// MARK: - Engine-backed explanations
+
+/// A scripted evaluator, so the upgrade path can be tested without Stockfish.
+private struct ScriptedEvaluator: PuzzleMoveEvaluator {
+    /// Centipawns keyed by UCI, from the solver's point of view.
+    var scores: [String: Int]
+
+    func evaluate(fen: String, playing uci: String) async -> PuzzleEvaluation? {
+        scores[uci].map(PuzzleEvaluation.init(centipawns:))
+    }
+}
+
+/// Most wrong moves hang nothing — they are simply not the best. The board
+/// cannot say why; the engine can.
+@Suite("Engine explanations")
+struct PuzzleEvaluationTests {
+
+    @Test("Mate outranks any material score, whichever way it falls")
+    func mateFoldsToTheExtremes() {
+        #expect(PuzzleEvaluation(score: .mate(3)).centipawns == PuzzleEvaluation.mateMagnitude)
+        #expect(PuzzleEvaluation(score: .mate(-1)).centipawns == -PuzzleEvaluation.mateMagnitude)
+        #expect(PuzzleEvaluation(score: .mate(1)).band == .winning)
+        #expect(PuzzleEvaluation(score: .mate(-6)).band == .losing)
+    }
+
+    /// The engine reports from the side to move, which after the solver's move
+    /// is the opponent. Getting this backwards would praise every blunder.
+    @Test("The perspective flips after the move")
+    func perspectiveIsNegated() {
+        #expect(PuzzleEvaluation(centipawns: 300).negated.centipawns == -300)
+    }
+
+    @Test("A move that gives up a winning position is called out")
+    func namesTheSquanderedAdvantage() {
+        let clause = PuzzleMoveComparison.clause(
+            answer: PuzzleEvaluation(centipawns: 600),
+            played: PuzzleEvaluation(centipawns: 10)
+        )
+        #expect(clause == "yours only keeps things level")
+    }
+
+    @Test("A move that loses outright says so")
+    func namesTheCollapse() {
+        let clause = PuzzleMoveComparison.clause(
+            answer: PuzzleEvaluation(centipawns: 400),
+            played: PuzzleEvaluation(centipawns: -800)
+        )
+        #expect(clause == "yours leaves you losing")
+    }
+
+    /// Puzzles often have a second move that is very nearly as good. Telling the
+    /// user it "only keeps things level" would be false coaching.
+    @Test("A near-equal move is not criticised")
+    func closeMovesGetNoLecture() {
+        #expect(
+            PuzzleMoveComparison.clause(
+                answer: PuzzleEvaluation(centipawns: 300),
+                played: PuzzleEvaluation(centipawns: 260)
+            ) == nil
+        )
+    }
+
+    @Test("A move in the same band is never called worse")
+    func sameBandIsSilent() {
+        // A big raw gap, but both moves are winning.
+        #expect(
+            PuzzleMoveComparison.clause(
+                answer: PuzzleEvaluation(centipawns: 2_000),
+                played: PuzzleEvaluation(centipawns: 700)
+            ) == nil
+        )
+    }
+
+    /// Mating puzzles are the most common kind, and the position after mate has
+    /// no legal moves for an engine to search.
+    @Test("A mating move is scored from the board, not the engine")
+    func mateNeedsNoEngine() {
+        let board = Position(fen: "6k1/5ppp/8/8/8/8/8/R3K3 w - - 0 1") ?? .standard
+        let mate = PuzzleEvaluation.terminal(playing: "a1a8", in: board)
+        #expect(mate?.band == .winning)
+        // A move that leaves the game running is left to the engine.
+        #expect(PuzzleEvaluation.terminal(playing: "a1a5", in: board) == nil)
+    }
+
+    @Test("A missing evaluation explains nothing")
+    func degradesWithoutTheEngine() {
+        #expect(PuzzleMoveComparison.clause(answer: nil, played: PuzzleEvaluation(centipawns: 0)) == nil)
+        #expect(PuzzleMoveComparison.clause(answer: PuzzleEvaluation(centipawns: 500), played: nil) == nil)
+    }
+}
+
+@Suite("Engine explanation upgrade")
+@MainActor
+struct PuzzleExplanationUpgradeTests {
+
+    /// The banner appears immediately and *grows* the engine's clause, rather
+    /// than making the user wait on two searches for any feedback at all.
+    @Test("A wrong move that hangs nothing is explained by the engine")
+    func upgradesTheBanner() async {
+        let driver = FakeDriver(plans: [makePlan(line: ["e2e4", "e7e5"])])
+        let model = PuzzleSessionModel(
+            driver: driver,
+            evaluator: ScriptedEvaluator(scores: ["e7e5": 500, "b8c6": 0])
+        )
+        await model.start()
+
+        // A legal move that is not the answer, and hangs nothing.
+        _ = model.attemptMove(from: .b8, to: .c6)
+        await model.waitForGrading()
+
+        // The sentence is already on screen before the engine has spoken.
+        #expect(model.stage.verdict != nil)
+
+        await model.waitForExplanation()
+        let message = model.stage.verdict?.message ?? ""
+        #expect(message.contains("But yours only keeps things level."))
+    }
+
+    @Test("With no engine the banner keeps its shorter sentence")
+    func withoutAnEvaluatorNothingChanges() async {
+        let driver = FakeDriver(plans: [makePlan(line: ["e2e4", "e7e5"])])
+        let model = PuzzleSessionModel(driver: driver)
+        await model.start()
+
+        _ = model.attemptMove(from: .b8, to: .c6)
+        await model.waitForGrading()
+        await model.waitForExplanation()
+
+        #expect(model.stage.verdict?.message.contains("But") == false)
     }
 }

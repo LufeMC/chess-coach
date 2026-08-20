@@ -113,6 +113,9 @@ struct ReviewScreen: View {
                     board
                         .frame(width: side, height: side)
 
+                    capturedRow
+                        .padding(.horizontal, 16)
+
                     scrubber
                         .padding(.horizontal, 16)
 
@@ -153,6 +156,8 @@ struct ReviewScreen: View {
                     VStack(spacing: 14) {
                         if let notice = analysisNotice { notice }
                         board
+                            .frame(maxWidth: 520)
+                        capturedRow
                             .frame(maxWidth: 520)
                         evalBar
                             .frame(maxWidth: 520)
@@ -249,6 +254,13 @@ struct ReviewScreen: View {
             highlights: model.highlights,
             style: style
         )
+    }
+
+    /// The material count for the position on screen. In review it moves as the
+    /// scrubber does — watching the trays fill move by move is the material
+    /// story of the game told at the pace the user chooses.
+    private var capturedRow: some View {
+        CapturedTrayRow(perspective: model.orientation, position: model.position)
     }
 
     @ViewBuilder

@@ -66,13 +66,22 @@ struct GameSummaryScreen: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
-            Text(presentation.headline)
-                .typeRole(.title)
-                .fixedSize(horizontal: false, vertical: true)
+            HStack(alignment: .top, spacing: 16) {
+                VStack(alignment: .leading, spacing: 6) {
+                    Text(presentation.headline)
+                        .typeRole(.title)
+                        .fixedSize(horizontal: false, vertical: true)
 
-            Text(presentation.detail)
-                .typeRole(.caption)
-                .padding(.top, 6)
+                    Text(presentation.detail)
+                        .typeRole(.caption)
+                }
+
+                Spacer(minLength: 0)
+
+                // The person you just played, same face as the Play screen —
+                // the summary is the end of a conversation with them.
+                OpponentAvatar(name: target.opponentName, size: 64)
+            }
 
             // A deliberate, fixed distance rather than a spacer: the numbers
             // belong to the sentence above them, and floating them in the middle

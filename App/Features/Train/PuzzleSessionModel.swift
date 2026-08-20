@@ -7,6 +7,7 @@ import BoardUI
 import ChessKit
 import Foundation
 import Observation
+import SwiftUI
 import TrainingCore
 
 /// A ring drawn round a destination square.
@@ -109,6 +110,12 @@ final class PuzzleSessionModel {
 
     private let driver: any PuzzleSessionDriver
     private let clock: @Sendable () -> Date
+    /// Judges a wrong move the board cannot explain. Optional: with no engine
+    /// the banner simply keeps the shorter sentence.
+    private let evaluator: (any PuzzleMoveEvaluator)?
+    /// The in-flight explanation, retained so it can be cancelled when the user
+    /// moves on and so tests can wait for it.
+    private var explainTask: Task<Void, Never>?
 
     /// The week's habit, applied when the session is assembled.
     ///
@@ -135,11 +142,21 @@ final class PuzzleSessionModel {
     init(
         driver: any PuzzleSessionDriver,
         focus: WeeklyFocus? = nil,
+        evaluator: (any PuzzleMoveEvaluator)? = nil,
         clock: @escaping @Sendable () -> Date = { Date() }
     ) {
         self.driver = driver
         self.weeklyFocus = focus
+        self.evaluator = evaluator
         self.clock = clock
+    }
+
+    /// Waits for the engine's explanation of the move just played.
+    ///
+    /// Exists for tests, like ``waitForGrading()``: the banner is already on
+    /// screen by the time this is running, and the UI never waits on it.
+    func waitForExplanation() async {
+        await explainTask?.value
     }
 
     // MARK: Lifecycle
@@ -173,6 +190,9 @@ final class PuzzleSessionModel {
         }
         planOnScreen = item
         machineSnapshot = machine
+        // Read once, from the position the user is asked to solve — after the
+        // setup move, before any answer — and held for the whole item.
+        orientation = machine.board.position.sideToMove
         hintMove = nil
         liveRing = nil
         lastOpponentMove = item.presented.item.opponentMovesFirst ? MovePair(uci: item.presented.line.first) : nil
@@ -188,9 +208,14 @@ final class PuzzleSessionModel {
     var position: Position? { machineSnapshot?.board.position }
 
     /// The puzzle is always shown from the solver's side.
-    var orientation: Piece.Color {
-        machineSnapshot?.board.position.sideToMove ?? .white
-    }
+    ///
+    /// Pinned when the item begins rather than read from the live position.
+    /// `sideToMove` flips with every move played, so deriving orientation from
+    /// it spun the board the instant an answer landed — the user solved a
+    /// puzzle and watched the board rotate underneath the result banner, before
+    /// the next puzzle had even been asked for. The side you are solving for is
+    /// a property of the *item*, not of whose turn it happens to be mid-line.
+    private(set) var orientation: Piece.Color = .white
 
     /// The one line above the board.
     ///
@@ -298,14 +323,21 @@ final class PuzzleSessionModel {
 
         case .solved:
             machineSnapshot = probe
-            completeItem(plan: plan, solvedUnaided: !usedHintOnItem, played: uci, expected: uci)
+            completeItem(
+                plan: plan,
+                solvedUnaided: !usedHintOnItem,
+                played: uci,
+                expected: uci,
+                answeredFrom: before.board.position
+            )
 
         case .failed:
             completeItem(
                 plan: plan,
                 solvedUnaided: false,
                 played: uci,
-                expected: before.expectedMove
+                expected: before.expectedMove,
+                answeredFrom: before.board.position
             )
 
         case .illegal:
@@ -330,16 +362,28 @@ final class PuzzleSessionModel {
         guard stage == .solving, let plan = planOnScreen, let before = machineSnapshot else { return }
         let expected = before.expectedMove
         await driver.skipCurrent()
-        completeItem(plan: plan, solvedUnaided: false, played: nil, expected: expected)
+        completeItem(
+            plan: plan,
+            solvedUnaided: false,
+            played: nil,
+            expected: expected,
+            answeredFrom: before.board.position
+        )
     }
 
     // MARK: Verdict
 
+    /// - Parameter answeredFrom: the position the answer is played *from*.
+    ///   Passed in rather than read from ``machineSnapshot``, because a solve
+    ///   advances that snapshot past the move before this runs — the explanation
+    ///   would then describe the position after the answer, which is the one
+    ///   position in which the answer is not available.
     private func completeItem(
         plan: SessionItemPlan,
         solvedUnaided: Bool,
         played: String?,
-        expected: String?
+        expected: String?,
+        answeredFrom: Position?
     ) {
         progress.completed += 1
         progress.total = driver.queueCount
@@ -364,19 +408,97 @@ final class PuzzleSessionModel {
             ? PuzzleConcept.destination(ofUCI: expected)
             : PuzzleConcept.destination(ofUCI: played) ?? PuzzleConcept.destination(ofUCI: expected)
 
+        // The board can often prove the mistake outright — a piece left where
+        // something cheaper takes it. That answer is free and instant.
+        let provenMistake = solvedUnaided
+            ? nil
+            : PuzzleReason.mistake(inMove: played, from: answeredFrom)
+
         stage = .verdict(
             Verdict(
                 solved: solvedUnaided,
-                message: PuzzleConcept.verdictMessage(solved: solvedUnaided, theme: theme, answer: expected),
+                message: PuzzleConcept.verdictMessage(
+                    solved: solvedUnaided,
+                    theme: theme,
+                    answer: expected,
+                    position: answeredFrom,
+                    mistake: provenMistake
+                ),
                 ring: ringSquare.map { BoardRing(square: $0, tone: solvedUnaided ? .correct : .wrong) },
                 answer: solvedUnaided ? nil : expected
             )
         )
+
+        // Most wrong moves hang nothing — they are simply not the best, and the
+        // board alone cannot say why. That is the case the engine exists for.
+        guard !solvedUnaided, provenMistake == nil,
+            let played, let expected, let answeredFrom
+        else { return }
+
+        explainTask = Task { [weak self] in
+            await self?.explainWithEngine(
+                theme: theme,
+                answer: expected,
+                played: played,
+                from: answeredFrom
+            )
+        }
+    }
+
+    /// Upgrades the banner once the engine has judged both moves.
+    ///
+    /// Deliberately *after* the verdict is already on screen. Blocking the
+    /// banner on two searches would put a spinner between the user's move and
+    /// any feedback at all, to add one clause — the wrong trade. So the sentence
+    /// appears immediately and grows a tail if the engine has something to say,
+    /// which is the same progressive reveal the Today screen uses for its rung.
+    private func explainWithEngine(
+        theme: ThemeTag,
+        answer: String,
+        played: String,
+        from position: Position
+    ) async {
+        guard let evaluator else { return }
+        let fen = position.fen
+
+        /// A move that ends the game is scored from the board; only the rest
+        /// need the engine.
+        func evaluate(_ uci: String) async -> PuzzleEvaluation? {
+            if let terminal = PuzzleEvaluation.terminal(playing: uci, in: position) {
+                return terminal
+            }
+            return await evaluator.evaluate(fen: fen, playing: uci)
+        }
+
+        async let answerEval = evaluate(answer)
+        async let playedEval = evaluate(played)
+        guard let clause = await PuzzleMoveComparison.clause(
+            answer: answerEval,
+            played: playedEval
+        ) else { return }
+
+        // The user may have tapped Continue while the engine was thinking; the
+        // banner this was written for is gone and rewriting it would flash a
+        // sentence about the previous puzzle over the next one.
+        guard case .verdict(let current) = stage, !current.solved else { return }
+
+        var upgraded = current
+        upgraded.message = PuzzleConcept.verdictMessage(
+            solved: false,
+            theme: theme,
+            answer: answer,
+            position: position,
+            mistake: clause
+        )
+        withAnimation(Motion.crossfade) { stage = .verdict(upgraded) }
     }
 
     /// Dismisses the banner and moves on.
     func continueAfterVerdict() {
         guard case .verdict = stage else { return }
+        // Whatever the engine was about to say is about a puzzle the user has
+        // finished with.
+        explainTask?.cancel()
         liveRing = nil
         hintMove = nil
 

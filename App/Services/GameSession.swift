@@ -6,6 +6,24 @@ import Foundation
 import Observation
 import TrainingCore
 
+#if canImport(UIKit)
+    import UIKit
+#endif
+
+/// Holds notification tokens so they are removed when their owner is released.
+///
+/// It exists because `deinit` on a `@MainActor` type cannot touch the actor's
+/// isolated storage, so the tokens cannot simply live on ``GameSession`` and be
+/// unregistered there. Handing them to a plain object means the tokens die with
+/// the box, and the box dies with the session.
+final class ObserverBox: @unchecked Sendable {
+    var tokens: [any NSObjectProtocol] = []
+
+    deinit {
+        for token in tokens { NotificationCenter.default.removeObserver(token) }
+    }
+}
+
 /// Drives one live game: user move → opponent reply → clock → termination.
 ///
 /// The board is the source of truth for legality; this owns everything around
@@ -193,6 +211,15 @@ final class GameSession {
     /// user leaves the finished-game screen.
     private var saveTask: Task<Void, Never>?
 
+    /// When the app left the foreground, while it is away.
+    ///
+    /// Nil whenever the app is on screen, which is also what makes
+    /// ``resumeClock(at:)`` idempotent: a foreground notification with no
+    /// matching background one has nothing to forgive.
+    private var leftForegroundAt: Date?
+    /// Removes the lifecycle observers when this session is released.
+    private let foregroundObservers = ObserverBox()
+
     /// - Parameters:
     ///   - engine: How this session talks to Stockfish. A `nil` default rather
     ///     than a literal because the live value is built from another
@@ -218,6 +245,7 @@ final class GameSession {
         self.humanizer = Humanizer(profile: .interpolated(rating: configuration.opponentRating))
         self.userClockMs = configuration.baseSeconds * 1000
         self.opponentClockMs = configuration.baseSeconds * 1000
+        observeForegroundTransitions()
     }
 
     var userToMove: Bool {
@@ -242,6 +270,118 @@ final class GameSession {
         finish(Outcome(result: result, termination: GameTermination.resignation.rawValue, userWon: false))
     }
 
+    // MARK: - Foreground
+
+    /// Stops the clock because the app is leaving the foreground.
+    ///
+    /// ## Why the clock cannot just keep running
+    ///
+    /// Everything about timing in this class is wall-clock arithmetic against
+    /// ``moveStartedAt``, which is correct while the app is on screen and a lie
+    /// the moment it is not. iOS suspends the process; it does not suspend
+    /// `Date()`. So a player who backgrounded the app on their move and came
+    /// back an hour later used to have the whole hour charged at once by the
+    /// first ``checkClock()`` after they returned — an instant loss on time, in
+    /// a game they had not lost.
+    ///
+    /// It is worse than a wrong clock, because it is *non-deterministic*: if iOS
+    /// reclaimed the process while it was away, the session died with it and the
+    /// user simply replayed the game. If iOS did not, they were flagged. The same
+    /// user action produced two different games depending on memory pressure they
+    /// could neither see nor control.
+    ///
+    /// And the flag lands hardest exactly where it can do the most damage.
+    /// Calibration is the app's onboarding: five games seed the rating, the
+    /// starting rung, and the opponent ladder every other screen reads. A phantom
+    /// timeout there is not one bad game, it is a bad measurement the whole
+    /// curriculum is then built on — and the user has no way to know it happened.
+    ///
+    /// The precedent is already in this file: a guided pause is not on anybody's
+    /// clock, because the pause was the app's idea. Neither is a phone call.
+    func suspendClock(at date: Date = Date()) {
+        guard leftForegroundAt == nil else { return }
+        leftForegroundAt = date
+    }
+
+    /// Resumes, forgiving every second the app spent away.
+    ///
+    /// The gap is repaid by pushing ``moveStartedAt`` *forward*, rather than by
+    /// crediting the clocks: the side on move keeps the time they had actually
+    /// burned before the app went away, and the away time simply never happened.
+    /// That also keeps the think-time recorded on the next move honest, since it
+    /// is measured from the same instant.
+    ///
+    /// - Returns: whether any time was forgiven, so tests and callers can tell a
+    ///   real resume from a redundant notification.
+    @discardableResult
+    func resumeClock(at date: Date = Date()) -> Bool {
+        guard let leftForegroundAt else { return false }
+        self.leftForegroundAt = nil
+        guard date > leftForegroundAt, !isFinished else { return false }
+        moveStartedAt = Self.moveStart(
+            forgivingAwayTime: moveStartedAt,
+            leftAt: leftForegroundAt,
+            returnedAt: date
+        )
+        return true
+    }
+
+    /// Where ``moveStartedAt`` lands once the away time is forgiven.
+    ///
+    /// Pure, and separate from ``resumeClock(at:)``, because it is two lines of
+    /// date arithmetic that decide whether a game is lost — the kind of thing
+    /// that is impossible to eyeball and easy to get subtly wrong, exactly like
+    /// the countdown formatting in ``PlayClock``.
+    ///
+    /// The clamp is the half worth stating plainly: the result is never later
+    /// than the moment the user came back. Without it, an opponent reply that
+    /// landed as the app went away — restarting the move inside the gap — would
+    /// be shifted by the gap's full width and date the current move in the
+    /// future, which reads as a clock counting *up*.
+    nonisolated static func moveStart(
+        forgivingAwayTime moveStartedAt: Date,
+        leftAt: Date,
+        returnedAt: Date
+    ) -> Date {
+        let away = returnedAt.timeIntervalSince(leftAt)
+        guard away > 0 else { return moveStartedAt }
+        return min(returnedAt, moveStartedAt.addingTimeInterval(away))
+    }
+
+    /// Subscribes the session to its own lifecycle.
+    ///
+    /// The session listens rather than being told by a screen. Every surface that
+    /// runs a game would otherwise have to remember to forward `scenePhase`, and
+    /// the one that forgets does not fail visibly — it fails as a wrong result in
+    /// a game weeks later.
+    private func observeForegroundTransitions() {
+        #if canImport(UIKit)
+            let center = NotificationCenter.default
+            // `queue: .main` so the handler runs synchronously inside the
+            // notification dispatch. Hopping to a `Task` instead would risk the
+            // process suspending before the closure was ever scheduled, which is
+            // the one moment this has to be recorded.
+            foregroundObservers.tokens = [
+                center.addObserver(
+                    forName: UIApplication.didEnterBackgroundNotification,
+                    object: nil,
+                    queue: .main
+                ) { [weak self] _ in
+                    let at = Date()
+                    MainActor.assumeIsolated { self?.suspendClock(at: at) }
+                },
+                center.addObserver(
+                    forName: UIApplication.willEnterForegroundNotification,
+                    object: nil,
+                    queue: .main
+                ) { [weak self] _ in
+                    let at = Date()
+                    MainActor.assumeIsolated { self?.resumeClock(at: at) }
+                }
+            ]
+        #endif
+    }
+
     /// Charges elapsed time to whoever is on move and ends the game if their
     /// clock has run out.
     ///
@@ -255,6 +395,8 @@ final class GameSession {
     @discardableResult
     func checkClock() -> Bool {
         guard !isFinished else { return true }
+        // Time spent off screen is nobody's move. See ``suspendClock(at:)``.
+        guard leftForegroundAt == nil else { return false }
         let elapsedMs = Int(Date().timeIntervalSince(moveStartedAt) * 1000)
 
         switch phase {
@@ -262,29 +404,45 @@ final class GameSession {
             guard elapsedMs >= userClockMs else { return false }
             userClockMs = 0
             opponentTask?.cancel()
-            finish(
-                Outcome(
-                    result: configuration.userColor == .white ? "0-1" : "1-0",
-                    termination: GameTermination.timeout.rawValue,
-                    userWon: false
-                )
-            )
+            finish(timeoutOutcome(flagged: configuration.userColor))
             return true
         case .opponentThinking:
             guard elapsedMs >= opponentClockMs else { return false }
             opponentClockMs = 0
             opponentTask?.cancel()
-            finish(
-                Outcome(
-                    result: configuration.userColor == .white ? "1-0" : "0-1",
-                    termination: GameTermination.timeout.rawValue,
-                    userWon: true
-                )
-            )
+            finish(timeoutOutcome(flagged: opponentColor))
             return true
         case .notStarted, .guidedPrompt, .finished:
             return false
         }
+    }
+
+    /// The colour the opponent plays.
+    private var opponentColor: Piece.Color {
+        configuration.userColor == .white ? .black : .white
+    }
+
+    /// What running out of time actually costs, which is not always the game.
+    ///
+    /// FIDE 6.9: a flag is only a loss if the *other* side could still mate. A
+    /// player who flags against a bare king draws, and until now this app handed
+    /// that opponent the win — a bare king could win on time. Rare, but it is a
+    /// wrong result written to the games table and, in calibration, into the
+    /// rating the whole curriculum is seeded from.
+    private func timeoutOutcome(flagged color: Piece.Color) -> Outcome {
+        guard !MatingMaterial.timeoutIsDraw(flagged: color, position: board.position) else {
+            return Outcome(
+                result: "1/2-1/2",
+                termination: GameTermination.timeout.rawValue,
+                userWon: nil
+            )
+        }
+        let whiteLost = color == .white
+        return Outcome(
+            result: whiteLost ? "0-1" : "1-0",
+            termination: GameTermination.timeout.rawValue,
+            userWon: color != configuration.userColor
+        )
     }
 
     var isFinished: Bool {

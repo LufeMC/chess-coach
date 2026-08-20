@@ -44,6 +44,10 @@ struct TodayScreen: View {
                 completionBanner(plan)
 
                 checklist(plan)
+
+                // The long arc. The three squares above are only today; this is
+                // the thing they are for.
+                TodayClimbStrip(rating: todayModel.snapshot?.userRating)
             }
             .padding(.horizontal)
             .padding(.top, 8)
@@ -51,30 +55,18 @@ struct TodayScreen: View {
             .animation(Motion.standard, value: plan)
         }
         .background(Palette.surfaceGround.dynamic.ignoresSafeArea())
-        .navigationTitle("Today")
+        // No screen title. The stat row is the header, the green rung banner
+        // names where you are, and a large "Today" above both would push the
+        // path down a third of the screen to say what the tab already said.
+        // Past games and settings ride at the end of the stat row: both are
+        // still one tap from here, neither is worth a fifth tab.
         #if os(iOS)
-            .toolbar {
-                // Past games live behind the history glyph rather than a fifth
-                // tab: reviewing is something you do after a game, not a
-                // destination you navigate to cold.
-                ToolbarItem(placement: .topBarTrailing) {
-                    NavigationLink {
-                        GameLibraryScreen()
-                    } label: {
-                        Image(systemName: "clock.arrow.circlepath")
-                    }
-                    .accessibilityLabel("Past games")
-                }
-                // Settings lives behind a gear rather than a fifth tab: it is
-                // configuration, not part of the daily loop.
-                ToolbarItem(placement: .topBarTrailing) {
-                    NavigationLink {
-                        SettingsScreen()
-                    } label: {
-                        Image(systemName: "gearshape")
-                    }
-                    .accessibilityLabel("Settings")
-                }
+            .toolbar(.hidden, for: .navigationBar)
+            .safeAreaInset(edge: .top, spacing: 0) {
+                TodayStatHeader(
+                    streakDays: todayModel.streakDays,
+                    rating: todayModel.snapshot?.userRating
+                )
             }
         #endif
         .safeAreaInset(edge: .bottom) {
@@ -135,16 +127,14 @@ struct TodayScreen: View {
             // tally it can only move by one.
             SectionHeader(title: "Today", qualifier: plan.headerQualifier.accessibilityText)
 
-            VStack(spacing: 14) {
-                ForEach(Array(plan.steps.enumerated()), id: \.element.id) { index, step in
-                    TodayStepRow(state: step)
-                        .transition(
-                            .opacity.animation(Motion.staggered(index: index))
-                        )
-                }
+            // The day's work as three squares off a rank — see ``TodayBoardRow``
+            // for why this is not a path.
+            TodayBoardRow(
+                steps: plan.steps,
+                opponentName: todayModel.snapshot?.opponentName
+            ) { step in
+                model.navigate(to: todayModel.route(for: step.destination))
             }
-            .padding(16)
-            .elevation(.raised, cornerRadius: CornerRadius.card)
         }
         .padding(.top, 4)
     }
@@ -162,7 +152,15 @@ struct TodayScreen: View {
         .padding(.horizontal)
         .padding(.top, 10)
         .padding(.bottom, 6)
-        .background(.regularMaterial)
+        // A solid deck with a hard rule, not a blur. The path scrolls *behind*
+        // this, and a translucent strip over the coloured nodes reads as a
+        // smudge rather than as a surface.
+        .background(Palette.surfaceGround.dynamic)
+        .overlay(alignment: .top) {
+            Rectangle()
+                .fill(Palette.hairline.dynamic)
+                .frame(height: 2)
+        }
     }
 
     private func perform(_ action: TodayAction) {
@@ -255,11 +253,7 @@ private struct TodayPreview: View {
 
                 SectionHeader(title: "Today", qualifier: plan.headerQualifier.accessibilityText)
 
-                VStack(spacing: 14) {
-                    ForEach(plan.steps) { TodayStepRow(state: $0) }
-                }
-                .padding(16)
-                .elevation(.raised, cornerRadius: CornerRadius.card)
+                TodayPathView(steps: plan.steps, opponentName: "Oscar") { _ in }
 
                 VStack(spacing: 4) {
                     TodayActionButton(action: plan.primary) {}

@@ -43,7 +43,17 @@ final class BoardAppearance {
     private let store: (any AppSettingsStore)?
 
     /// The style to hand a `BoardView`.
-    var style: BoardStyle { theme.usingPieceSet(pieces) }
+    ///
+    /// Coordinates are turned on here rather than in `BoardUI`, because this is
+    /// an app decision and not a package default. The package argues that file
+    /// and rank labels are clutter, and for a board built to be *played* on that
+    /// is right. This one is built to be *learned* on: the coaching names
+    /// squares, and a reader who cannot decode `f3` has no way to connect the
+    /// sentence to the board except by being shown, on the board, which square
+    /// f3 is. They cost no width — the glyphs are drawn inside the corner
+    /// squares, not in a gutter — so the price is a little ink and the return is
+    /// the whole of algebraic notation, learned by osmosis.
+    var style: BoardStyle { theme.usingPieceSet(pieces).showingCoordinates() }
 
     /// Reads the stored appearance.
     ///
@@ -98,7 +108,7 @@ final class BoardAppearance {
     /// The vector and glyph sets `BoardUI` also ships are absent on purpose:
     /// they exist so a preview renders from a clean checkout and so a 40pt
     /// thumbnail has something cheap to draw, not as artwork anyone would pick.
-    static let pieceSets: [PieceRenderer] = [.staunty, .cburnett]
+    static let pieceSets: [PieceRenderer] = [.clay, .staunty, .cburnett]
 
     /// The string written to the settings row.
     ///
@@ -123,7 +133,7 @@ final class BoardAppearance {
     }
 
     static func pieceSet(named name: String?) -> PieceRenderer {
-        guard let name else { return .staunty }
-        return pieceSets.first { storageName(for: $0) == name.lowercased() } ?? .staunty
+        guard let name else { return .clay }
+        return pieceSets.first { storageName(for: $0) == name.lowercased() } ?? .clay
     }
 }

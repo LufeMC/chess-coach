@@ -38,6 +38,14 @@ struct CalibrationGamesView: View {
             statusRow
                 .padding(.horizontal)
 
+            if let session {
+                CapturedTrayRow(
+                    perspective: session.configuration.userColor,
+                    position: session.board.position
+                )
+                .padding(.horizontal)
+            }
+
             boardSlot
 
             Spacer(minLength: 0)
@@ -50,8 +58,17 @@ struct CalibrationGamesView: View {
         .background(Palette.surfaceGround.dynamic.ignoresSafeArea())
         .task(id: flow.games.count) { await startGame() }
         .onChange(of: finishedOutcome) { _, outcome in
-            guard let outcome else { return }
-            flow.record(gameOutcome: Self.outcome(from: outcome))
+            guard let outcome, let finished = session else { return }
+            // The final position goes with the result: a fifty-move draw means
+            // something different from a bare king than it does from an equal
+            // endgame, and only the position can tell them apart.
+            flow.record(
+                gameOutcome: CalibrationScoring.measuredOutcome(
+                    for: outcome,
+                    finalPosition: finished.board.position,
+                    userColor: finished.configuration.userColor
+                )
+            )
             session = nil
         }
     }
@@ -82,13 +99,6 @@ struct CalibrationGamesView: View {
         return outcome
     }
 
-    static func outcome(from outcome: GameSession.Outcome) -> GameOutcome {
-        switch outcome.userWon {
-        case .some(true): .win
-        case .some(false): .loss
-        case nil: .draw
-        }
-    }
 
     // MARK: Status
 

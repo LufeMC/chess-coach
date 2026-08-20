@@ -64,6 +64,14 @@ struct PuzzleSessionScreen: View {
             board
                 .padding(.horizontal, 12)
 
+            // Both sides' losses, under the board. A puzzle opens mid-game from
+            // somebody else's position, so the material count is the only way to
+            // know whether the tactic is worth playing for — finding a move that
+            // wins a rook matters rather differently when you are a queen down.
+            capturedRow
+                .padding(.horizontal, 16)
+                .padding(.top, 8)
+
             Spacer(minLength: 0)
 
             footer
@@ -85,6 +93,15 @@ struct PuzzleSessionScreen: View {
             }
         }
         .task(id: model.planOnScreen?.id) { await playSetupMove() }
+    }
+
+    /// You on the left, the opponent on the right — the solver's row first,
+    /// because it is the one being asked to act.
+    @ViewBuilder
+    private var capturedRow: some View {
+        if let position = model.position {
+            CapturedTrayRow(perspective: model.orientation, position: position)
+        }
     }
 
     private var board: some View {

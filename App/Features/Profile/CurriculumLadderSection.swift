@@ -128,18 +128,15 @@ private struct RungSection: View {
             }
 
             if !rung.blockerMessages.isEmpty {
-                VStack(alignment: .leading, spacing: 5) {
-                    ForEach(rung.blockerMessages, id: \.self) { message in
-                        HStack(spacing: 6) {
-                            Image(systemName: "arrow.right")
-                                .typeRole(.label, appliesForeground: false)
-                            Text(message)
-                                .typeRole(.caption, monospacedDigits: true, appliesForeground: false)
-                        }
-                        .foregroundStyle(.secondary)
-                    }
-                }
-                .padding(.top, 2)
+                // One wrapped line, not one row per blocker with an arrow
+                // glyph in front of it. Three stacked arrows read as three
+                // separate instructions to act on; they are three facts about
+                // the same wait, and they belong in one sentence.
+                Text(rung.blockerMessages.joined(separator: " · "))
+                    .typeRole(.caption, monospacedDigits: true, appliesForeground: false)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .padding(.top, 2)
             }
         }
     }
@@ -156,13 +153,11 @@ private struct SkillRow: View {
     let skill: LadderSkillRow
 
     var body: some View {
+        // The per-skill category glyph that used to lead this row is gone. It
+        // was a third status signal on a row that already has two — the tick on
+        // the right and the weight of the title — and a column of small grey
+        // symbols is most of what made this list feel like a spreadsheet.
         HStack(alignment: .top, spacing: 10) {
-            Image(systemName: skill.symbol)
-                .typeRole(.caption, appliesForeground: false)
-                .foregroundStyle(.secondary)
-                .frame(width: 18, alignment: .center)
-                .padding(.top, 2)
-
             VStack(alignment: .leading, spacing: 3) {
                 HStack(spacing: 6) {
                     Text(skill.title)
@@ -171,8 +166,12 @@ private struct SkillRow: View {
                         // struck through: a strikethrough reads as cancelled,
                         // which is the opposite of earned.
                         .foregroundStyle(skill.isMet ? .secondary : .primary)
-                    if skill.isRequired {
-                        Text("Required")
+                    // Tag the exception, not the rule. Most skills on a rung
+                    // are required, so a "Required" badge on four rows in five
+                    // is noise that makes the one optional row invisible —
+                    // which is the only row the badge was ever meant to find.
+                    if !skill.isRequired {
+                        Text("Optional")
                             .typeRole(.label)
                     }
                 }
@@ -191,7 +190,12 @@ private struct SkillRow: View {
         if let samplesNeeded = skill.samplesNeeded {
             // Honest empty state, not a zero. A zero blunder rate and an
             // unmeasured blunder rate look identical, and one of them is a lie.
-            Text("Not enough games yet — \(samplesNeeded) more to measure this")
+            //
+            // Said in four words rather than eleven: the long form wrapped to
+            // two lines under every unmeasured skill, which on a fresh account
+            // is most of them, and repeating a sentence that long down a list
+            // turns an honest disclosure into clutter.
+            Text(samplesNeeded == 1 ? "Needs 1 more game" : "Needs \(samplesNeeded) more games")
                 .typeRole(.label, monospacedDigits: true, appliesForeground: false)
                 .foregroundStyle(.tertiary)
                 .fixedSize(horizontal: false, vertical: true)

@@ -77,7 +77,7 @@ struct TypographyTests {
     @Test("Labels are uppercase with positive tracking")
     func labelTreatment() {
         #expect(TypeRole.label.isUppercase)
-        #expect(TypeRole.label.tracking == 0.6)
+        #expect(TypeRole.label.tracking == 0.8)
         #expect(TypeRole.label.prefersSecondaryForeground)
     }
 
@@ -193,9 +193,9 @@ struct LoadingAndDepthTests {
 
     @Test("Three corner radii, and they are the three")
     func cornerRadii() {
-        #expect(CornerRadius.chip == 10)
+        #expect(CornerRadius.chip == 12)
         #expect(CornerRadius.card == 16)
-        #expect(CornerRadius.sheet == 22)
+        #expect(CornerRadius.sheet == 24)
     }
 
     @Test("Elevation has three levels")
@@ -210,11 +210,11 @@ struct PaletteTests {
 
     @Test("Dark is designed, never a copy of light")
     func darkIsIndependent() {
-        // If any token's two halves are equal, somebody computed one from the
-        // other or forgot to tune it — which is exactly how dark mode becomes
-        // an inversion.
+        // The Feather rule: brand *fills* stay saturated in both appearances
+        // (the green is the green, day or night) — but every surface, line and
+        // text-weight colour is tuned per appearance. If any of these tokens'
+        // two halves are equal, somebody forgot to tune one.
         let tokens = [
-            Palette.accent,
             Palette.evalPositive,
             Palette.evalNegative,
             Palette.caution,
@@ -230,6 +230,16 @@ struct PaletteTests {
             let isIdentical = token.light == token.dark
             #expect(!isIdentical)
         }
+    }
+
+    @Test("The chunky edges are darker than their fills")
+    func edgesAreDarker() {
+        // The 3D illusion is a fill sitting on its own shadow. An edge that
+        // matches its fill flattens every button in the app at once.
+        #expect(Palette.accentEdge != Palette.accent)
+        #expect(Palette.blueEdge != Palette.blue)
+        #expect(Palette.goldEdge != Palette.gold)
+        #expect(Palette.lockedEdge != Palette.lockedFill)
     }
 
     @Test("Advantage colours are distinct from the accent and from each other")

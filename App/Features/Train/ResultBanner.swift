@@ -23,10 +23,20 @@ import SwiftUI
 /// failure as a pattern to avoid for exactly this reason: reassurance implies
 /// the result warranted distress.
 ///
-/// The copy states the fact and names the concept — `Missed — the pin was on the
-/// f-file.` — and that is the whole message. It is built by
-/// ``PuzzleConcept/verdictMessage(solved:theme:answer:)``, which produces one
-/// sentence of the same shape either way.
+/// The copy explains the answer, and on a miss adds what was wrong with the move
+/// the user played. It is built by ``PuzzleConcept/verdictMessage(solved:theme:answer:position:played:)``.
+///
+/// ## Why the miss may carry a second sentence
+///
+/// The rule above bans a second line of *consolation*, and that ban stands. This
+/// is its opposite: naming the mistake is more demanding than staying silent
+/// about it, and it is the only feedback in the app that tells a user why the
+/// move they actually chose failed. Withholding it to preserve a symmetry the
+/// user cannot see would be the tail wagging the dog.
+///
+/// The symmetry that *is* visible is preserved exactly: both outcomes reserve
+/// three lines whether or not they fill them, so the banner is the same height,
+/// the button sits in the same place, and the board never moves.
 ///
 /// ``Palette/caution``, not red, for the failure tint: red is the eval bar's
 /// "advantage lost" and Review's blunder colour, where it is a factual severity
@@ -46,7 +56,7 @@ struct ResultBanner: View {
     /// Exported as a constant rather than left implicit because the symmetry
     /// argument above only holds if the *surrounding* layout is stable too: a
     /// board that jumps six points when the banner appears undoes the work.
-    static let height: CGFloat = 68
+    static let height: CGFloat = 92
 
     let verdict: PuzzleSessionModel.Verdict
     let continueTitle: String
@@ -64,10 +74,10 @@ struct ResultBanner: View {
             Text(verdict.message)
                 .typeRole(.body)
                 .fixedSize(horizontal: false, vertical: true)
-                // Exactly two lines of room, always. The sentence is one line at
-                // most realistic widths; reserving the second stops a long
-                // concept name from resizing the banner.
-                .lineLimit(2, reservesSpace: true)
+                // Three lines of room, always, on both outcomes. Reserving
+                // rather than growing is what keeps a miss that explains itself
+                // the same height as a solve that does not need to.
+                .lineLimit(3, reservesSpace: true)
                 .frame(maxWidth: .infinity, alignment: .leading)
 
             Button(action: onContinue) {

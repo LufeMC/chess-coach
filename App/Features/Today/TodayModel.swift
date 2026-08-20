@@ -26,6 +26,10 @@ struct TodaySnapshot: Sendable, Equatable {
     /// Who the next sparring game is against, so the CTA can name them rather
     /// than saying `Play`. Nil when there was no database to ask.
     var opponentName: String?
+    /// The playing rating, for the stat row. Nil until a read succeeds — the
+    /// chip renders nothing rather than a placeholder 1100 that would look like
+    /// a measurement.
+    var userRating: Int?
 }
 
 /// Loads the Today screen and holds its computed plan.
@@ -82,12 +86,17 @@ final class TodayModel {
     /// Nil below one day. A `0 day streak` label on first run is a score for a
     /// game the user has not been allowed to play yet.
     var streak: Denominator? {
-        Denominator.streak(
-            StreakCalculator.currentStreak(
-                completedDays: snapshot?.completedDays ?? [],
-                today: now(),
-                calendar: calendar
-            )
+        Denominator.streak(streakDays)
+    }
+
+    /// The raw count, for the stat row's counter — which shows a greyed zero
+    /// rather than vanishing, because a counter at rest is not the same thing
+    /// as a label announcing a failure.
+    var streakDays: Int {
+        StreakCalculator.currentStreak(
+            completedDays: snapshot?.completedDays ?? [],
+            today: now(),
+            calendar: calendar
         )
     }
 
@@ -213,6 +222,7 @@ final class TodayModel {
         snapshot.hasHistory = snapshot.hasHistory || !games.isEmpty
 
         if let settings = try? database.settings.current() {
+            snapshot.userRating = Int(settings.userRating.rounded())
             snapshot.rung = settings.currentRung
             snapshot.rungTitle = Curriculum.rung(settings.currentRung)?.title ?? ""
             snapshot.focusHabit = settings.weeklyFocusHabit

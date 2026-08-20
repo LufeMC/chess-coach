@@ -14,7 +14,7 @@ settings:
     DEVELOPMENT_TEAM: QKFMZUC59Z
     CODE_SIGN_STYLE: Automatic
     MARKETING_VERSION: "0.1.0"
-    CURRENT_PROJECT_VERSION: "1"
+    CURRENT_PROJECT_VERSION: "2026.8.20"
     ENABLE_USER_SCRIPT_SANDBOXING: NO
 
 packages:
@@ -64,12 +64,13 @@ targets:
     info:
       path: App/Info.plist
       properties:
-        CFBundleDisplayName: ChessCoach
+        CFBundleDisplayName: Rookly
         CFBundleShortVersionString: $(MARKETING_VERSION)
         CFBundleVersion: $(CURRENT_PROJECT_VERSION)
         UILaunchScreen: {}
+        UIUserInterfaceStyle: Light
         ITSAppUsesNonExemptEncryption: false
-        NSHumanReadableCopyright: "ChessCoach is free software under the GNU GPL v3. Embeds Stockfish (GPL v3) and ChessKit (MIT). Source and notices: Settings › Acknowledgements."
+        NSHumanReadableCopyright: "Rookly is free software under the GNU GPL v3. Embeds Stockfish (GPL v3) and ChessKit (MIT). Source and notices: Settings › Acknowledgements."
         # No UIBackgroundModes. CloudKit's silent-notification wake-up is the
         # only one this app would want, and sync is off (UserDatabase.sync
         # (enabled: false)) — declaring a background mode the app never uses is

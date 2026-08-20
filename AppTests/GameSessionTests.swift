@@ -345,6 +345,124 @@ struct GameSessionClockTests {
     }
 }
 
+// MARK: - Backgrounding
+
+/// Time spent off screen belongs to nobody.
+///
+/// The bug these pin was invisible and non-deterministic: iOS suspends the
+/// process but not `Date()`, so a game left open in the background was charging
+/// its clock the whole time — unless iOS happened to reclaim the process, in
+/// which case nothing happened at all. It mattered most during calibration,
+/// where a phantom flag corrupts the rating the whole curriculum is seeded from.
+@Suite("Backgrounding")
+@MainActor
+struct GameSessionBackgroundingTests {
+
+    /// The arithmetic on its own, where the dates can be stated exactly.
+    @Test("The away interval is exactly what gets forgiven")
+    func awayIntervalIsForgiven() {
+        let start = Date(timeIntervalSince1970: 1_000)
+        // Thought for 30s, went away for an hour, came back.
+        let left = start.addingTimeInterval(30)
+        let returned = left.addingTimeInterval(3600)
+
+        let moved = GameSession.moveStart(
+            forgivingAwayTime: start,
+            leftAt: left,
+            returnedAt: returned
+        )
+
+        // The 30s of real thinking survives; the hour does not.
+        #expect(returned.timeIntervalSince(moved) == 30)
+    }
+
+    @Test("A move that started inside the gap is never dated in the future")
+    func clampedToTheReturnInstant() {
+        let left = Date(timeIntervalSince1970: 1_000)
+        let returned = left.addingTimeInterval(3600)
+        // The opponent's reply landed just after the app went away.
+        let start = left.addingTimeInterval(1)
+
+        let moved = GameSession.moveStart(
+            forgivingAwayTime: start,
+            leftAt: left,
+            returnedAt: returned
+        )
+
+        #expect(moved == returned, "a clock that counts up is worse than one that counts wrong")
+        #expect(moved <= returned)
+    }
+
+    @Test("An hour in the background does not flag the player")
+    func awayTimeIsNotCharged() async throws {
+        let engine = ScriptedEngine()
+        // A ten-minute game, exactly like a calibration game.
+        let session = makeSession(plainConfiguration(baseSeconds: 600), engine: engine)
+        await session.start()
+
+        // Away for an hour — far longer than the whole clock — and back now.
+        // Both instants are in the past, which is the only shape the real
+        // notifications can deliver.
+        session.suspendClock(at: Date().addingTimeInterval(-3600))
+        #expect(session.resumeClock(at: Date()))
+
+        #expect(!session.checkClock(), "an hour away must not spend a ten-minute clock")
+        if case .finished = session.phase {
+            Issue.record("the game was ended by time the app spent suspended")
+        }
+        // And the game is still playable, which is the whole point.
+        #expect(await session.attemptUserMove(from: .e2, to: .e4))
+    }
+
+    @Test("A flag already earned survives the round trip")
+    func foregroundTimeIsStillCharged() async throws {
+        let engine = ScriptedEngine()
+        let session = makeSession(plainConfiguration(baseSeconds: 0), engine: engine)
+        await session.start()
+
+        // Backgrounding must not become a way to escape a clock that had
+        // already run out while the app was on screen.
+        session.suspendClock(at: Date().addingTimeInterval(-60))
+        session.resumeClock(at: Date())
+
+        #expect(session.checkClock())
+        #expect(session.phase.isFinishedPhase)
+    }
+
+    @Test("The clock never flags while the app is away")
+    func suspendedClockDoesNotFlag() async throws {
+        let engine = ScriptedEngine()
+        let session = makeSession(plainConfiguration(baseSeconds: 0), engine: engine)
+        await session.start()
+
+        session.suspendClock()
+        // A zero clock would flag instantly on any other tick.
+        #expect(!session.checkClock())
+        if case .finished = session.phase {
+            Issue.record("a suspended session flagged itself")
+        }
+    }
+
+    /// A foreground notification can arrive without a matching background one —
+    /// the app launching straight into the foreground is the ordinary case.
+    @Test("Resuming without a suspend forgives nothing")
+    func resumeWithoutSuspendIsInert() async throws {
+        let engine = ScriptedEngine()
+        let session = makeSession(plainConfiguration(baseSeconds: 600), engine: engine)
+        await session.start()
+
+        #expect(!session.resumeClock())
+        #expect(!session.resumeClock(at: Date()))
+    }
+}
+
+private extension GameSession.Phase {
+    var isFinishedPhase: Bool {
+        if case .finished = self { return true }
+        return false
+    }
+}
+
 // MARK: - Terminal outcomes
 
 @Suite("Terminal outcomes")

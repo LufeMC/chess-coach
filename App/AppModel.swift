@@ -39,6 +39,16 @@ final class AppModel {
     /// a route arriving from the Today CTA has to be able to change it.
     var selectedTab: Tab = .today
 
+    /// True while a game is actually being played, which hides the tab bar.
+    ///
+    /// `PlayScreen` used to get this for free from
+    /// `.toolbar(.hidden, for: .tabBar)`, and that modifier still hides the
+    /// *system* bar — but the app draws its own now, stacked outside the
+    /// `TabView` where no toolbar modifier can reach it. Without this the bar
+    /// sat under the board for the whole game, offering three ways to walk out
+    /// of a position the user is meant to be concentrating on.
+    var isPlayingGame = false
+
     enum Tab: Hashable {
         case today
         case play

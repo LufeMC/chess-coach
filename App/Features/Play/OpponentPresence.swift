@@ -2,26 +2,26 @@ import SwiftUI
 
 /// The opponent, given real space on the screen.
 ///
-/// ## Why a monogram and not a character
+/// ## Why space, and not a character
 ///
-/// The reference for this block is a screen that hands ~170pt of height to an
-/// expressive cartoon with a speech bubble. The *space* is right and the
-/// *bubble* is right; the cartoon is not. This app is a training tool for an
-/// adult working towards a real rating, and the thing being built is the feeling
-/// of sitting across from a strong player and being dangerous. An illustrated
-/// mascot undercuts that every time it appears. A named opponent with a
-/// recognisable style supports it. So the presence comes from size, from the
-/// name in headline weight, and from one line of writing — the restraint is a
-/// product decision, not an art budget.
+/// Giving the opponent real height on the screen is right; giving it to an
+/// expressive cartoon is not. This app is a training tool for an adult working
+/// towards a real rating, and the thing being built is the feeling of sitting
+/// across from a strong player and being dangerous. A mascot undercuts that
+/// every time it appears. A named opponent with a recognisable style supports
+/// it. So the presence comes from size, from the name in headline weight, and
+/// from one line of writing.
 ///
-/// ## Why the line lives in a bubble even when it is a trait
+/// ## Why the line lives in a constant slot
 ///
-/// The bubble is the opponent's slot, and it is the same slot in both states.
-/// If the trait were loose text and the thinking line were a bubble, the block
-/// would change shape eighty times a game. Instead the container is constant,
-/// two lines tall whatever it holds, and only the text inside it crossfades:
-/// a third-person trait when it is not their move, a first-person line in quotes
-/// while they think.
+/// It is the same slot in both states. If the trait were loose text and the
+/// thinking line got its own container, the block would change shape eighty
+/// times a game and take the board with it. Instead the slot is constant, two
+/// lines tall whatever it holds, and only the text inside it crossfades: a
+/// third-person trait when it is not their move, a first-person line in quotes
+/// while they think. The rule beside it is the only thing that changes colour,
+/// and it is doing the job the old caret did — marking whose voice this is —
+/// without drawing a cartoon tail to do it.
 struct OpponentPresenceView: View {
 
     let opponent: OpponentRoster.Opponent
@@ -35,7 +35,7 @@ struct OpponentPresenceView: View {
         HStack(alignment: .top, spacing: 12) {
             monogram
 
-            VStack(alignment: .leading, spacing: 6) {
+            VStack(alignment: .leading, spacing: 8) {
                 HStack(alignment: .firstTextBaseline, spacing: 6) {
                     Text(opponent.name)
                         .typeRole(.headline)
@@ -54,14 +54,7 @@ struct OpponentPresenceView: View {
     }
 
     private var monogram: some View {
-        Color.clear
-            .frame(width: 52, height: 52)
-            .overlay {
-                Text(opponent.name.prefix(1))
-                    .font(.system(.title2, design: .rounded, weight: .semibold))
-                    .foregroundStyle(.secondary)
-            }
-            .elevation(.raised, cornerRadius: CornerRadius.card)
+        OpponentAvatar(name: opponent.name, size: 56)
     }
 
     private var bubble: some View {
@@ -70,8 +63,9 @@ struct OpponentPresenceView: View {
             // space is what stops the block — and therefore the board — from
             // moving when a short line replaces a long one; centring is what
             // stops the reserved space from reading as a hole.
-            Text(verbatim: "\n")
+            Text(verbatim: "A\nA")
                 .typeRole(.body)
+                .lineSpacing(2)
                 .hidden()
                 .accessibilityHidden(true)
 
@@ -79,14 +73,28 @@ struct OpponentPresenceView: View {
                 .typeRole(.body, appliesForeground: false)
                 .foregroundStyle(isSpeaking ? AnyShapeStyle(.primary) : AnyShapeStyle(.secondary))
                 .contentTransition(.opacity)
+                .lineSpacing(2)
                 .lineLimit(2)
                 .fixedSize(horizontal: false, vertical: true)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
-        .padding(.horizontal, 12)
-        .padding(.vertical, 8)
-        .background(SpeechBubbleShape().fill(Palette.surfaceRaised.dynamic))
-        .overlay(SpeechBubbleShape().stroke(Palette.hairline.dynamic, lineWidth: 1))
+        .padding(.leading, 14)
+        .padding(.trailing, 16)
+        .padding(.vertical, 4)
+        // An annotator's pull-quote, not a speech bubble.
+        //
+        // This was a rounded box with a caret aimed at a circular portrait —
+        // the cartoon-character-talks-to-you block, and the second most
+        // recognisable borrowed component in the app. A leading rule with the
+        // line set beside it says the same thing in chess's own register:
+        // annotation is how commentary has been attached to a game for two
+        // hundred years, and it needs no fill, no border and no tail.
+        .overlay(alignment: .leading) {
+            Capsule()
+                .fill(isSpeaking ? Palette.accent.dynamic : Palette.hairline.dynamic)
+                .frame(width: 3)
+                .animation(Motion.crossfade, value: isSpeaking)
+        }
         // A slow breath on the line while they think, and nothing else on the
         // screen moving. Not a spinner, not a shimmer, not a loop the eye can
         // lock on to.
@@ -107,35 +115,59 @@ struct OpponentPresenceView: View {
     }
 }
 
-/// A rounded rectangle with a caret on its leading edge, pointing at the
-/// monogram beside it.
-private struct SpeechBubbleShape: Shape {
+/// The opponent's face: a generated character portrait on a bordered square,
+/// with the monogram kept as the fallback for a name that has no artwork.
+///
+/// The portrait earns its place because the opponent is a *someone* — their
+/// face is what the player recognises across the Today row, the Play screen and
+/// the game summary, and a rating alone recognises nobody.
+///
+/// ## Why a square and not a circle
+///
+/// It was a circle, and a circle-cropped illustrated character is the mascot
+/// convention this app spent a redesign getting out from under. The square is
+/// the unit chess is played on, it matches the day's step tiles it now sits
+/// inside, and it reads as the photograph on a tournament name card rather than
+/// as a cartoon avatar — which is exactly the register these opponents are
+/// written in.
+struct OpponentAvatar: View {
+    let name: String
+    var size: CGFloat = 56
 
-    var caretWidth: CGFloat = 7
-    var caretCentre: CGFloat = 22
-    var cornerRadius: CGFloat = CornerRadius.card
+    private var assetName: String { "opponent-\(name.lowercased())" }
 
-    func path(in rect: CGRect) -> Path {
-        var path = Path(
-            roundedRect: CGRect(
-                x: rect.minX + caretWidth,
-                y: rect.minY,
-                width: max(0, rect.width - caretWidth),
-                height: rect.height
-            ),
-            cornerRadius: cornerRadius,
-            style: .continuous
-        )
+    /// Softened in proportion, so a 30pt portrait in a step tile and a 88pt one
+    /// on the Play screen read as the same shape rather than as two decisions.
+    private var shape: RoundedRectangle {
+        RoundedRectangle(cornerRadius: size * 0.26, style: .continuous)
+    }
 
-        let centre = min(max(caretCentre, cornerRadius + caretWidth), rect.height - cornerRadius)
-        var caret = Path()
-        caret.move(to: CGPoint(x: rect.minX, y: centre))
-        caret.addLine(to: CGPoint(x: rect.minX + caretWidth + 0.5, y: centre - caretWidth))
-        caret.addLine(to: CGPoint(x: rect.minX + caretWidth + 0.5, y: centre + caretWidth))
-        caret.closeSubpath()
-        path.addPath(caret)
+    var body: some View {
+        Group {
+            #if canImport(UIKit)
+                if UIImage(named: assetName) != nil {
+                    Image(assetName)
+                        .resizable()
+                        .interpolation(.high)
+                        .scaledToFill()
+                } else {
+                    initial
+                }
+            #else
+                initial
+            #endif
+        }
+        .frame(width: size, height: size)
+        .background(shape.fill(Palette.surfaceSunken.dynamic))
+        .clipShape(shape)
+        .overlay(shape.strokeBorder(Palette.hairline.dynamic, lineWidth: 2))
+        .accessibilityHidden(true)
+    }
 
-        return path
+    private var initial: some View {
+        Text(name.prefix(1))
+            .font(.system(.title2, design: .rounded, weight: .bold))
+            .foregroundStyle(.secondary)
     }
 }
 

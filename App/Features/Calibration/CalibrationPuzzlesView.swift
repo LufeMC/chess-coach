@@ -188,6 +188,10 @@ struct CalibrationPuzzlesView: View {
             if runner.exhausted {
                 exhausted
             } else {
+                if let position = runner.position {
+                    CapturedTrayRow(perspective: runner.orientation, position: position)
+                        .padding(.horizontal)
+                }
                 boardSlot
             }
 

@@ -83,20 +83,65 @@ enum PuzzleConcept {
     ///   - theme: The puzzle's primary theme.
     ///   - answer: The move the user had to find, in UCI. Its destination names
     ///     the file, which is the concrete half of `the pin was on the f-file`.
-    static func verdictMessage(solved: Bool, theme: ThemeTag, answer: String?) -> String {
+    /// - Parameter position: the position the answer is played from, used to
+    ///   explain *why* the move works. Optional so the copy still builds
+    ///   without it, which is what the pure tests and the summary rows rely on.
+    /// - Parameters:
+    ///   - position: the position the answer is played from, used to explain
+    ///     *why* the move works. Optional so the copy still builds without it.
+    ///   - mistake: what was wrong with the move the user actually played, when
+    ///     something certain can be said about it. Passed in rather than derived
+    ///     here because it has two sources — the board immediately, and the
+    ///     engine a moment later — and this is a formatter, not a judge.
+    static func verdictMessage(
+        solved: Bool,
+        theme: ThemeTag,
+        answer: String?,
+        position: Position? = nil,
+        mistake: String? = nil
+    ) -> String {
         let verb = solved ? "Solved" : "Missed"
+        // Read off the board, never from the theme tag. When the position can
+        // say why, that is worth more than any label — it is the pattern the
+        // user takes to the next puzzle, and it is phrased so that a reader who
+        // has never heard the word still learns something.
+        let reason = PuzzleReason.clause(forAnswer: answer, in: position)
+        // Never on a solve: the move that worked has nothing wrong with it.
+        let mistake = solved ? nil : mistake
 
-        guard let concept = noun(for: theme) else {
-            // No idea worth naming. Fall back to the square rather than to
-            // filler: `Missed.` alone is honest, `Missed — nice try` is not.
-            guard let square = destination(ofUCI: answer) else { return "\(verb)." }
-            return "\(verb) — the move was to \(square.notation)."
+        // The move in words rather than in notation, when the position is on
+        // hand to name the pieces.
+        let move = PuzzleReason.description(ofMove: answer, in: position)
+
+        let sentence: String
+        if let square = destination(ofUCI: answer) {
+            if let reason {
+                // The explanation supersedes the theme's noun. `the fork was on
+                // the f-file` names a pattern at someone; this describes it.
+                sentence = "\(verb) — \(move ?? square.notation): \(reason)."
+            } else if let move, let concept = noun(for: theme) {
+                // Nothing provable from the position, but the theme still names
+                // the idea — worth keeping, since the vocabulary is half of what
+                // the user is here for. The move goes first so the sentence
+                // still opens with something they can act on.
+                sentence = "\(verb) — \(move): a \(concept)."
+            } else if let move {
+                sentence = "\(verb) — \(move)."
+            } else if let concept = noun(for: theme) {
+                sentence = "\(verb) — the \(concept) was on the \(square.file.rawValue)-file."
+            } else {
+                // Fall back to the square rather than to filler: `Missed.` alone
+                // is honest, `Missed — nice try` is not.
+                sentence = "\(verb) — the move was to \(square.notation)."
+            }
+        } else if let concept = noun(for: theme) {
+            sentence = "\(verb) — the idea was a \(concept)."
+        } else {
+            sentence = "\(verb)."
         }
 
-        guard let square = destination(ofUCI: answer) else {
-            return "\(verb) — the idea was a \(concept)."
-        }
-        return "\(verb) — the \(concept) was on the \(square.file.rawValue)-file."
+        guard let mistake else { return sentence }
+        return "\(sentence) But \(mistake)."
     }
 
     /// The destination square of a UCI move.

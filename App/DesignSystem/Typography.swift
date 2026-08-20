@@ -55,12 +55,12 @@ enum TypeRole: Hashable, CaseIterable {
 
     var weight: Font.Weight {
         switch self {
-        case .display: .bold
-        case .title: .bold
-        case .headline: .semibold
-        case .body: .regular
-        case .caption: .regular
-        case .label: .semibold
+        case .display: .heavy
+        case .title: .heavy
+        case .headline: .bold
+        case .body: .medium
+        case .caption: .medium
+        case .label: .bold
         }
     }
 
@@ -69,7 +69,7 @@ enum TypeRole: Hashable, CaseIterable {
     var tracking: CGFloat {
         switch self {
         case .display: -0.5
-        case .label: 0.6
+        case .label: 0.8
         default: 0
         }
     }
@@ -81,11 +81,19 @@ enum TypeRole: Hashable, CaseIterable {
         self == .caption || self == .label
     }
 
-    /// The rounded face is reserved for numerals — it is warmer than the system
-    /// face and reads as "instrument", which is right for a clock and wrong for
-    /// a paragraph.
+    /// Everything is rounded.
+    ///
+    /// The rounded face is doing a specific job: it is the counterweight to
+    /// everything else about this app that is severe. Chess is a game people
+    /// quit because it made them feel stupid, and a training app set in a
+    /// tight grotesque reads like a report card. Rounded at heavy weights is
+    /// warm without being childish, and it is the one thing keeping the violet
+    /// from tipping from confident into corporate.
+    ///
+    /// One face, no exceptions — mixing in the default face would split the app
+    /// into two voices.
     var design: Font.Design {
-        self == .display ? .rounded : .default
+        .rounded
     }
 
     /// The `Font` for this role, before the numeral treatment.

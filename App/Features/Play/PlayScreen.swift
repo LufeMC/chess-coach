@@ -87,6 +87,11 @@ struct PlayScreen: View {
         }
         .toolbar(session == nil ? .visible : .hidden, for: .navigationBar)
         .toolbar(session == nil ? .visible : .hidden, for: .tabBar)
+        // The app's own tab bar lives outside the `TabView`, where the modifier
+        // above cannot reach it. Mirrored through the model instead, and cleared
+        // on the way out so a game left by any route restores the bar.
+        .onChange(of: session == nil) { _, idle in model.isPlayingGame = !idle }
+        .onDisappear { model.isPlayingGame = false }
         .navigationDestination(item: $summaryTarget) { target in
             GameSummaryScreen(target: target)
         }
@@ -234,6 +239,17 @@ struct PlayScreen: View {
                 .padding(.horizontal, 16)
                 .padding(.top, 10)
 
+            // What the opponent has taken, directly under their name and above
+            // their side of the board — the same place it sits on a real table.
+            CapturedTray(
+                side: session.configuration.userColor == .white ? .black : .white,
+                position: session.board.position,
+                renderer: BoardAppearance.shared.style.pieceSet
+            )
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.horizontal, 16)
+            .padding(.top, 6)
+
             BoardView(
                 position: session.board.position,
                 orientation: orientation(session),
@@ -346,9 +362,15 @@ struct PlayScreen: View {
     }
 
     private func bottomRow(_ session: GameSession) -> some View {
-        HStack(spacing: 12) {
+        HStack(spacing: 10) {
             Text(session.configuration.userColor == .white ? "You · White" : "You · Black")
                 .typeRole(.caption)
+
+            CapturedTray(
+                side: session.configuration.userColor,
+                position: session.board.position,
+                renderer: BoardAppearance.shared.style.pieceSet
+            )
 
             Spacer(minLength: 0)
 

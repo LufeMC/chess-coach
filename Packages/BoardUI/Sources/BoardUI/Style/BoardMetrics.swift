@@ -312,14 +312,13 @@ public enum BoardMetrics {
 
   /// Point size for a coordinate glyph inside an edge square.
   ///
-  /// Targets ~9pt on a phone-sized board. Clamped at the top so the largest
-  /// Dynamic Type settings enlarge the labels without a glyph swallowing its
-  /// square, and at the bottom so a thumbnail's labels stay legible rather than
-  /// becoming grey lint.
+  /// Targets ~11pt on a phone-sized board — sized for a reader learning the
+  /// coordinates, not one politely reminded of them. Clamped at the top so the
+  /// largest Dynamic Type settings enlarge the labels without a glyph
+  /// swallowing its square, and at the bottom so a thumbnail's labels stay
+  /// legible rather than becoming grey lint.
   public static func coordinateFontSize(squareSide: CGFloat, typeScale: CGFloat = 1) -> CGFloat {
-    min(squareSide * 0.30, max(7, squareSide * 0.20 * typeScale))
+    min(squareSide * 0.32, max(8, squareSide * 0.24 * typeScale))
   }
 
-  /// Opacity of a coordinate glyph drawn in the opposing square's tone.
-  public static let coordinateOpacity: Double = 0.40
 }

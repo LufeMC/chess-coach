@@ -24,8 +24,8 @@ struct BoardAppearanceTests {
     func unknownNamesFallBack() {
         #expect(BoardAppearance.theme(named: "lichessBrown") == BoardStyle.default)
         #expect(BoardAppearance.theme(named: nil) == BoardStyle.default)
-        #expect(BoardAppearance.pieceSet(named: "merida") == PieceRenderer.staunty)
-        #expect(BoardAppearance.pieceSet(named: nil) == PieceRenderer.staunty)
+        #expect(BoardAppearance.pieceSet(named: "merida") == PieceRenderer.clay)
+        #expect(BoardAppearance.pieceSet(named: nil) == PieceRenderer.clay)
     }
 
     @Test("Every offered option round-trips through its stored name")
@@ -46,11 +46,11 @@ struct BoardAppearanceTests {
         #expect(BoardAppearance.pieceSet(named: "Cburnett") == PieceRenderer.cburnett)
     }
 
-    /// Only the two artwork sets are offered. The vector and glyph renderers
+    /// Only the three artwork sets are offered. The vector and glyph renderers
     /// exist so a preview draws from a clean checkout, not as a choice.
     @Test("The offered sets are the ones with artwork")
     func onlyArtworkSetsAreOffered() {
-        #expect(BoardAppearance.pieceSets == [.staunty, .cburnett])
+        #expect(BoardAppearance.pieceSets == [.clay, .staunty, .cburnett])
         #expect(BoardAppearance.themes == BoardStyle.builtIn)
     }
 
@@ -122,6 +122,6 @@ struct BoardAppearanceTests {
     func degradesWithoutAStore() {
         let appearance = BoardAppearance(store: nil)
         #expect(appearance.theme == BoardStyle.default)
-        #expect(appearance.pieces == PieceRenderer.staunty)
+        #expect(appearance.pieces == PieceRenderer.clay)
     }
 }

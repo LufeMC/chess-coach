@@ -130,7 +130,24 @@ public struct UserDatabase: Sendable {
         migrator.registerMigration("v3.ladderAssistedRetry", migrate: addLadderAssistedRetry)
         migrator.registerMigration("v4.metricSampleHistory", migrate: addMetricSampleHistory)
         migrator.registerMigration("v5.calibrationDraft", migrate: addCalibrationDraft)
+        migrator.registerMigration("v6.clayPieceSet", migrate: adoptClayPieceSet)
         return migrator
+    }
+
+    /// The clay redesign made `clay` the app's piece art. Rows still holding
+    /// the old *seeded* default move with it; a row holding any other value is
+    /// a choice somebody actually made, and stays.
+    ///
+    /// An `UPDATE` rather than a schema change: the column default cannot move
+    /// without a table rebuild, which the sync rules above forbid — and it does
+    /// not need to, because `AppSettings.init` seeds new rows from Swift.
+    private static func adoptClayPieceSet(_ db: Database) throws {
+        try #sql(
+            """
+            UPDATE "appSettings" SET "pieceSet" = 'clay' WHERE "pieceSet" = 'staunty'
+            """
+        )
+        .execute(db)
     }
 
     private static func createUserSchema(_ db: Database) throws {
