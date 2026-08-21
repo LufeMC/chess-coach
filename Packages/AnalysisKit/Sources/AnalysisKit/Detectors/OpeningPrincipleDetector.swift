@@ -5,7 +5,7 @@
 
 import ChessKit
 
-/// Checks the three opening rules a beginner most often breaks.
+/// Checks the opening rules a beginner most often breaks.
 ///
 /// Deliberately engine-free: these are knowledge gaps, not calculation errors,
 /// and they are worth naming even when the engine barely notices. Everything here
@@ -21,6 +21,13 @@ public struct OpeningPrincipleDetector: Detector, Sendable {
     public static let castlingLimit = 14
     /// Minor pieces that should be out before the queen comes into play.
     public static let minorsBeforeQueen = 2
+    /// Pushing a flank pawn after this full-move number is a plan, not a
+    /// failure to claim the centre.
+    public static let centreLimit = 10
+    /// By this full-move number the back rank should be clear between the rooks.
+    public static let connectLimit = 12
+    /// a, b, g and h — the files a pawn move does nothing for the centre from.
+    static let flankFiles: Set<Int> = [0, 1, 6, 7]
 
     public init() {}
 
@@ -30,6 +37,8 @@ public struct OpeningPrincipleDetector: Detector, Sendable {
         if let finding = earlyQueen(context) { findings.append(finding) }
         if let finding = repeatedPieceMove(context) { findings.append(finding) }
         if let finding = delayedCastling(context) { findings.append(finding) }
+        if let finding = centreNeglect(context) { findings.append(finding) }
+        if let finding = disconnectedRooks(context) { findings.append(finding) }
 
         return findings
     }
@@ -108,7 +117,74 @@ public struct OpeningPrincipleDetector: Detector, Sendable {
         )
     }
 
+    /// A flank pawn pushed in the opening while the centre is still unclaimed.
+    ///
+    /// Narrow on purpose. "You did not control the centre" is true of most
+    /// beginner openings and useless as feedback, so this only fires on the
+    /// unarguable case: a pawn move on the a, b, g or h file, early, by a side
+    /// with *no* pawn on a central square. That is a move spent on the edge of
+    /// the board while the middle was there for the taking.
+    private func centreNeglect(_ context: MoveContext) -> Finding? {
+        guard context.judgment >= .inaccuracy else { return nil }
+        guard context.playedMove.piece.kind == .pawn else { return nil }
+        guard context.positionBefore.clock.fullmoves <= Self.centreLimit else { return nil }
+        guard Self.flankFiles.contains(context.playedMove.start.fileIndex) else { return nil }
+        guard centralPawnCount(context.positionBefore, color: context.mover) == 0 else { return nil }
+
+        return Finding(
+            detector: id,
+            subtype: .centreNeglect,
+            squares: [context.playedMove.start, context.playedMove.end],
+            magnitude: context.deltaEP,
+            detail: "Flank pawn on move \(context.positionBefore.clock.fullmoves) with no pawn in the centre"
+        )
+    }
+
+    /// Castled, but the back rank between the rooks is still full.
+    ///
+    /// "Connect your rooks" is the principle that says development is not over
+    /// until the pieces between them have gone somewhere. Gated on having
+    /// castled so it cannot double up with ``delayedCastling(_:)`` — a king in
+    /// the middle is a different, larger problem and should be reported as that.
+    private func disconnectedRooks(_ context: MoveContext) -> Finding? {
+        guard context.judgment >= .inaccuracy else { return nil }
+        guard context.positionBefore.clock.fullmoves >= Self.connectLimit else { return nil }
+        guard hasCastled(context) else { return nil }
+
+        let homeRank = context.mover == .white ? 0 : 7
+        let onHomeRank = context.positionBefore.pieces.filter {
+            $0.color == context.mover && $0.square.rankIndex == homeRank
+        }
+        let rookFiles = onHomeRank.filter { $0.kind == .rook }.map(\.square.fileIndex).sorted()
+        guard rookFiles.count == 2 else { return nil }
+
+        let between = onHomeRank.filter {
+            $0.kind != .rook
+                && $0.square.fileIndex > rookFiles[0]
+                && $0.square.fileIndex < rookFiles[1]
+        }
+        guard !between.isEmpty else { return nil }
+
+        return Finding(
+            detector: id,
+            subtype: .disconnectedRooks,
+            squares: between.map(\.square),
+            magnitude: context.deltaEP,
+            detail: "\(between.count) piece(s) still between the rooks on move "
+                + "\(context.positionBefore.clock.fullmoves)"
+        )
+    }
+
     // MARK: Helpers
+
+    /// Pawns of `color` standing on d4, e4, d5 or e5.
+    private func centralPawnCount(_ position: Position, color: Piece.Color) -> Int {
+        position.pieces.filter { piece in
+            piece.color == color && piece.kind == .pawn
+                && (3...4).contains(piece.square.fileIndex)
+                && (3...4).contains(piece.square.rankIndex)
+        }.count
+    }
 
     private func hasCastled(_ context: MoveContext) -> Bool {
         context.priorMoves.contains {

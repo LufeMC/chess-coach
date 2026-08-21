@@ -35,6 +35,7 @@ struct AppDatabase: Sendable {
     var dailyLoop: DailyLoopRepository { user.dailyLoop }
     var calibrationDrafts: CalibrationDraftRepository { user.calibrationDrafts }
     var puzzleQueries: PuzzleRepository? { puzzles?.puzzles }
+    var concepts: ConceptRepository { user.concepts }
 
     // MARK: - Shared instance
 

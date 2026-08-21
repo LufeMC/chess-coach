@@ -243,6 +243,10 @@ public enum MomentExplainer {
             let king = facts.occupancyBefore.kingSquare(of: facts.mover)?.notation ?? "the centre"
             return "The king is still on \(king) on move \(facts.context.positionBefore.clock.fullmoves), "
                 + "with a central file open."
+        case .centreNeglect:
+            return "Neither centre pawn had moved, so the middle of the board was still unclaimed."
+        case .disconnectedRooks:
+            return "Development is not finished until the rooks can see each other along the back rank."
         default:
             return nil
         }

@@ -55,6 +55,16 @@ public struct Game: Hashable, Identifiable, Sendable {
     /// actually applied.
     public var usedAssistedRetry: Bool
 
+    /// How many of the pre-engine review questions the user answered correctly,
+    /// or nil if they have not answered them yet.
+    ///
+    /// Nullable rather than defaulted to zero, because "never reviewed" and
+    /// "reviewed and got none of them" are different facts and only one of them
+    /// is worth reopening. Stored per game rather than as a running total: the
+    /// interesting number is the trend, i.e. whether the user's own reading of
+    /// a game is converging on the engine's.
+    public var selfCheckScore: Int?
+
     public init(
         id: UUID = UUID(),
         startedAt: Date = Date(),
@@ -69,7 +79,8 @@ public struct Game: Hashable, Identifiable, Sendable {
         userAccuracy: Double? = nil,
         analysisState: String = AnalysisState.pending.rawValue,
         isRated: Bool = true,
-        usedAssistedRetry: Bool = false
+        usedAssistedRetry: Bool = false,
+        selfCheckScore: Int? = nil
     ) {
         self.id = id
         self.startedAt = startedAt
@@ -84,6 +95,7 @@ public struct Game: Hashable, Identifiable, Sendable {
         self.userAccuracy = userAccuracy
         self.analysisState = analysisState
         self.isRated = isRated
+        self.selfCheckScore = selfCheckScore
         self.usedAssistedRetry = usedAssistedRetry
     }
 }
@@ -103,7 +115,8 @@ extension Game {
         userAccuracy: Double? = nil,
         analysisState: AnalysisState = .pending,
         isRated: Bool = true,
-        usedAssistedRetry: Bool = false
+        usedAssistedRetry: Bool = false,
+        selfCheckScore: Int? = nil
     ) {
         self.init(
             id: id,
@@ -119,7 +132,8 @@ extension Game {
             userAccuracy: userAccuracy,
             analysisState: analysisState.rawValue,
             isRated: isRated,
-            usedAssistedRetry: usedAssistedRetry
+            usedAssistedRetry: usedAssistedRetry,
+            selfCheckScore: selfCheckScore
         )
     }
 
@@ -543,6 +557,44 @@ public struct MetricSample: Hashable, Identifiable, Sendable {
         self.value = value
         self.recordedAt = recordedAt
     }
+}
+
+// MARK: - ConceptProgress
+
+/// What the user has been taught, and how it has gone since.
+///
+/// Keyed by the concept's own string id rather than a UUID, because the concept
+/// catalogue is code and its ids are stable: a row is meaningless without the
+/// concept it names, and generating a UUID for it would only add a second way
+/// to say the same thing. That also makes the row idempotent — teaching the
+/// same concept twice cannot produce two histories of it.
+@Table("conceptProgress")
+public struct ConceptProgress: Hashable, Identifiable, Sendable {
+    /// The concept id, e.g. `"opening.london"`.
+    public var id: String
+    /// When the lesson was first shown. Nil means it has never been taught, in
+    /// which case the next appearance teaches rather than tests.
+    public var introducedAt: Date?
+    public var lastSeenAt: Date?
+    public var timesSeen: Int
+    public var timesCorrect: Int
+
+    public init(
+        id: String,
+        introducedAt: Date? = nil,
+        lastSeenAt: Date? = nil,
+        timesSeen: Int = 0,
+        timesCorrect: Int = 0
+    ) {
+        self.id = id
+        self.introducedAt = introducedAt
+        self.lastSeenAt = lastSeenAt
+        self.timesSeen = timesSeen
+        self.timesCorrect = timesCorrect
+    }
+
+    /// Whether the lesson still has to be shown before the exercise.
+    public var needsTeaching: Bool { introducedAt == nil }
 }
 
 // MARK: - DailyLoop

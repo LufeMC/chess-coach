@@ -48,6 +48,8 @@ public enum FindingSubtype: String, Sendable, Codable, CaseIterable {
     case earlyQueen
     case repeatedPieceMove
     case delayedCastling
+    case centreNeglect
+    case disconnectedRooks
     // endgameTechnique
     case kpk
     case basicMate

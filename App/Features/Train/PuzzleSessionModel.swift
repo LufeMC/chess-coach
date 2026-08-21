@@ -5,6 +5,7 @@
 
 import BoardUI
 import ChessKit
+import Database
 import Foundation
 import Observation
 import SwiftUI
@@ -66,6 +67,8 @@ final class PuzzleSessionModel {
         case solving
         /// The board is frozen on the finished position and the banner is up.
         case verdict(Verdict)
+        /// The lesson for this set's concept, before its exercise.
+        case teaching(TrainingConcept)
         case summary
         /// The session could not be built — no corpus, no database.
         case unavailable(String)
@@ -109,6 +112,9 @@ final class PuzzleSessionModel {
     // MARK: Dependencies
 
     private let driver: any PuzzleSessionDriver
+    /// Reads the concept catalogue's progress and finds positions for it.
+    /// Optional so the whole session still runs in tests with no store.
+    private let database: AppDatabase?
     private let clock: @Sendable () -> Date
     /// Judges a wrong move the board cannot explain. Optional: with no engine
     /// the banner simply keeps the shorter sentence.
@@ -139,16 +145,78 @@ final class PuzzleSessionModel {
     /// because a hint invalidates the *attempt*, not the session.
     private var usedHintOnItem = false
 
+    /// The move the puzzle is *about*, the position it is played from, and what
+    /// follows it.
+    ///
+    /// A multi-move puzzle ends with the user playing its *last* move, which is
+    /// usually a recapture, and the banner explained that one. So a knight fork
+    /// of king and rook three plies earlier was reported as `the knight takes
+    /// the rook: nothing defends it`, and the pattern the puzzle exists to
+    /// teach was never named. The idea lives in the first move the solver is
+    /// asked for; that is the move a solve gets explained through.
+    ///
+    /// Held from ``beginItem()`` because by the time the banner is built the
+    /// machine has been replayed to the end of the line.
+    private var keyMove: String?
+    private var keyPosition: Position?
+    private var keyContinuation: [String] = []
+
     init(
         driver: any PuzzleSessionDriver,
         focus: WeeklyFocus? = nil,
         evaluator: (any PuzzleMoveEvaluator)? = nil,
+        database: AppDatabase? = AppDatabase.sharedIfAvailable,
+        soloConcept: TrainingConcept? = nil,
         clock: @escaping @Sendable () -> Date = { Date() }
     ) {
         self.driver = driver
         self.weeklyFocus = focus
         self.evaluator = evaluator
+        self.database = database
+        self.soloConcept = soloConcept
         self.clock = clock
+    }
+
+    /// Set when the user asked to revisit one concept rather than play a set.
+    ///
+    /// Choosing what to *practise next* stays with the app; choosing to go back
+    /// over something already taught is a different decision and a reasonable
+    /// one — it is the only way to see a lesson twice.
+    private let soloConcept: TrainingConcept?
+
+    // MARK: Concept slot
+
+    /// The one opening, endgame or positional idea this set carries.
+    ///
+    /// Chosen by ``ConceptScheduler`` rather than by the user — see that type
+    /// for why the choice is not offered. Nil when the store is unavailable or
+    /// the catalogue has nothing at this rating, in which case the set is
+    /// simply the puzzles, which is what it always used to be.
+    private(set) var conceptSelection: ConceptScheduler.Selection?
+    /// The position the concept's exercise is played from, once resolved.
+    private var conceptExercise: PuzzleSolveMachine?
+    /// True while the board is showing the concept exercise rather than a
+    /// puzzle from the queue, so grading goes to the concept and not the SRS.
+    private(set) var isConceptItem = false
+    private var conceptDone = false
+
+    /// An endgame drill the finished set wants the user to play.
+    ///
+    /// Surfaced rather than launched here: the drill has its own screen and its
+    /// own model, and the session cover is not the place to host a second one.
+    /// The Train screen reads this when the cover closes.
+    private(set) var pendingDrill: EndgameDrillKind?
+
+    /// What the header shows in place of `3 / 10` while the concept is up.
+    var progressLabel: String? {
+        guard isConceptItem, let concept = conceptSelection?.concept else { return nil }
+        return concept.family.label
+    }
+
+    /// The lesson currently on screen, if any.
+    var teachingConcept: TrainingConcept? {
+        if case .teaching(let concept) = stage { return concept }
+        return nil
     }
 
     /// Waits for the engine's explanation of the move just played.
@@ -164,6 +232,17 @@ final class PuzzleSessionModel {
     func start(focus: WeeklyFocus? = nil) async {
         guard stage == .idle else { return }
         stage = .loading
+
+        // A revisit: no queue, no grading, just the idea again.
+        if let soloConcept {
+            startedAt = clock()
+            progress.total = 1
+            conceptSelection = ConceptScheduler.Selection(concept: soloConcept, teachFirst: true)
+            beginConcept()
+            return
+        }
+
+        await loadConcept()
         startedAt = clock()
 
         await driver.startSession(focus: focus ?? weeklyFocus)
@@ -177,7 +256,7 @@ final class PuzzleSessionModel {
         progress.total = driver.queueCount
 
         guard !driver.isSessionFinished, driver.itemOnScreen != nil else {
-            finishSession()
+            beginConcept()
             return
         }
         beginItem()
@@ -190,6 +269,9 @@ final class PuzzleSessionModel {
         }
         planOnScreen = item
         machineSnapshot = machine
+        keyMove = machine.expectedMove
+        keyPosition = machine.board.position
+        keyContinuation = machine.continuationAfterExpected
         // Read once, from the position the user is asked to solve — after the
         // setup move, before any answer — and held for the whole item.
         orientation = machine.board.position.sideToMove
@@ -224,7 +306,23 @@ final class PuzzleSessionModel {
     /// thing this line must never do: the theme *is* the answer, and a tactic
     /// you have been told the name of is a lookup rather than a search.
     var taskLine: String {
-        orientation == .white ? "White to play — find the best move." : "Black to play — find the best move."
+        // An opening is not a search. "Find the best move" is the right
+        // instruction for a tactic and the wrong one for a line you were taught
+        // ninety seconds ago and are now rehearsing — there is nothing to find.
+        //
+        // A positional exercise keeps the neutral wording. The user has just
+        // been taught the idea, but the point is still to *see* it in a
+        // position, and naming it above the board would turn the exercise into
+        // a lookup — which is the same reason the task line never names a
+        // puzzle's theme.
+        if isConceptItem, let concept = conceptSelection?.concept,
+            case .line = concept.exercise
+        {
+            return "\(concept.title) — play your moves in order."
+        }
+        return orientation == .white
+            ? "White to play — find the best move."
+            : "Black to play — find the best move."
     }
 
     /// The opponent's setup move, so the view can animate it in before handing
@@ -300,6 +398,10 @@ final class PuzzleSessionModel {
 
     /// Grades a move: forwards it to the service and updates the screen.
     private func submit(uci: String) async {
+        if isConceptItem {
+            await submitConcept(uci: uci)
+            return
+        }
         guard stage == .solving, let plan = planOnScreen, let before = machineSnapshot else { return }
 
         var probe = before
@@ -407,13 +509,34 @@ final class PuzzleSessionModel {
             )
         }
 
+        // A solve is explained through the move the puzzle is about; a miss
+        // through the move that was actually missed, which is the one the user
+        // was standing in front of when it went wrong.
+        let explains = solvedUnaided ? keyMove ?? expected : expected
+        let explainedFrom = solvedUnaided ? keyPosition ?? answeredFrom : answeredFrom
+        let explainedLine = solvedUnaided ? keyContinuation : continuation
+
         // The ring lands on the square that ends the story: the answer's
         // destination when the answer is what we are showing, the user's own
         // destination when they played something and it was wrong.
-        let ringSquare =
-            solvedUnaided
-            ? PuzzleConcept.destination(ofUCI: expected)
-            : PuzzleConcept.destination(ofUCI: played) ?? PuzzleConcept.destination(ofUCI: expected)
+        //
+        // With one exception. A solved multi-move puzzle is now explained
+        // through its *key* move while the board is frozen on the final
+        // position, so a ring on the last move's square points at one square
+        // while the sentence talks about another. Ringing the key square
+        // instead is no better — by the end of the line the piece that went
+        // there has usually moved on, so the ring would draw the eye to
+        // whatever happens to be standing on it now. On a solve the ring is
+        // decoration anyway; its real job is showing a missed answer. So it is
+        // dropped where it would contradict the words, and kept everywhere it
+        // still agrees with them.
+        let ringSquare: Square?
+        if solvedUnaided {
+            ringSquare = explains == expected ? PuzzleConcept.destination(ofUCI: expected) : nil
+        } else {
+            ringSquare = PuzzleConcept.destination(ofUCI: played)
+                ?? PuzzleConcept.destination(ofUCI: expected)
+        }
 
         // The board can often prove the mistake outright — a piece left where
         // something cheaper takes it. That answer is free and instant.
@@ -427,10 +550,10 @@ final class PuzzleSessionModel {
                 message: PuzzleConcept.verdictMessage(
                     solved: solvedUnaided,
                     theme: theme,
-                    answer: expected,
-                    position: answeredFrom,
+                    answer: explains,
+                    position: explainedFrom,
                     mistake: provenMistake,
-                    continuation: continuation
+                    continuation: explainedLine
                 ),
                 ring: ringSquare.map { BoardRing(square: $0, tone: solvedUnaided ? .correct : .wrong) },
                 answer: solvedUnaided ? nil : expected
@@ -448,13 +571,13 @@ final class PuzzleSessionModel {
         // user's own game, which carries no stored line at all — ended at
         // `the rook takes the knight` with the reason left unsaid.
         if solvedUnaided {
-            guard let expected, let answeredFrom,
-                continuation.isEmpty,
-                PuzzleReason.needsTheLine(answer: expected, in: answeredFrom)
+            guard let explains, let explainedFrom,
+                explainedLine.isEmpty,
+                PuzzleReason.needsTheLine(answer: explains, in: explainedFrom)
             else { return }
 
             explainTask = Task { [weak self] in
-                await self?.explainSolve(theme: theme, answer: expected, from: answeredFrom)
+                await self?.explainSolve(theme: theme, answer: explains, from: explainedFrom)
             }
             return
         }
@@ -562,11 +685,231 @@ final class PuzzleSessionModel {
         liveRing = nil
         hintMove = nil
 
-        if driver.isSessionFinished || driver.itemOnScreen == nil {
+        if isConceptItem || conceptDone {
             finishSession()
             return
         }
+        if driver.isSessionFinished || driver.itemOnScreen == nil {
+            beginConcept()
+            return
+        }
         beginItem()
+    }
+
+    /// Picks this set's concept and resolves the position it will be shown on.
+    ///
+    /// Failure here is deliberately quiet: a set with no concept is still a
+    /// perfectly good set of puzzles, and a user whose store is unavailable
+    /// should not be shown an error about a slot they never asked for.
+    private func loadConcept() async {
+        guard let database else { return }
+        let rating = Int(driver.puzzleRating.rounded())
+
+        let selection = await Task.detached(priority: .userInitiated) { () -> ConceptScheduler.Selection? in
+            let stored = (try? database.concepts.all()) ?? []
+            let states = Dictionary(
+                stored.map {
+                    (
+                        $0.id,
+                        ConceptScheduler.State(
+                            id: $0.id,
+                            isIntroduced: $0.introducedAt != nil,
+                            timesSeen: $0.timesSeen,
+                            lastSeenAt: $0.lastSeenAt
+                        )
+                    )
+                },
+                uniquingKeysWith: { first, _ in first }
+            )
+            return ConceptScheduler.next(rating: rating, states: states)
+        }.value
+
+        conceptSelection = selection
+    }
+
+    /// Moves from the puzzles to the set's concept, or to the summary when
+    /// there is nothing to teach.
+    private func beginConcept() {
+        guard let selection = conceptSelection, !conceptDone else {
+            finishSession()
+            return
+        }
+
+        // Taught the first time, exercised afterwards. A technique tested
+        // before it has been explained is not a test, it is a guess.
+        if selection.teachFirst {
+            machineSnapshot = nil
+            planOnScreen = nil
+            liveRing = nil
+            hintMove = nil
+            lastOpponentMove = nil
+            stage = .teaching(selection.concept)
+            markIntroduced(selection.concept)
+            return
+        }
+        beginConceptExercise()
+    }
+
+    /// Starts the exercise for the concept on screen.
+    func beginConceptExercise() {
+        guard let selection = conceptSelection else {
+            finishSession()
+            return
+        }
+
+        switch selection.concept.exercise {
+        case .drill(let kind):
+            // Played out against the engine on its own screen; the set ends
+            // here and hands the drill to the Train tab.
+            pendingDrill = kind
+            conceptDone = true
+            finishSession()
+
+        case .line(let fen, let moves, let opponentMovesFirst):
+            guard
+                var machine = PuzzleSolveMachine(
+                    fen: fen,
+                    line: moves,
+                    opponentMovesFirst: opponentMovesFirst,
+                    retryPolicy: .allowRetries(1)
+                )
+            else {
+                conceptDone = true
+                finishSession()
+                return
+            }
+            machine.start()
+            present(conceptMachine: machine, opponentMovesFirst: opponentMovesFirst)
+
+        case .corpusFeature(let feature):
+            Task { [weak self] in await self?.presentCorpusConcept(feature: feature) }
+        }
+    }
+
+    private func present(conceptMachine machine: PuzzleSolveMachine, opponentMovesFirst: Bool) {
+        conceptExercise = machine
+        machineSnapshot = machine
+        planOnScreen = nil
+        isConceptItem = true
+        orientation = machine.board.position.sideToMove
+        liveRing = nil
+        hintMove = nil
+        lastOpponentMove = opponentMovesFirst ? MovePair(uci: machine.line.first) : nil
+        stage = .solving
+    }
+
+    /// Finds a corpus position that actually contains the idea being taught.
+    ///
+    /// Positions are searched rather than stored because a positional exercise
+    /// cannot be authored — see ``PositionalFeatureDetector``. If nothing in
+    /// the sample matches, the set ends rather than showing a position that
+    /// does not demonstrate the concept.
+    private func presentCorpusConcept(feature: PositionalFeature) async {
+        guard let database else {
+            conceptDone = true
+            finishSession()
+            return
+        }
+        let rating = Int(driver.puzzleRating.rounded())
+
+        let found = await Task.detached(priority: .userInitiated) { () -> (String, [String])? in
+            let band = max(600, rating - 300)...(rating + 400)
+            guard let corpus = database.puzzleQueries else { return nil }
+            let candidates = (try? corpus.puzzles(
+                ratingRange: band,
+                themes: ThemeMask([.quietMove]),
+                limit: 60
+            )) ?? []
+
+            for puzzle in candidates {
+                let line = puzzle.moveList
+                guard line.count >= 2, let start = Position(fen: puzzle.fen) else { continue }
+                var board = Board(position: start)
+                guard PuzzleSolveMachine.move(uci: line[0], on: &board) != nil else { continue }
+                if PositionalFeatureDetector.matches(feature, uci: line[1], in: board.position) {
+                    return (puzzle.fen, line)
+                }
+            }
+            return nil
+        }.value
+
+        guard let found,
+            var machine = PuzzleSolveMachine(
+                fen: found.0,
+                line: found.1,
+                opponentMovesFirst: true,
+                retryPolicy: .allowRetries(1)
+            )
+        else {
+            conceptDone = true
+            finishSession()
+            return
+        }
+        machine.start()
+        present(conceptMachine: machine, opponentMovesFirst: true)
+    }
+
+    /// Grades the concept exercise. Deliberately *not* through the driver: a
+    /// concept is not an SRS card and must not move a puzzle rating.
+    private func submitConcept(uci: String) async {
+        guard let machine = conceptExercise, let selection = conceptSelection else { return }
+
+        var probe = machine
+        let outcome = probe.play(uci: uci)
+        guard outcome != .illegal else { return }
+        conceptExercise = probe
+        machineSnapshot = probe
+
+        switch outcome {
+        case let .advanced(reply):
+            liveRing = PuzzleConcept.destination(ofUCI: uci).map { BoardRing(square: $0, tone: .correct) }
+            lastOpponentMove = MovePair(uci: reply)
+
+        case .retry:
+            liveRing = PuzzleConcept.destination(ofUCI: uci).map { BoardRing(square: $0, tone: .wrong) }
+
+        case .solved, .failed:
+            let solved = outcome == .solved
+            recordConceptAttempt(selection.concept, correct: solved)
+            conceptDone = true
+            isConceptItem = false
+
+            let expected = solved ? uci : machine.expectedMove
+            let from = machine.board.position
+            stage = .verdict(
+                Verdict(
+                    solved: solved,
+                    message: PuzzleConcept.conceptMessage(
+                        solved: solved,
+                        concept: selection.concept,
+                        answer: expected,
+                        position: from
+                    ),
+                    ring: PuzzleConcept.destination(ofUCI: expected)
+                        .map { BoardRing(square: $0, tone: solved ? .correct : .wrong) },
+                    answer: solved ? nil : expected
+                )
+            )
+
+        case .illegal:
+            break
+        }
+    }
+
+    private func markIntroduced(_ concept: TrainingConcept) {
+        guard let database else { return }
+        let id = concept.id
+        Task.detached(priority: .utility) {
+            try? database.concepts.markIntroduced(id: id)
+        }
+    }
+
+    private func recordConceptAttempt(_ concept: TrainingConcept, correct: Bool) {
+        guard let database else { return }
+        let id = concept.id
+        Task.detached(priority: .utility) {
+            try? database.concepts.recordAttempt(id: id, correct: correct)
+        }
     }
 
     private func finishSession() {

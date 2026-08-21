@@ -101,6 +101,26 @@ struct ReviewScreen: View {
 
     // MARK: - iPhone
 
+    /// Scroll target for the self-check card.
+    private static let selfCheckAnchor = "review.selfCheck"
+
+    /// The pre-engine questions, in the slot the verdict will take once they
+    /// are done.
+    @ViewBuilder
+    private var selfCheckSection: some View {
+        if let question = model.selfCheckQuestion {
+            ReviewSelfCheckCard(
+                question: question,
+                index: model.selfCheckIndex,
+                total: model.selfCheckQuestions.count,
+                chosen: model.selfCheckRevealed ? model.selfCheckAnswers[question.id] : nil,
+                onAnswer: { model.answerSelfCheck($0) },
+                onNext: { withAnimation(Motion.crossfade) { model.advanceSelfCheck() } },
+                onSkip: { withAnimation(Motion.crossfade) { model.skipSelfCheck() } }
+            )
+        }
+    }
+
     #if !os(macOS)
         private var phoneLayout: some View {
             GeometryReader { proxy in
@@ -120,22 +140,45 @@ struct ReviewScreen: View {
                         .padding(.horizontal, 16)
 
                     ScrollView {
+                        // The self-check card grows when it marks an answer, and
+                        // it sits under a full-width board — so the explanation
+                        // and the button that continues appear below the fold on
+                        // the very tap that creates them. Reading is not the
+                        // problem; a "Next" the user cannot see is.
+                        ScrollViewReader { scroll in
                         VStack(alignment: .leading, spacing: 20) {
                             if let notice = analysisNotice {
                                 notice.padding(.horizontal, 16)
                             }
-                            if let verdict = model.verdict {
-                                ReviewVerdictCard(verdict: verdict)
+                            // The engine's read stays covered until the user
+                            // has committed to their own. See
+                            // ``ReviewSelfCheck`` for why a review that opens
+                            // with the verdict teaches nothing.
+                            if model.isSelfCheckActive {
+                                selfCheckSection
                                     .padding(.horizontal, 16)
+                                    .id(Self.selfCheckAnchor)
+                            } else {
+                                if let verdict = model.verdict {
+                                    ReviewVerdictCard(verdict: verdict)
+                                        .padding(.horizontal, 16)
+                                }
+                                statPills
+                                    .padding(.horizontal, 16)
+                                filmstripSection(width: proxy.size.width)
+                                coachSection.padding(.horizontal, 16)
                             }
-                            statPills
-                                .padding(.horizontal, 16)
-                            filmstripSection(width: proxy.size.width)
-                            coachSection.padding(.horizontal, 16)
                             moveListSection
                                 .padding(.horizontal, 16)
                         }
                         .padding(.vertical, 16)
+                        .onChange(of: model.selfCheckRevealed) { _, revealed in
+                            guard revealed else { return }
+                            withAnimation(Motion.crossfade) {
+                                scroll.scrollTo(Self.selfCheckAnchor, anchor: .bottom)
+                            }
+                        }
+                        }
                     }
                 }
                 .frame(maxWidth: .infinity)

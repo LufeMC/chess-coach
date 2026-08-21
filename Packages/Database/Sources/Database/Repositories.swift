@@ -81,6 +81,16 @@ public struct GameRepository: Sendable {
         }
     }
 
+    /// Records how the user did on the review's pre-engine questions.
+    ///
+    /// Also the "this game has been reviewed" flag — see ``Game/selfCheckScore``
+    /// for why it is nullable.
+    public func setSelfCheckScore(_ score: Int?, forGame gameID: Game.ID) throws {
+        try writer.write { db in
+            try Game.find(gameID).update { $0.selfCheckScore = #bind(score) }.execute(db)
+        }
+    }
+
     /// Games still awaiting engine analysis, oldest first so the backlog drains
     /// in order.
     public func awaitingAnalysis(limit: Int = 5) throws -> [Game] {
@@ -654,6 +664,55 @@ public struct CalibrationDraftRepository: Sendable {
     public func clear() throws {
         try writer.write { db in
             try CalibrationDraft.delete().where { $0.id.eq(CalibrationDraft.singletonID) }.execute(db)
+        }
+    }
+}
+
+// MARK: - Concept progress
+
+/// What the user has been taught, and how the exercises have gone.
+public struct ConceptRepository: Sendable {
+    private let writer: any DatabaseWriter
+
+    public init(writer: any DatabaseWriter) {
+        self.writer = writer
+    }
+
+    public func all() throws -> [ConceptProgress] {
+        try writer.read { db in try ConceptProgress.all.fetchAll(db) }
+    }
+
+    public func progress(id: String) throws -> ConceptProgress? {
+        try writer.read { db in try ConceptProgress.where { $0.id.eq(id) }.fetchOne(db) }
+    }
+
+    /// Marks a concept as taught, if it has not been already.
+    ///
+    /// Idempotent on purpose: the lesson is shown once, and a user who backs
+    /// out of a set and re-enters it should not be taught the same thing twice
+    /// — nor should they skip the exercise because the first showing counted.
+    public func markIntroduced(id: String, at date: Date = Date()) throws {
+        try writer.write { db in
+            let existing = try ConceptProgress.where { $0.id.eq(id) }.fetchOne(db)
+            guard var row = existing else {
+                try ConceptProgress.insert { ConceptProgress(id: id, introducedAt: date) }.execute(db)
+                return
+            }
+            guard row.introducedAt == nil else { return }
+            row.introducedAt = date
+            try ConceptProgress.upsert { row }.execute(db)
+        }
+    }
+
+    /// Records an attempt at a concept's exercise.
+    public func recordAttempt(id: String, correct: Bool, at date: Date = Date()) throws {
+        try writer.write { db in
+            var row = try ConceptProgress.where { $0.id.eq(id) }.fetchOne(db)
+                ?? ConceptProgress(id: id)
+            row.timesSeen += 1
+            if correct { row.timesCorrect += 1 }
+            row.lastSeenAt = date
+            try ConceptProgress.upsert { row }.execute(db)
         }
     }
 }

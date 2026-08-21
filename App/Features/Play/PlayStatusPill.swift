@@ -185,7 +185,7 @@ private struct ClockSegment: View {
 }
 
 #Preview("Status pill") {
-    let sample = PlayClock.widthSample(baseSeconds: 600)
+    let sample = PlayClock.widthSample(baseSeconds: 900)
 
     return VStack(spacing: 16) {
         PlayStatusPill(

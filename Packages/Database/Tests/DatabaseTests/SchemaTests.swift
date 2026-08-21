@@ -23,6 +23,67 @@ struct SchemaTests {
         #expect(expected.isSubset(of: Set(actual)))
     }
 
+    /// Reproduces a real failure. A live database carried three child rows
+    /// whose parent game no longer existed — written on a connection that was
+    /// not enforcing foreign keys — and they were completely harmless until the
+    /// first migration to touch `games`. GRDB checks foreign keys at the end of
+    /// a migration, a failed check fails the open, and the user is told their
+    /// games database cannot be opened: every game they ever played, gone,
+    /// because of rows nothing could reach.
+    @Test("A schema change survives orphaned child rows left by an older build")
+    func migrationSweepsOrphans() throws {
+        var configuration = Configuration()
+        configuration.foreignKeysEnabled = true
+        let queue = try DatabaseQueue(configuration: configuration)
+
+        // Bring the database to the state a shipped build left it in.
+        try UserDatabase.migrator.migrate(queue, upTo: "v6.clayPieceSet")
+
+        // Plant the orphan the way it actually arrived: with enforcement off,
+        // which is the only way such a row can exist at all.
+        // Outside a transaction: SQLite silently ignores this pragma inside
+        // one, which is itself a decent illustration of how the real rows got
+        // there in the first place.
+        try queue.writeWithoutTransaction { db in
+            try db.execute(sql: "PRAGMA foreign_keys = OFF")
+            try db.execute(
+                sql: #"INSERT INTO "plyEvals" ("id", "gameID", "ply") VALUES (?, ?, 1)"#,
+                arguments: [UUID().uuidString, UUID().uuidString]
+            )
+            try db.execute(
+                sql: #"INSERT INTO "gameMoves" ("id", "gameID", "ply", "san", "uci") VALUES (?, ?, 1, 'e4', 'e2e4')"#,
+                arguments: [UUID().uuidString, UUID().uuidString]
+            )
+            try db.execute(sql: "PRAGMA foreign_keys = ON")
+        }
+
+        // The whole point: this must not throw.
+        try UserDatabase.migrator.migrate(queue)
+
+        let orphans = try queue.read { db in
+            let evals = try Int.fetchOne(
+                db,
+                sql: #"SELECT COUNT(*) FROM "plyEvals" WHERE "gameID" NOT IN (SELECT "id" FROM "games")"#
+            ) ?? -1
+            let moves = try Int.fetchOne(
+                db,
+                sql: #"SELECT COUNT(*) FROM "gameMoves" WHERE "gameID" NOT IN (SELECT "id" FROM "games")"#
+            ) ?? -1
+            return (evals, moves)
+        }
+        #expect(orphans.0 == 0, "orphaned evals must be swept")
+        #expect(orphans.1 == 0, "orphaned moves must be swept")
+
+        // And the column the migration existed to add is actually there.
+        let hasColumn = try queue.read { db in
+            try Int.fetchOne(
+                db,
+                sql: #"SELECT COUNT(*) FROM pragma_table_info('games') WHERE "name" = 'selfCheckScore'"#
+            ) ?? 0
+        }
+        #expect(hasColumn == 1)
+    }
+
     @Test("Migration is idempotent")
     func migrationIsIdempotent() throws {
         var configuration = Configuration()

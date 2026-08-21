@@ -146,9 +146,16 @@ struct SecondTryRetractionTests {
         #expect(session.moves.isEmpty)
         #expect(session.board.position.sideToMove == .white)
         #expect(session.lastMove == nil)
+        // Expressed against the configured control rather than literals: this
+        // is a test about how many increments a retraction pays, and changing
+        // the time control should not be able to falsify it.
+        let control = GameSession.Configuration.sparring(userColor: .white, opponentRating: 1200)
+        let base = control.baseSeconds * 1000
+        let increment = control.incrementSeconds * 1000
+
         // The attempt cost its thinking time and earned no increment.
-        #expect(session.userClockMs <= 600_000)
-        #expect(session.userClockMs > 599_000)
+        #expect(session.userClockMs <= base)
+        #expect(session.userClockMs > base - 1_000)
 
         session.resumeAfterSecondTry()
         let replacement = await session.attemptUserMove(from: .d2, to: .d4)
@@ -157,10 +164,10 @@ struct SecondTryRetractionTests {
         #expect(session.moves.map(\.san) == ["d4", "d5"])
         #expect(session.moves.map(\.ply) == [1, 2])
         #expect(session.moves.filter(\.byUser).count == 1)
-        // One increment, not two. Two — 610_000 — is the retraction being paid
-        // for as though it had been a move.
-        #expect(session.userClockMs > 604_000)
-        #expect(session.userClockMs <= 605_000)
+        // One increment, not two. Two would be the retraction being paid for as
+        // though it had been a move.
+        #expect(session.userClockMs > base + increment - 1_000)
+        #expect(session.userClockMs <= base + increment)
     }
 
     @Test("Keeping the original move records it exactly once")
@@ -176,10 +183,17 @@ struct SecondTryRetractionTests {
         #expect(session.moves.map(\.san) == ["e4", "d5"])
         #expect(session.moves.filter(\.byUser).count == 1)
         #expect(session.moves.first?.ply == 1)
+        // Expressed against the configured control rather than literals: this
+        // is a test about how many increments a retraction pays, and changing
+        // the time control should not be able to falsify it.
+        let control = GameSession.Configuration.sparring(userColor: .white, opponentRating: 1200)
+        let base = control.baseSeconds * 1000
+        let increment = control.incrementSeconds * 1000
+
         // The kept move earns the increment it was denied when it was taken
         // back, and pays nothing for the deliberation in between.
-        #expect(session.userClockMs > 604_000)
-        #expect(session.userClockMs <= 605_000)
+        #expect(session.userClockMs > base + increment - 1_000)
+        #expect(session.userClockMs <= base + increment)
     }
 
     @Test("Resigning from a retraction saves a game the move never entered")

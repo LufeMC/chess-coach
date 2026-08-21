@@ -41,6 +41,8 @@ struct PuzzleSessionScreen: View {
                     missed: model.missed,
                     onContinue: { dismiss() }
                 )
+            case let .teaching(concept):
+                ConceptLessonView(concept: concept) { model.beginConceptExercise() }
             case .solving, .verdict:
                 solving
             }
@@ -85,7 +87,7 @@ struct PuzzleSessionScreen: View {
         #endif
         .toolbar {
             ToolbarItem(placement: .principal) {
-                SessionProgressBar(progress: model.progress)
+                SessionProgressBar(progress: model.progress, label: model.progressLabel)
             }
             ToolbarItem(placement: .cancellationAction) {
                 Button { dismiss() } label: { Image(systemName: "xmark") }

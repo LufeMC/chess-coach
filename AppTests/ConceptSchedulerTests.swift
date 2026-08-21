@@ -1,0 +1,144 @@
+//
+//  ConceptSchedulerTests.swift
+//  ChessCoachTests
+//
+
+import Foundation
+import ChessKit
+import Testing
+
+@testable import ChessCoach
+
+/// The set has one concept slot and the app fills it. These are the rules that
+/// decide what a user is taught and when.
+@Suite("Concept scheduling")
+struct ConceptSchedulerTests {
+
+    private func states(_ pairs: [(String, ConceptScheduler.State)]) -> [String: ConceptScheduler.State] {
+        Dictionary(uniqueKeysWithValues: pairs)
+    }
+
+    @Test("A concept never seen is taught before it is tested")
+    func teachesBeforeTesting() throws {
+        let selection = try #require(ConceptScheduler.next(rating: 1000, states: [:]))
+        #expect(selection.teachFirst)
+    }
+
+    /// The whole point of the rating tier: Philidor taught at 900 is Philidor
+    /// forgotten by the time a rook ending ever appears.
+    @Test("Concepts above the user's rating are not served yet")
+    func respectsRatingTiers() {
+        let early = TrainingConcept.available(atRating: 900).map(\.id)
+        #expect(early.contains("opening.london"))
+        #expect(early.contains("endgame.kqk"))
+        #expect(early.contains("endgame.philidor") == false)
+        #expect(early.contains("positional.outpost") == false)
+
+        let later = TrainingConcept.available(atRating: 1500).map(\.id)
+        #expect(later.contains("endgame.philidor"))
+        #expect(later.contains("positional.outpost"))
+    }
+
+    @Test("The family rotates rather than repeating yesterday's subject")
+    func rotatesFamilies() throws {
+        let selection = try #require(
+            ConceptScheduler.next(rating: 1500, states: [:], lastFamily: .opening)
+        )
+        #expect(selection.concept.family != .opening)
+    }
+
+    /// Rotation is a preference, not a rule: serving nothing is worse than
+    /// serving the same family twice.
+    @Test("Rotation gives way rather than leaving the slot empty")
+    func rotationNeverStarvesTheSlot() throws {
+        // At rating 0 only openings and the three basic endgames exist; ask for
+        // something that is not an endgame or an opening and it must still pick.
+        let openingsOnly = TrainingConcept.available(atRating: 0)
+            .filter { $0.family == .opening }
+        #expect(openingsOnly.isEmpty == false)
+
+        let selection = try #require(
+            ConceptScheduler.next(rating: 0, states: [:], lastFamily: .positional)
+        )
+        #expect(selection.concept.fromRating <= 0)
+    }
+
+    @Test("Once everything is taught, the least practised comes back")
+    func returnsToTheLeastPractised() throws {
+        let all = TrainingConcept.available(atRating: 1500)
+        var seen = states(
+            all.map {
+                ($0.id, ConceptScheduler.State(id: $0.id, isIntroduced: true, timesSeen: 5,
+                                               lastSeenAt: Date(timeIntervalSince1970: 10_000)))
+            }
+        )
+        let neglected = try #require(all.first { $0.family == .positional })
+        seen[neglected.id] = ConceptScheduler.State(
+            id: neglected.id, isIntroduced: true, timesSeen: 1,
+            lastSeenAt: Date(timeIntervalSince1970: 20)
+        )
+
+        let selection = try #require(ConceptScheduler.next(rating: 1500, states: seen))
+        #expect(selection.concept.id == neglected.id)
+        #expect(selection.teachFirst == false, "it has been taught; this is an exercise")
+    }
+
+    /// A concept shown but never exercised is more overdue than one practised
+    /// last week, not less.
+    @Test("Taught but never practised sorts before recently practised")
+    func neverPractisedIsMostOverdue() throws {
+        let all = TrainingConcept.available(atRating: 1500)
+        var seen = states(
+            all.map {
+                ($0.id, ConceptScheduler.State(id: $0.id, isIntroduced: true, timesSeen: 3,
+                                               lastSeenAt: Date(timeIntervalSince1970: 5_000)))
+            }
+        )
+        let untouched = try #require(all.first { $0.family == .endgame })
+        seen[untouched.id] = ConceptScheduler.State(id: untouched.id, isIntroduced: true, timesSeen: 0)
+
+        let selection = try #require(ConceptScheduler.next(rating: 1500, states: seen))
+        #expect(selection.concept.id == untouched.id)
+    }
+
+    /// Every taught line is replayed move by move against a real board.
+    ///
+    /// The lines are checked against Stockfish by hand when they are written,
+    /// but nothing stopped a typo in a UCI string from shipping a line that
+    /// simply stops halfway — and it would fail silently, as a lesson whose
+    /// exercise ends early rather than as a crash. This is the guard for the
+    /// next opening somebody adds.
+    @Test("Every opening line in the catalogue is legal from start to finish")
+    func openingLinesAreLegal() throws {
+        for concept in TrainingConcept.catalogue {
+            guard case let .line(fen, moves, opponentMovesFirst) = concept.exercise else { continue }
+
+            let start = try #require(Position(fen: fen), "\(concept.id): unparseable FEN")
+            var board = Board(position: start)
+
+            for (index, uci) in moves.enumerated() {
+                #expect(
+                    PuzzleSolveMachine.move(uci: uci, on: &board) != nil,
+                    "\(concept.id): move \(index) (\(uci)) is not legal"
+                )
+            }
+
+            // The solver has to have the last word, or the exercise ends on the
+            // opponent's move and the user is left holding a finished board.
+            let solverPlaysEvenIndices = !opponentMovesFirst
+            let lastIsSolvers = (moves.count - 1) % 2 == (solverPlaysEvenIndices ? 0 : 1)
+            #expect(lastIsSolvers, "\(concept.id): the line ends on the opponent's move")
+        }
+    }
+
+    @Test("Every concept in the catalogue carries a real lesson")
+    func everyConceptTeaches() {
+        for concept in TrainingConcept.catalogue {
+            #expect(concept.teaching.idea.isEmpty == false, "\(concept.id) has no idea")
+            #expect(concept.teaching.why.isEmpty == false, "\(concept.id) has no why")
+            #expect(concept.teaching.lookFor.isEmpty == false, "\(concept.id) has no cue")
+            #expect(concept.title.isEmpty == false)
+        }
+        #expect(Set(TrainingConcept.catalogue.map(\.id)).count == TrainingConcept.catalogue.count)
+    }
+}

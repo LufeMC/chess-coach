@@ -468,6 +468,57 @@ struct OpeningPrincipleDetectorTests {
         #expect(findings.map(\.subtype) == [.repeatedPieceMove])
     }
 
+    /// Both knights out, not a pawn past the second rank, and the move played
+    /// is a rook's pawn. "Control the centre" is only useful feedback when it
+    /// points at a move that plainly did not.
+    @Test("A flank pawn with no pawn in the centre is flagged")
+    func centreNeglect() throws {
+        let context = try Fixture.context(
+            fen: "r1bqkb1r/pppppppp/2n2n2/8/8/2N2N2/PPPPPPPP/R1BQKB1R w KQkq - 6 4",
+            ply: 7,
+            played: "a2a3",
+            bestScore: .centipawns(20),
+            refutationScore: .centipawns(160)
+        )
+        #expect(context.judgment >= .inaccuracy)
+        #expect(OpeningPrincipleDetector().detect(context).map(\.subtype) == [.centreNeglect])
+    }
+
+    /// The same move once the centre is claimed is just a move. A rule that
+    /// fired on every a3 would teach the user to distrust the rule.
+    @Test("A flank pawn is not flagged once the centre is claimed")
+    func centreNeglectNeedsAnEmptyCentre() throws {
+        let context = try Fixture.context(
+            fen: "r1bqkb1r/pppp1ppp/2n2n2/4p3/4P3/2N2N2/PPPP1PPP/R1BQKB1R w KQkq - 6 4",
+            ply: 7,
+            played: "a2a3",
+            bestScore: .centipawns(20),
+            refutationScore: .centipawns(160)
+        )
+        #expect(OpeningPrincipleDetector().detect(context).isEmpty)
+    }
+
+    /// Castled, move 14, and the queen and both bishops are still sitting
+    /// between the rooks. Development is not over until they can see each other.
+    @Test("Pieces still between the rooks after castling are flagged")
+    func disconnectedRooks() throws {
+        let castle = try Fixture.move(
+            "e1g1",
+            in: "r1bqkb1r/pppp1ppp/2n2n2/4p3/4P3/2N2N2/PPPP1PPP/R1BQK2R w KQkq - 6 5"
+        )
+        let context = try Fixture.context(
+            fen: "r2q1rk1/pppb1ppp/2np1n2/4p3/4P3/2NP1N2/PPPB1PPP/R2Q1RK1 w - - 6 14",
+            ply: 27,
+            played: "a2a3",
+            bestScore: .centipawns(20),
+            refutationScore: .centipawns(160),
+            priorMoves: [castle]
+        )
+        #expect(
+            OpeningPrincipleDetector().detect(context).map(\.subtype).contains(.disconnectedRooks)
+        )
+    }
+
     /// A king still in the middle on move 15 with an open d-file, on a move that
     /// cost something.
     private let uncastled = "r2q1rk1/ppp2ppp/2n5/3p4/3P4/2N5/PPP2PPP/R2QK2R w KQ - 0 15"

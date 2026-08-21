@@ -23,9 +23,15 @@ struct SessionProgressBar: View {
 
     let progress: SessionProgress
 
+    /// Shown instead of the counter for a step that is not one of the numbered
+    /// puzzles. The set's concept is the last thing in the session but it is not
+    /// puzzle six of five, and a counter that reads `5 / 5` under a board the
+    /// user is still playing says the session is over when it is not.
+    var label: String?
+
     var body: some View {
         VStack(spacing: 5) {
-            Text(progress.counterLabel)
+            Text(label ?? progress.counterLabel)
                 .typeRole(.headline, monospacedDigits: true)
                 .contentTransition(.numericText())
 
@@ -41,7 +47,7 @@ struct SessionProgressBar: View {
         }
         .animation(Motion.snappy, value: progress.fraction)
         .accessibilityElement(children: .ignore)
-        .accessibilityLabel("Puzzle \(progress.counterLabel)")
+        .accessibilityLabel(label ?? "Puzzle \(progress.counterLabel)")
     }
 }
 

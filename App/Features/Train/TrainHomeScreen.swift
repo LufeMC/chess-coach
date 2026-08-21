@@ -7,13 +7,23 @@ import Database
 import SwiftUI
 import TrainingCore
 
-/// The Train tab: today's puzzle set, and the endgame drills.
+/// The Train tab: one set, and one decision about it.
 ///
-/// Two entries, kept apart on purpose. A puzzle is one move to find and ten of
-/// them is a bounded, predictable session; a drill is a technique played out
-/// against an engine for twenty moves. Mixing drills into the queue would make
-/// "10 puzzles" mean anywhere between four minutes and forty, which is exactly
-/// the kind of promise a daily habit cannot afford to break.
+/// ## Why the drills are no longer a second thing to pick
+///
+/// This screen used to offer endgame drills as their own grid beside the puzzle
+/// set. The stated reason was honest — a drill runs twenty moves and would have
+/// made "10 puzzles" mean anywhere from four minutes to forty — but the effect
+/// was that endgames got practised by exactly the people who already knew they
+/// mattered. Everyone else did the puzzles, because the puzzles had the button.
+///
+/// Now a set is its puzzles *plus one concept the app chooses*: an opening, an
+/// endgame technique or a positional idea, taught the first time and exercised
+/// after. The original objection is answered by the length promise covering the
+/// puzzles only, which is what the user is actually budgeting time against.
+/// Where the concept turns out to be an endgame, the drill is handed back to
+/// this screen when the set closes — it still needs its own board and its own
+/// twenty moves, it just no longer needs to be *chosen*.
 struct TrainHomeScreen: View {
 
     @Environment(AppModel.self) private var model
@@ -22,11 +32,9 @@ struct TrainHomeScreen: View {
     /// A focus carried in from a rating leak, replacing the week's habit for
     /// exactly one session.
     @State private var requestedFocus: WeeklyFocus?
-
-    private let columns = [
-        GridItem(.flexible(), spacing: 12),
-        GridItem(.flexible(), spacing: 12)
-    ]
+    /// The drill the set just finished wants played, opened once the session
+    /// cover is out of the way.
+    @State private var pendingDrill: EndgameDrillKind?
 
     var body: some View {
         ScrollView {
@@ -44,19 +52,10 @@ struct TrainHomeScreen: View {
                     dueSection
                 }
 
-                VStack(alignment: .leading, spacing: 12) {
-                    SectionHeader(title: "Endgame drills")
-
-                    LazyVGrid(columns: columns, spacing: 12) {
-                        ForEach(DrillFamilyPresentation.all) { family in
-                            EndgameDrillCard(
-                                family: family,
-                                mastery: home.mastery(for: family.kind),
-                                onSelect: { route = .drill(family.kind) }
-                            )
-                        }
-                    }
+                if !home.covered.isEmpty {
+                    coveredSection
                 }
+
             }
             .padding(.horizontal)
             .padding(.vertical, 12)
@@ -76,16 +75,29 @@ struct TrainHomeScreen: View {
         .trainingCover(item: $route) { route in
             destination(for: route)
         }
+        .onChange(of: pendingDrill) { _, kind in
+            guard let kind else { return }
+            pendingDrill = nil
+            route = .drill(kind)
+        }
     }
 
     // MARK: Queue
 
-    /// The day's one action, and the two decisions that shape it.
+    /// The day's one action, and the only decision left to the user.
     ///
-    /// The chips sit *above* `Start` rather than behind a settings glyph because
-    /// they are the two things about a session worth changing, and both change
-    /// what the next tap produces: the length is the promise about how long today
-    /// takes, and the focus decides 60% of what is in the queue.
+    /// ## Why the focus picker is gone
+    ///
+    /// It offered nine habits and asked the user to pick the one they were
+    /// worst at — which is precisely the judgement someone on their way to 2000
+    /// does not yet have, and the reason they are here. Choosing it wrong
+    /// spends a whole week's sessions rehearsing something that was already
+    /// fine. The app computes the week's focus from the user's own leaks and it
+    /// is better at it than they are, so the choice is not offered: what is
+    /// worth practising is not a preference.
+    ///
+    /// Length stays, because it is not a judgement about chess. It is the user
+    /// saying how much time they have today, which is a thing only they know.
     private var queueCard: some View {
         VStack(alignment: .leading, spacing: 14) {
             HStack(spacing: 12) {
@@ -99,17 +111,14 @@ struct TrainHomeScreen: View {
                     .background(Circle().fill(Palette.surfaceSunken.dynamic))
 
                 VStack(alignment: .leading, spacing: 2) {
-                    Text("Today's set").typeRole(.headline)
+                    Text("Set").typeRole(.headline)
                     Text(setSubtitle).typeRole(.caption)
                 }
 
                 Spacer(minLength: 0)
             }
 
-            HStack(spacing: 10) {
-                lengthChip
-                focusChip
-            }
+            LengthSelector(lengths: TrainHomeModel.lengths, selection: $home.length)
 
             Button("Start") { route = .puzzles }
                 .buttonStyle(.primaryAction)
@@ -125,36 +134,76 @@ struct TrainHomeScreen: View {
         return "\(home.length) puzzles — \(home.dueCount) due for review."
     }
 
-    private var lengthChip: some View {
-        Menu {
-            ForEach(TrainHomeModel.lengths, id: \.self) { length in
-                Button { home.length = length } label: {
-                    MenuChoice(title: "\(length) puzzles", isSelected: length == home.length)
+    // MARK: What the sets have covered
+
+    /// The training in order, with what has been taught so far marked.
+    ///
+    /// ## Why this is not the drill grid again
+    ///
+    /// The grid that used to live here asked "what do you want to practise",
+    /// which is the question the user is least equipped to answer. This asks
+    /// nothing. It is a record of ground covered, in the order the app covers
+    /// it, and the only thing it lets you *do* is go back over something
+    /// already taught — a different decision from choosing what comes next, and
+    /// a reasonable one to leave with the reader, since it is also the only way
+    /// to see a lesson a second time.
+    ///
+    /// What has not been taught is one line, not twelve. Naming them would hand
+    /// over most of the answer to exercises the user has not met — "The
+    /// outpost" is very nearly its own solution — and a column of identical
+    /// padlocks is a worse thing to look at than a short list of what you have
+    /// plus a note that there is more.
+    private var coveredSection: some View {
+        let taught = home.covered.filter(\.isTaught)
+        let remaining = home.covered.count - taught.count
+
+        return VStack(alignment: .leading, spacing: 12) {
+            SectionHeader(title: "Your training", qualifier: taughtQualifier)
+
+            VStack(spacing: 0) {
+                ForEach(Array(taught.enumerated()), id: \.element.id) { row in
+                    if row.offset > 0 { Divider().padding(.leading, 44) }
+                    CoveredConceptRow(row: row.element) {
+                        route = .concept(row.element.concept)
+                    }
+                }
+
+                if remaining > 0 {
+                    if !taught.isEmpty { Divider().padding(.leading, 44) }
+                    upcomingRow(remaining)
                 }
             }
-        } label: {
-            PickerChip(label: "Length", value: "\(home.length)")
+            .padding(.horizontal, 16)
+            .elevation(.raised, cornerRadius: CornerRadius.card)
         }
-        .accessibilityLabel("Session length, \(home.length) puzzles")
     }
 
-    private var focusChip: some View {
-        Menu {
-            ForEach(home.habitChoices, id: \.self) { habit in
-                Button {
-                    Task { await home.chooseFocus(habit) }
-                } label: {
-                    // The imperative, not the chip word: the menu is where the
-                    // user decides what they are working on, and "Blunder-check
-                    // every move" is the instruction they are agreeing to.
-                    MenuChoice(title: habit.microGoalTitle, isSelected: habit == home.focus?.habit)
-                }
+    private func upcomingRow(_ remaining: Int) -> some View {
+        HStack(spacing: 12) {
+            ZStack {
+                Circle()
+                    .fill(Palette.surfaceSunken.dynamic)
+                    .frame(width: 32, height: 32)
+                Image(systemName: "ellipsis")
+                    .font(.system(size: 12, weight: .bold))
+                    .foregroundStyle(.secondary)
             }
-        } label: {
-            PickerChip(label: "Focus", value: home.focusChipTitle)
+
+            Text(
+                home.covered.contains(where: \.isTaught)
+                    ? "\(remaining) more, as your sets reach them"
+                    : "\(remaining) ideas your sets will teach you"
+            )
+            .typeRole(.body, appliesForeground: false)
+            .foregroundStyle(.secondary)
+
+            Spacer(minLength: 0)
         }
-        .disabled(home.habitChoices.isEmpty)
-        .accessibilityLabel("This week's focus, \(home.focusChipTitle)")
+        .padding(.vertical, 12)
+    }
+
+    private var taughtQualifier: String {
+        "\(home.covered.filter(\.isTaught).count) of \(home.covered.count)"
     }
 
     // MARK: Due today
@@ -192,12 +241,31 @@ struct TrainHomeScreen: View {
         switch route {
         case .puzzles:
             if let service = home.makeTrainingService() {
+                let session = PuzzleSessionModel(
+                    driver: service,
+                    focus: requestedFocus ?? home.focus,
+                    evaluator: EnginePuzzleEvaluator(service: model.engineService)
+                )
+                NavigationStack {
+                    PuzzleSessionScreen(model: session)
+                }
+                // A set whose concept was an endgame ends by asking for the
+                // drill. Read on dismissal rather than pushed from inside the
+                // session, because the drill has its own screen and its own
+                // model and the session cover is not the place to host a
+                // second one.
+                .onDisappear { pendingDrill = session.pendingDrill }
+            } else {
+                unavailable
+            }
+        case let .concept(concept):
+            if let service = home.makeTrainingService() {
                 NavigationStack {
                     PuzzleSessionScreen(
                         model: PuzzleSessionModel(
                             driver: service,
-                            focus: requestedFocus ?? home.focus,
-                            evaluator: EnginePuzzleEvaluator(service: model.engineService)
+                            evaluator: EnginePuzzleEvaluator(service: model.engineService),
+                            soloConcept: concept
                         )
                     )
                 }
@@ -226,56 +294,66 @@ struct TrainHomeScreen: View {
     }
 }
 
-// MARK: - Menu choice
+// MARK: - Length selector
 
-/// One row of a picker menu, with the platform's own selection checkmark.
-private struct MenuChoice: View {
-
-    let title: String
-    let isSelected: Bool
-
-    var body: some View {
-        if isSelected {
-            Label(title, systemImage: "checkmark")
-        } else {
-            Text(title)
-        }
-    }
-}
-
-// MARK: - Picker chip
-
-/// `Length: 10`. A label, its value, and a disclosure chevron.
+/// The three session lengths, all of them visible, one tap to change.
 ///
-/// A chip rather than a segmented control: there are three lengths and nine
-/// habits, and a control that has to be wide enough for the longest habit name
-/// would take the whole row for a decision most users make once.
-private struct PickerChip: View {
+/// Not a `Menu`. The platform picker hides three short numbers behind a tap and
+/// a system sheet, which is a lot of ceremony for the only choice on the screen
+/// — and it renders as someone else's control in the middle of a hand-built
+/// one. With the focus decision gone there is room to simply show them.
+///
+/// The selected pill is *raised*, not accented: this screen's one accent is
+/// spent on `Start`, and a second filled accent would make the user read both
+/// to find out which one is the action.
+private struct LengthSelector: View {
 
-    let label: String
-    let value: String
+    let lengths: [Int]
+    @Binding var selection: Int
 
     var body: some View {
-        HStack(spacing: 5) {
-            Text(label)
-                .typeRole(.caption, appliesForeground: false)
-                .foregroundStyle(.secondary)
-            Text(value)
-                .typeRole(.caption, appliesForeground: false)
-                .foregroundStyle(.primary)
-                .lineLimit(1)
-            Image(systemName: "chevron.down")
-                .font(.system(size: 9, weight: .semibold))
-                .foregroundStyle(.tertiary)
+        HStack(spacing: 4) {
+            ForEach(lengths, id: \.self) { length in
+                segment(length)
+            }
         }
-        .padding(.horizontal, 10)
-        .padding(.vertical, 7)
+        .padding(4)
         .background(
-            RoundedRectangle(cornerRadius: CornerRadius.chip, style: .continuous)
+            RoundedRectangle(cornerRadius: CornerRadius.chip + 4, style: .continuous)
                 .fill(Palette.surfaceSunken.dynamic)
         )
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel("Session length")
+    }
+
+    private func segment(_ length: Int) -> some View {
+        let isSelected = length == selection
+        return Button {
+            withAnimation(Motion.crossfade) { selection = length }
+        } label: {
+            VStack(spacing: 1) {
+                Text("\(length)")
+                    .typeRole(.headline, monospacedDigits: true, appliesForeground: false)
+                Text("puzzles")
+                    .typeRole(.caption, appliesForeground: false)
+                    .foregroundStyle(.secondary)
+            }
+            .foregroundStyle(isSelected ? .primary : .secondary)
+            .frame(maxWidth: .infinity)
+            .padding(.vertical, 8)
+            .background(
+                RoundedRectangle(cornerRadius: CornerRadius.chip, style: .continuous)
+                    .fill(isSelected ? Palette.surfaceRaised.dynamic : .clear)
+                    .shadow(color: .black.opacity(isSelected ? 0.08 : 0), radius: 3, y: 1)
+            )
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel("\(length) puzzles")
+        .accessibilityAddTraits(isSelected ? [.isSelected] : [])
     }
 }
+
 
 // MARK: - Due row
 
@@ -370,11 +448,14 @@ private struct PromotionRow: View {
 enum TrainRoute: Identifiable, Hashable {
     case puzzles
     case drill(EndgameDrillKind)
+    /// One concept revisited on its own, from the training list.
+    case concept(TrainingConcept)
 
     var id: String {
         switch self {
         case .puzzles: "puzzles"
         case let .drill(kind): "drill.\(kind.rawValue)"
+        case let .concept(concept): "concept.\(concept.id)"
         }
     }
 }
@@ -396,5 +477,67 @@ extension View {
         #else
             sheet(item: item, content: content)
         #endif
+    }
+}
+
+// MARK: - Covered concept row
+
+/// One line of the training list: what it is, whether it has been taught, and
+/// how the exercises have gone.
+private struct CoveredConceptRow: View {
+
+    let row: TrainHomeModel.CoveredConcept
+    let onSelect: () -> Void
+
+    var body: some View {
+        Button(action: onSelect) {
+            HStack(spacing: 12) {
+                marker
+
+                VStack(alignment: .leading, spacing: 2) {
+                    // An untaught concept is named only by its family. The
+                    // title of a positional idea is most of the answer to its
+                    // own exercise.
+                    Text(row.isTaught ? row.concept.title : "\(row.concept.family.label) — not yet")
+                        .typeRole(.body, appliesForeground: false)
+                        .foregroundStyle(row.isTaught ? .primary : .secondary)
+                        .multilineTextAlignment(.leading)
+
+                    if row.isTaught {
+                        Text(row.record.map { "\(row.concept.family.label) · \($0)" }
+                            ?? row.concept.family.label)
+                            .typeRole(.caption)
+                    }
+                }
+
+                Spacer(minLength: 0)
+
+                if row.isTaught {
+                    Image(systemName: "arrow.clockwise")
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundStyle(.tertiary)
+                }
+            }
+            .padding(.vertical, 12)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .disabled(!row.isTaught)
+        .accessibilityLabel(
+            row.isTaught
+                ? "\(row.concept.title), \(row.concept.family.label). Practise again."
+                : "\(row.concept.family.label), not covered yet"
+        )
+    }
+
+    private var marker: some View {
+        ZStack {
+            Circle()
+                .fill(row.isTaught ? Palette.accentWash.dynamic : Palette.surfaceSunken.dynamic)
+                .frame(width: 32, height: 32)
+            Image(systemName: row.isTaught ? "checkmark" : "lock.fill")
+                .font(.system(size: 12, weight: .bold))
+                .foregroundStyle(row.isTaught ? Palette.accent.dynamic : Color.secondary)
+        }
     }
 }

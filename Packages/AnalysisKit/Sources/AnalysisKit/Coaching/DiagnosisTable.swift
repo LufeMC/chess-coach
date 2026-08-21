@@ -318,6 +318,26 @@ enum DiagnosisTable {
         ),
         DiagnosisRow(
             detector: .openingPrinciple,
+            subtype: .centreNeglect,
+            cause: .openingPrinciple,
+            step: .kKnowledge,
+            phrasings: [
+                { "\($0.playedSAN) pushed a pawn on the edge while the centre was still empty." },
+                { "The middle of the board was there for the taking, and \($0.playedSAN) went sideways." }
+            ]
+        ),
+        DiagnosisRow(
+            detector: .openingPrinciple,
+            subtype: .disconnectedRooks,
+            cause: .openingPrinciple,
+            step: .kKnowledge,
+            phrasings: [
+                { "\($0.playedSAN) came before the back rank was cleared between the rooks." },
+                { "The rooks still could not see each other when \($0.playedSAN) was played." }
+            ]
+        ),
+        DiagnosisRow(
+            detector: .openingPrinciple,
             subtype: nil,
             cause: .openingPrinciple,
             step: .kKnowledge,

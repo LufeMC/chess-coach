@@ -113,6 +113,8 @@ final class TrainHomeModel {
     private(set) var due: [DueCardPresentation] = []
     private(set) var dueCount = 0
     private(set) var promotion: Promotion?
+    /// What the sets have covered so far, in catalogue order.
+    private(set) var covered: [CoveredConcept] = []
     private(set) var isMeasuring = false
 
     private var storedLength = DomainTuning.default.cards.sessionTargetSize
@@ -198,6 +200,7 @@ final class TrainHomeModel {
         guard !AppModel.isRunningTests, let database else { return }
 
         restorePreferences(from: database)
+        await loadCovered(from: database)
 
         let snapshot = await Task.detached(priority: .userInitiated) {
             Self.readDue(database: database, now: Date())
@@ -209,6 +212,48 @@ final class TrainHomeModel {
         }
 
         await measure()
+    }
+
+    /// One concept and how far it has got.
+    struct CoveredConcept: Identifiable, Sendable, Hashable {
+        var concept: TrainingConcept
+        var isTaught: Bool
+        var timesSeen: Int
+        var timesCorrect: Int
+
+        var id: String { concept.id }
+
+        /// `"3 of 4"`, or nil before the first attempt.
+        var record: String? {
+            guard timesSeen > 0 else { return nil }
+            return "\(timesCorrect) of \(timesSeen)"
+        }
+    }
+
+    /// The whole catalogue, not just what the rating has unlocked.
+    ///
+    /// The list is a record of ground covered, and "12 more to come" is a truer
+    /// thing to show than a list that silently grows as the rating climbs —
+    /// which would make the user's progress look like it was going backwards
+    /// every time a new tier opened.
+    private func loadCovered(from database: AppDatabase) async {
+        let rows = await Task.detached(priority: .utility) { () -> [CoveredConcept] in
+            let stored = Dictionary(
+                ((try? database.concepts.all()) ?? []).map { ($0.id, $0) },
+                uniquingKeysWith: { first, _ in first }
+            )
+            return TrainingConcept.catalogue.map { concept in
+                let progress = stored[concept.id]
+                return CoveredConcept(
+                    concept: concept,
+                    isTaught: progress?.introducedAt != nil,
+                    timesSeen: progress?.timesSeen ?? 0,
+                    timesCorrect: progress?.timesCorrect ?? 0
+                )
+            }
+        }.value
+
+        withAnimation(Motion.standard) { covered = rows }
     }
 
     /// Three indexed single-row reads, taken before anything expensive.

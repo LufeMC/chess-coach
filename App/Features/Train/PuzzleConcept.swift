@@ -76,6 +76,65 @@ enum PuzzleConcept {
         }
     }
 
+    /// The indefinite article for a word, so the banner stops saying
+    /// `a en passant capture`.
+    static func article(for concept: String) -> String {
+        "aeiou".contains(concept.lowercased().first ?? "x") ? "an" : "a"
+    }
+
+    /// A one-clause definition of a theme, so naming a pattern always teaches
+    /// it in the same breath.
+    ///
+    /// ``PuzzleReason`` has held that rule since it was written — *naming a
+    /// pattern is not explaining it* — but only for the clauses it builds
+    /// itself. Where the position proved nothing, the banner fell through to
+    /// the theme noun and printed `a pin.` at a reader who is here precisely
+    /// because they do not yet know what a pin is. On a corpus sample that was
+    /// the entire explanation on about one puzzle in twenty.
+    ///
+    /// Nil for labels that describe a *kind of position* rather than an idea:
+    /// `rook endgame` needs no gloss and inventing one would be filler.
+    static func definition(for concept: String) -> String? {
+        switch concept {
+        case "fork": "one piece attacking two at once"
+        case "pin": "the piece cannot move without exposing the one behind it"
+        case "skewer": "the valuable piece has to move, and the one behind it falls"
+        case "discovered attack": "moving one piece uncovers an attack from another"
+        case "double check": "two pieces check at once, so only the king can move"
+        case "deflection": "a defender is forced away from what it was holding"
+        case "capture of the defender": "take the piece that was holding it together"
+        case "interference": "a defender's line is cut by a piece put in the way"
+        case "clearance": "a square or line is vacated for another piece"
+        case "attraction": "the king is pulled onto a square where it can be hit"
+        case "in-between move": "a threat slipped in before the expected reply"
+        case "x-ray": "an attack straight through a piece to what stands behind it"
+        case "trapped piece": "it has no safe square left to go to"
+        case "hanging piece": "it is sitting there with nothing defending it"
+        case "back-rank mate": "the king is boxed in by its own pawns"
+        case "smothered mate": "the king is hemmed in by its own pieces"
+        case "promotion": "the pawn reaches the last rank and becomes a queen"
+        case "underpromotion": "promoting to a knight or rook, because a queen does not work"
+        case "en passant capture": "a pawn takes one that has just passed it"
+        case "zugzwang": "every move they have makes their position worse"
+        case "quiet move": "no check, no capture — the threat is what makes it work"
+        case "defensive move": "it holds the position rather than attacking"
+        case "sacrifice": "material given up for something worth more"
+        case "passed pawn": "no enemy pawn can stop it from queening"
+        case "exposed king": "the king has lost the shelter around it"
+        case "attack on f7": "the square only the king defends"
+        case "castling resource": "castling is the move that saves it"
+        default: nil
+        }
+    }
+
+    /// The theme named, and defined when it is an idea rather than a label.
+    private static func named(_ concept: String) -> String {
+        guard let definition = definition(for: concept) else {
+            return "\(article(for: concept)) \(concept)"
+        }
+        return "\(article(for: concept)) \(concept) — \(definition)"
+    }
+
     /// The banner's single line.
     ///
     /// - Parameters:
@@ -129,7 +188,7 @@ enum PuzzleConcept {
                 // the idea — worth keeping, since the vocabulary is half of what
                 // the user is here for. The move goes first so the sentence
                 // still opens with something they can act on.
-                sentence = "\(verb) — \(move): a \(concept)."
+                sentence = "\(verb) — \(move): \(named(concept))."
             } else if let move {
                 sentence = "\(verb) — \(move)."
             } else if let concept = noun(for: theme) {
@@ -140,13 +199,40 @@ enum PuzzleConcept {
                 sentence = "\(verb) — the move was to \(square.notation)."
             }
         } else if let concept = noun(for: theme) {
-            sentence = "\(verb) — the idea was a \(concept)."
+            sentence = "\(verb) — the idea was \(named(concept))."
         } else {
             sentence = "\(verb)."
         }
 
         guard let mistake else { return sentence }
         return "\(sentence) But \(mistake)."
+    }
+
+    /// The banner for the set's concept exercise.
+    ///
+    /// Ends on the concept's own cue rather than on a generic sentence. The
+    /// user was taught that line two screens ago, and repeating it here is what
+    /// connects "I played the right move" to "I know what to look for" — which
+    /// is the only part that survives to the next game.
+    static func conceptMessage(
+        solved: Bool,
+        concept: TrainingConcept,
+        answer: String?,
+        position: Position?
+    ) -> String {
+        let verb = solved ? "Solved" : "Missed"
+        let move = PuzzleReason.description(ofMove: answer, in: position)
+        let reason = PuzzleReason.clause(forAnswer: answer, in: position)
+
+        let opening: String
+        if let move, let reason {
+            opening = "\(verb) — \(move): \(reason)."
+        } else if let move {
+            opening = "\(verb) — \(move)."
+        } else {
+            opening = "\(verb) — \(concept.title)."
+        }
+        return "\(opening) \(concept.teaching.lookFor)"
     }
 
     /// The destination square of a UCI move.

@@ -98,8 +98,8 @@ final class GameSession {
             Configuration(
                 userColor: userColor,
                 opponentRating: opponentRating,
-                baseSeconds: 600,
-                incrementSeconds: 5,
+                baseSeconds: 900,
+                incrementSeconds: 10,
                 mode: "sparring",
                 secondTryEnabled: true,
                 guidedEnabled: false
@@ -118,8 +118,8 @@ final class GameSession {
             Configuration(
                 userColor: userColor,
                 opponentRating: opponentRating,
-                baseSeconds: 600,
-                incrementSeconds: 5,
+                baseSeconds: 900,
+                incrementSeconds: 10,
                 mode: "guided",
                 secondTryEnabled: false,
                 guidedEnabled: true,
@@ -133,8 +133,8 @@ final class GameSession {
             Configuration(
                 userColor: userColor,
                 opponentRating: opponentRating,
-                baseSeconds: 600,
-                incrementSeconds: 5,
+                baseSeconds: 900,
+                incrementSeconds: 10,
                 mode: "calibration",
                 secondTryEnabled: false,
                 guidedEnabled: false

@@ -6,7 +6,16 @@
 @testable import ChessKit
 import Testing
 
-struct BoardTests {
+// `printOptions` is a `nonisolated(unsafe) static var`, and `print()` and
+// `printDeprecated()` below both set its mode and then assert on a rendering
+// that reads it back. Swift Testing runs a suite's tests in parallel, so the
+// two raced: the observed failure had Black rendered as letters and White as
+// graphics, because the mode flipped midway through building one string.
+//
+// Serialising the suite is the smallest fix that removes the race. It costs
+// nothing measurable — the whole suite runs in about a tenth of a second — and
+// it keeps the change to one line of vendored code.
+@Suite(.serialized) struct BoardTests {
 
   @Test func updatePosition() {
     var board = Board()

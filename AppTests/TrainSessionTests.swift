@@ -216,11 +216,14 @@ struct VerdictCopyTests {
         #expect(message == "Missed — the move was to f3.")
     }
 
-    @Test("With no answer to point at, the concept still gets named")
+    /// Named *and* defined. "the idea was a skewer" is a word used at a reader
+    /// who is here to learn what the word means.
+    @Test("With no answer to point at, the concept is still named and defined")
     func noAnswer() {
         #expect(
             PuzzleConcept.verdictMessage(solved: false, theme: .skewer, answer: nil)
-                == "Missed — the idea was a skewer."
+                == "Missed — the idea was a skewer — the valuable piece has to move, "
+                    + "and the one behind it falls."
         )
     }
 }
@@ -289,7 +292,11 @@ struct PuzzleSessionModelTests {
 
         let verdict = model.stage.verdict
         #expect(verdict?.solved == false)
-        #expect(verdict?.message == "Missed — the pawn to e5: a pin.")
+        #expect(
+            verdict?.message
+                == "Missed — the pawn to e5: a pin — the piece cannot move without "
+                    + "exposing the one behind it."
+        )
         // The ring marks where the user actually went.
         #expect(verdict?.ring == BoardRing(square: .d5, tone: .wrong))
         // ...and the answer is drawn so they leave knowing the move.
@@ -400,11 +407,17 @@ struct PuzzleSessionModelTests {
         #expect(model.liveRing == nil)
     }
 
+    /// `database: nil` on purpose. A real set ends with its concept slot — the
+    /// opening, endgame or positional idea the app chose — and that is covered
+    /// by ``ConceptSchedulerTests``. This test is about the *puzzle queue*
+    /// finishing, and letting the concept run here would be testing two things
+    /// and reporting one.
     @Test("The session ends in a summary with the rating delta")
     func summaryAtTheEnd() async {
         let driver = FakeDriver(plans: [singleMovePlan()])
         driver.ratingStepPerItem = 12
-        let model = PuzzleSessionModel(driver: driver, clock: TestClock(step: 252).next)
+        let model = PuzzleSessionModel(
+            driver: driver, database: nil, clock: TestClock(step: 252).next)
         await model.start()
 
         _ = model.attemptMove(from: .e7, to: .e5)
@@ -419,7 +432,7 @@ struct PuzzleSessionModelTests {
 
     @Test("A session that assembles nothing goes straight to the summary")
     func emptySession() async {
-        let model = PuzzleSessionModel(driver: FakeDriver(plans: []))
+        let model = PuzzleSessionModel(driver: FakeDriver(plans: []), database: nil)
         await model.start()
         #expect(model.stage == .summary)
     }
@@ -516,13 +529,30 @@ struct PuzzleReasonTests {
         #expect(clause == "that is checkmate")
     }
 
-    @Test("A capture names what it wins")
-    func namesTheCapture() {
+    /// `the rook takes the queen: it wins the queen` said one thing twice and
+    /// the useful thing not at all. The description already names both pieces;
+    /// what the reader cannot see is whether anything takes back — which is the
+    /// question they have to learn to ask before every capture.
+    @Test("A free capture says why it is free, not what it captured")
+    func namesTheReasonNotThePiece() {
         let clause = PuzzleReason.clause(
             forAnswer: "d1d8",
             in: position("3q4/8/8/7k/8/8/8/3R2K1 w - - 0 1")
         )
-        #expect(clause == "it wins the queen")
+        #expect(clause == "nothing defends it")
+    }
+
+    /// The second position from the same session, and the second way the old
+    /// copy failed: `the pawn takes the pawn: it wins the pawn` is true, says
+    /// "pawn" three times, and omits the entire point — hxg2 is safe *and*
+    /// lands attacking the rook on h1, which is why it is the only move.
+    @Test("A capture also names what the piece threatens from its new square")
+    func namesTheThreatItCreates() {
+        let clause = PuzzleReason.clause(
+            forAnswer: "h3g2",
+            in: position("2k5/ppp2p2/2r2n2/3rq2p/1QN1p3/P3P2p/2P1NPP1/2R1K2R b - - 0 1")
+        )
+        #expect(clause == "nothing defends it, and it now attacks the rook")
     }
 
     /// The bug all of this exists for. `it wins the <piece>` was printed for
@@ -561,7 +591,7 @@ struct PuzzleReasonTests {
             in: position("2k5/ppp2p1p/2r1qn2/3r2p1/1QN1p3/P3P2P/2P1NPP1/R3KR2 b - - 0 1"),
             continuation: ["b4c4", "d5d1", "e1d1", "e6c4"]
         )
-        #expect(clause == "if they take back, the rook to d1 with check wins the queen")
+        #expect(clause == "if they take back, the rook goes to d1 with check and you win the queen")
     }
 
     @Test("Without the line, that same capture claims only what it can prove")
@@ -576,6 +606,43 @@ struct PuzzleReasonTests {
 
     /// The gate on whether a puzzle costs an engine search at all, so it is
     /// worth pinning down what it excludes as much as what it admits.
+    /// Mate at the end of the line outranks every other thing that could be
+    /// said about the move, and until the line was read the banner reported a
+    /// forced mate as whatever the first move happened to touch.
+    @Test("A line that ends in mate says so")
+    func namesAForcedMate() {
+        // Ra8+ Rd8 Rxd8#: the check is not the point, the mate is.
+        let clause = PuzzleReason.clause(
+            forAnswer: "a1a8",
+            in: position("6k1/3r1ppp/8/8/8/8/8/R3K3 w - - 0 1"),
+            continuation: ["d7d8", "a8d8"]
+        )
+        #expect(clause == "it forces mate")
+    }
+
+    /// `it puts the king in check` was a third of everything this file said,
+    /// and it describes something already drawn on the board in a colour the
+    /// reader cannot miss. What the check forces is the part they cannot see.
+    @Test("A check is explained by what it forces, not by being a check")
+    func namesWhatTheCheckForces() {
+        // Rh8+ Ke7 Bxb6 — the check drags the king off the knight's defence.
+        let clause = PuzzleReason.clause(
+            forAnswer: "h1h8",
+            in: position("4k3/8/1n6/8/3B4/8/8/4K2R w - - 0 1"),
+            continuation: ["e8e7", "d4b6"]
+        )
+        #expect(clause == "it checks, and after their king goes to e7 you win the knight")
+    }
+
+    @Test("Without the line, the same check can only say it is a check")
+    func fallsBackWhenTheLineIsUnknown() {
+        let clause = PuzzleReason.clause(
+            forAnswer: "h1h8",
+            in: position("4k3/8/1n6/8/3B4/8/8/4K2R w - - 0 1")
+        )
+        #expect(clause == "it puts the king in check")
+    }
+
     @Test("A search is spent only where it could change the sentence")
     func theEngineIsAskedOnlyWhenItCanAnswer() {
         // A hanging queen: the capture proves itself.
@@ -916,7 +983,7 @@ struct PuzzleExplanationUpgradeTests {
         #expect(
             model.stage.verdict?.message
                 == "Solved — the rook takes the knight: if they take back, "
-                    + "the rook to d1 with check wins the queen."
+                    + "the rook goes to d1 with check and you win the queen."
         )
     }
 

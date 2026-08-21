@@ -22,6 +22,7 @@ public struct UserDatabase: Sendable {
 
     public var games: GameRepository { GameRepository(writer: writer) }
     public var moments: MomentRepository { MomentRepository(writer: writer) }
+    public var concepts: ConceptRepository { ConceptRepository(writer: writer) }
     public var srs: SRSRepository { SRSRepository(writer: writer) }
     public var metrics: MetricsRepository { MetricsRepository(writer: writer) }
     public var settings: SettingsRepository { SettingsRepository(writer: writer) }
@@ -85,6 +86,7 @@ public struct UserDatabase: Sendable {
         MetricSample.tableName,
         DailyLoop.tableName,
         AppSettings.tableName,
+        ConceptProgress.tableName,
     ]
 
     /// Tables deliberately kept on-device.
@@ -131,6 +133,8 @@ public struct UserDatabase: Sendable {
         migrator.registerMigration("v4.metricSampleHistory", migrate: addMetricSampleHistory)
         migrator.registerMigration("v5.calibrationDraft", migrate: addCalibrationDraft)
         migrator.registerMigration("v6.clayPieceSet", migrate: adoptClayPieceSet)
+        migrator.registerMigration("v7.reviewSelfCheck", migrate: addReviewSelfCheck)
+        migrator.registerMigration("v8.conceptProgress", migrate: addConceptProgress)
         return migrator
     }
 
@@ -412,6 +416,85 @@ public struct UserDatabase: Sendable {
     /// Defaults to 0, which is the truth for every game recorded before the
     /// column existed — second-try hints were not tracked at all then, so no
     /// historical game can be known to have used one.
+    /// What the user has been taught, so a concept is explained the first time
+    /// it appears and exercised afterwards.
+    ///
+    /// Synced: which techniques you have been shown is exactly the sort of
+    /// thing that should follow you to a second device, and the table obeys
+    /// every replication rule — one text primary key, no foreign keys, a
+    /// default on every `NOT NULL` column.
+    private static func addConceptProgress(_ db: Database) throws {
+        try #sql(
+            """
+            CREATE TABLE "conceptProgress" (
+              "id" TEXT PRIMARY KEY NOT NULL ON CONFLICT REPLACE DEFAULT '',
+              "introducedAt" TEXT,
+              "lastSeenAt" TEXT,
+              "timesSeen" INTEGER NOT NULL ON CONFLICT REPLACE DEFAULT 0,
+              "timesCorrect" INTEGER NOT NULL ON CONFLICT REPLACE DEFAULT 0
+            ) STRICT
+            """
+        )
+        .execute(db)
+    }
+
+    /// Adds the review self-check score, and sweeps out the orphaned child rows
+    /// that would otherwise make adding it fail.
+    ///
+    /// ## Why a schema change has to sweep first
+    ///
+    /// `gameMoves`, `moments` and `plyEvals` all reference `games(id)` with
+    /// `ON DELETE CASCADE`, so in principle an orphan cannot exist. In practice
+    /// a real database had three of them: rows written for a game that was
+    /// discarded before it was ever inserted, on a connection that was not
+    /// enforcing foreign keys at the time.
+    ///
+    /// They sat there costing nothing until the first migration to touch
+    /// `games` — because GRDB runs a foreign-key check at the end of a
+    /// migration, a failing check fails the *open*, and a failed open is
+    /// surfaced to the user as "the games database could not be opened". A
+    /// handful of unreachable rows would have taken every game they had ever
+    /// played with them, on whichever schema change happened to come first.
+    ///
+    /// Deleting them is safe and is not data loss: a child row whose parent
+    /// game is gone is not recoverable history, it is a row nothing can reach.
+    /// The sweep covers every foreign key in the schema rather than only the
+    /// two that were actually broken, because the next one to rot should not
+    /// need its own migration to survive.
+    ///
+    /// Nullable column on purpose: "not reviewed yet" and "reviewed, scored
+    /// nothing" are different states, and a `NOT NULL DEFAULT 0` would silently
+    /// mark every game ever played as already reviewed.
+    private static func addReviewSelfCheck(_ db: Database) throws {
+        try #sql(
+            #"DELETE FROM "gameMoves" WHERE "gameID" NOT IN (SELECT "id" FROM "games")"#
+        )
+        .execute(db)
+
+        try #sql(
+            #"DELETE FROM "moments" WHERE "gameID" NOT IN (SELECT "id" FROM "games")"#
+        )
+        .execute(db)
+
+        try #sql(
+            #"DELETE FROM "plyEvals" WHERE "gameID" NOT IN (SELECT "id" FROM "games")"#
+        )
+        .execute(db)
+
+        try #sql(
+            #"DELETE FROM "reviewLogs" WHERE "cardID" NOT IN (SELECT "id" FROM "srsCards")"#
+        )
+        .execute(db)
+
+        try #sql(
+            """
+            ALTER TABLE "games"
+            ADD COLUMN "selfCheckScore" INTEGER
+            """
+        )
+        .execute(db)
+    }
+
     private static func addLadderAssistedRetry(_ db: Database) throws {
         try #sql(
             """

@@ -60,6 +60,77 @@ final class ReviewModel {
 
     private var suggestedQuestions: [UUID: [ReviewSuggestedQuestion]] = [:]
 
+    // MARK: Self-check
+
+    /// The questions asked before the engine's read is uncovered. Empty when
+    /// the game has already been reviewed, or when the analysis has not run and
+    /// there is therefore nothing to mark against.
+    private(set) var selfCheckQuestions: [ReviewSelfCheck.Question] = []
+    private(set) var selfCheckIndex = 0
+    private(set) var selfCheckAnswers: [String: Int] = [:]
+    /// The current answer is on screen and marked; the next tap moves on.
+    private(set) var selfCheckRevealed = false
+    private(set) var selfCheckFinished = false
+
+    /// Whether the verdict, the filmstrip and the coaching are still covered.
+    var isSelfCheckActive: Bool { !selfCheckFinished && !selfCheckQuestions.isEmpty }
+
+    var selfCheckQuestion: ReviewSelfCheck.Question? {
+        guard isSelfCheckActive, selfCheckIndex < selfCheckQuestions.count else { return nil }
+        return selfCheckQuestions[selfCheckIndex]
+    }
+
+    var selfCheckScore: Int {
+        ReviewSelfCheck.score(questions: selfCheckQuestions, answers: selfCheckAnswers)
+    }
+
+    /// Records an answer and marks it.
+    ///
+    /// The board jumps to the move the user named, right or wrong: the point of
+    /// the exercise is to attach a judgement to a position, and marking it in
+    /// the abstract while the board shows the final move teaches nothing.
+    func answerSelfCheck(_ option: Int) {
+        guard let question = selfCheckQuestion, !selfCheckRevealed,
+            question.options.indices.contains(option)
+        else { return }
+
+        selfCheckAnswers[question.id] = option
+        selfCheckRevealed = true
+        if let ply = question.options[option].ply {
+            select(index: max(0, ply - 1))
+        }
+    }
+
+    func advanceSelfCheck() {
+        guard selfCheckRevealed else { return }
+        selfCheckRevealed = false
+        if selfCheckIndex + 1 < selfCheckQuestions.count {
+            selfCheckIndex += 1
+        } else {
+            finishSelfCheck()
+        }
+    }
+
+    /// Gives up on the questions and uncovers the review.
+    ///
+    /// Skipping still writes a score — of whatever was answered before the
+    /// user stopped. A game whose questions were skipped is reviewed as far as
+    /// this screen is concerned; re-asking them on the next open would make the
+    /// screen feel like it was arguing.
+    func skipSelfCheck() { finishSelfCheck() }
+
+    private func finishSelfCheck() {
+        guard !selfCheckFinished else { return }
+        selfCheckFinished = true
+
+        guard let database else { return }
+        let id = gameID
+        let score = selfCheckScore
+        Task.detached(priority: .utility) {
+            try? database.games.setSelfCheckScore(score, forGame: id)
+        }
+    }
+
     /// Moments this screen has not counted as read yet.
     ///
     /// Seeded from the stored status, so a moment worked through last week is
@@ -114,6 +185,36 @@ final class ReviewModel {
         }
     }
 
+    /// Maps the review's own rows into the shape the check is written against.
+    ///
+    /// `byUser` is derived from the colour rather than stored, because a move
+    /// row knows which side played it and the game knows which side is the
+    /// user, and a third copy of that fact is a third chance to disagree.
+    private static func selfCheckInput(
+        snapshot: ReviewSnapshot,
+        moveRows: [ReviewMoveRow]
+    ) -> ReviewSelfCheck.Input {
+        let userIsWhite = snapshot.game.color != .black
+        let thinkTimes = Dictionary(
+            snapshot.moves.map { ($0.ply, $0.thinkTimeMs) },
+            uniquingKeysWith: { first, _ in first }
+        )
+
+        return ReviewSelfCheck.Input(
+            moves: moveRows.map { row in
+                ReviewSelfCheck.Input.Move(
+                    ply: row.ply,
+                    label: row.label,
+                    byUser: row.isWhite == userIsWhite,
+                    thinkTimeMs: thinkTimes[row.ply] ?? 0
+                )
+            },
+            moments: snapshot.moments.map {
+                ReviewSelfCheck.Input.Moment(ply: $0.ply, causeTag: $0.causeTag)
+            }
+        )
+    }
+
     private func apply(_ snapshot: ReviewSnapshot) {
         game = snapshot.game
         orientation = snapshot.game.color == .black ? .black : .white
@@ -136,6 +237,18 @@ final class ReviewModel {
             momentPlies: Set(snapshot.moments.map(\.ply))
         )
         phaseSegments = ReviewPhases.segments(timeline: timeline)
+
+        // Only for a game that has been analysed and not yet reviewed. Asking
+        // before the analysis has run would mark the answers against moments
+        // that do not exist yet, so every question would score "nothing went
+        // wrong" on a game the user may well have lost badly.
+        if snapshot.game.selfCheckScore == nil, snapshot.game.analysis == .complete {
+            selfCheckQuestions = ReviewSelfCheck.questions(
+                for: Self.selfCheckInput(snapshot: snapshot, moveRows: moveRows)
+            )
+        } else {
+            selfCheckQuestions = []
+        }
 
         verdict = ReviewVerdicts.verdict(
             game: snapshot.game,
