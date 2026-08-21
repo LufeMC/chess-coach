@@ -23,13 +23,14 @@ private let startFEN = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1
 
 private func makePlan(
     line: [String],
+    fen: String = startFEN,
     theme: ThemeTag = .fork,
     rating: Int = 1200,
     kind: SessionItemPlan.Kind = .fresh
 ) -> SessionItemPlan {
     let item = SolvableItem(
         backing: .corpusPuzzle(id: UUID().uuidString),
-        fen: startFEN,
+        fen: fen,
         line: line,
         opponentMovesFirst: true,
         rating: rating,
@@ -524,6 +525,96 @@ struct PuzzleReasonTests {
         #expect(clause == "it wins the queen")
     }
 
+    /// The bug all of this exists for. `it wins the <piece>` was printed for
+    /// *any* capture, and a quarter of the corpus's capture answers are
+    /// sacrifices — so the banner announced a queen sacrifice as winning a pawn,
+    /// which is the exact reverse of the idea the puzzle teaches.
+    @Test("A capture that loses material is never called a win")
+    func aSacrificeIsNotAWin() {
+        // Rxd5 takes a pawn the c6 pawn defends. The rook is simply lost.
+        let clause = PuzzleReason.clause(
+            forAnswer: "d1d5",
+            in: position("4k3/8/2p5/3p4/8/8/8/3RK3 w - - 0 1")
+        )
+        #expect(clause == nil, "nothing here is provable, and silence beats a false claim")
+    }
+
+    @Test("An even exchange is named as a trade, not as a win")
+    func anEvenExchangeIsATrade() {
+        // Rxd5 wins a rook and loses one to the c6 pawn: material is unchanged.
+        let clause = PuzzleReason.clause(
+            forAnswer: "d1d5",
+            in: position("4k3/8/2p5/3r4/8/8/8/3RK3 w - - 0 1")
+        )
+        #expect(clause == "it trades rooks")
+    }
+
+    /// The position that prompted this, from a real session. The rook takes a
+    /// knight standing next to the enemy queen, so it reads as dropping the
+    /// exchange — and it is right anyway, because the recapture walks into a
+    /// deflection. Statically the capture scores -180cp; only the line explains
+    /// it, which is exactly what the reader needs and never got.
+    @Test("A defended capture answers the recapture instead of ignoring it")
+    func answersTheObviousObjection() {
+        let clause = PuzzleReason.clause(
+            forAnswer: "c6c4",
+            in: position("2k5/ppp2p1p/2r1qn2/3r2p1/1QN1p3/P3P2P/2P1NPP1/R3KR2 b - - 0 1"),
+            continuation: ["b4c4", "d5d1", "e1d1", "e6c4"]
+        )
+        #expect(clause == "if they take back, the rook to d1 with check wins the queen")
+    }
+
+    @Test("Without the line, that same capture claims only what it can prove")
+    func claimsNothingUnprovable() {
+        let clause = PuzzleReason.clause(
+            forAnswer: "c6c4",
+            in: position("2k5/ppp2p1p/2r1qn2/3r2p1/1QN1p3/P3P2P/2P1NPP1/R3KR2 b - - 0 1")
+        )
+        // True, checkable, and not a claim about material it cannot support.
+        #expect(clause == "it attacks the queen")
+    }
+
+    /// The gate on whether a puzzle costs an engine search at all, so it is
+    /// worth pinning down what it excludes as much as what it admits.
+    @Test("A search is spent only where it could change the sentence")
+    func theEngineIsAskedOnlyWhenItCanAnswer() {
+        // A hanging queen: the capture proves itself.
+        #expect(
+            PuzzleReason.needsTheLine(
+                answer: "d1d8",
+                in: position("3q4/8/8/7k/8/8/8/3R2K1 w - - 0 1")
+            ) == false
+        )
+        // A quiet move has no recapture to answer for, so a line adds nothing.
+        #expect(
+            PuzzleReason.needsTheLine(
+                answer: "e2e3",
+                in: position("4k3/8/8/8/8/8/4P3/4K3 w - - 0 1")
+            ) == false
+        )
+        // A rook taking a defended knight: nothing on the board justifies it,
+        // and the line is the only thing that can.
+        #expect(
+            PuzzleReason.needsTheLine(
+                answer: "c6c4",
+                in: position("2k5/ppp2p1p/2r1qn2/3r2p1/1QN1p3/P3P2P/2P1NPP1/R3KR2 b - - 0 1")
+            )
+        )
+    }
+
+    /// `CalibrationScoring` scores the king 0 so that material counting ignores
+    /// it. That made the king the "cheapest" attacker of every square it stood
+    /// beside, and the banner named it over the pawn that was the real point.
+    @Test("The defending pawn is named, not the king standing beside it")
+    func namesTheCheapestRealAttacker() {
+        // d5 is defended by the c6 pawn *and* by the king on e6.
+        let mistake = PuzzleReason.mistake(
+            inMove: "d1d5",
+            from: position("8/8/2p1k3/3p4/8/8/8/3QK3 w - - 0 1")
+        )
+        #expect(mistake == "your queen could be taken by the pawn")
+    }
+
     @Test("A move with nothing to say says nothing")
     func silenceRatherThanFiller() {
         // A quiet pawn push that captures nothing, checks nothing, hits nothing.
@@ -675,9 +766,16 @@ struct PuzzleOrientationTests {
 private struct ScriptedEvaluator: PuzzleMoveEvaluator {
     /// Centipawns keyed by UCI, from the solver's point of view.
     var scores: [String: Int]
+    /// Principal variations keyed by the move they follow, opponent's reply
+    /// first — the shape `EnginePuzzleEvaluator` returns from a real search.
+    var lines: [String: [String]] = [:]
 
     func evaluate(fen: String, playing uci: String) async -> PuzzleEvaluation? {
         scores[uci].map(PuzzleEvaluation.init(centipawns:))
+    }
+
+    func continuation(fen: String, playing uci: String) async -> [String] {
+        lines[uci] ?? []
     }
 }
 
@@ -785,6 +883,41 @@ struct PuzzleExplanationUpgradeTests {
         await model.waitForExplanation()
         let message = model.stage.verdict?.message ?? ""
         #expect(message.contains("But yours only keeps things level."))
+    }
+
+    /// A solve used to end at the shortest true sentence available — which for
+    /// a capture that cannot prove itself is barely a sentence at all. Solving a
+    /// puzzle you did not understand leaves the idea exactly as unlearned as
+    /// missing it does.
+    @Test("A solved puzzle the board cannot explain is explained by the engine")
+    func explainsASolveTheBoardCannotProve() async {
+        // The session position from the screenshot, one ply earlier so the
+        // machine has a setup move to play.
+        let plan = makePlan(
+            line: ["b3b4", "c6c4"],
+            fen: "2k5/ppp2p1p/2r1qn2/3r2p1/2N1p3/PQ2P2P/2P1NPP1/R3KR2 w - - 0 1"
+        )
+        let model = PuzzleSessionModel(
+            driver: FakeDriver(plans: [plan]),
+            evaluator: ScriptedEvaluator(
+                scores: [:],
+                lines: ["c6c4": ["b4c4", "d5d1", "e1d1", "e6c4"]]
+            )
+        )
+        await model.start()
+
+        _ = model.attemptMove(from: .c6, to: .c4)
+        await model.waitForGrading()
+
+        // The verdict is up before the engine has said anything.
+        #expect(model.stage.verdict?.solved == true)
+
+        await model.waitForExplanation()
+        #expect(
+            model.stage.verdict?.message
+                == "Solved — the rook takes the knight: if they take back, "
+                    + "the rook to d1 with check wins the queen."
+        )
     }
 
     @Test("With no engine the banner keeps its shorter sentence")

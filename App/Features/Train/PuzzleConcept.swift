@@ -93,19 +93,24 @@ enum PuzzleConcept {
     ///     something certain can be said about it. Passed in rather than derived
     ///     here because it has two sources — the board immediately, and the
     ///     engine a moment later — and this is a formatter, not a judge.
+    ///   - continuation: what follows the answer, the opponent's reply first.
+    ///     The rest of a stored puzzle line on a miss, the engine's principal
+    ///     variation on a solve, and empty when neither is to hand. It is what
+    ///     lets the clause answer "can they not just take it back?".
     static func verdictMessage(
         solved: Bool,
         theme: ThemeTag,
         answer: String?,
         position: Position? = nil,
-        mistake: String? = nil
+        mistake: String? = nil,
+        continuation: [String] = []
     ) -> String {
         let verb = solved ? "Solved" : "Missed"
         // Read off the board, never from the theme tag. When the position can
         // say why, that is worth more than any label — it is the pattern the
         // user takes to the next puzzle, and it is phrased so that a reader who
         // has never heard the word still learns something.
-        let reason = PuzzleReason.clause(forAnswer: answer, in: position)
+        let reason = PuzzleReason.clause(forAnswer: answer, in: position, continuation: continuation)
         // Never on a solve: the move that worked has nothing wrong with it.
         let mistake = solved ? nil : mistake
 

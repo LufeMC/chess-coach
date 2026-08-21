@@ -3,6 +3,7 @@
 //  ChessCoach
 //
 
+import AnalysisKit
 import ChessKit
 
 /// Why the answer was the answer, and why the move you played was not — both
@@ -75,10 +76,32 @@ enum PuzzleReason {
     /// `"forks the queen and rook — both attacked, and only one can move away"`.
     /// Nil when nothing certain can be said.
     ///
+    /// ## A capture is not a win
+    ///
+    /// This once printed `it wins the knight` for *any* capture. That sentence
+    /// is true only where the square cannot be defended profitably, and across
+    /// the bundled corpus it was false or misleading on roughly one puzzle in
+    /// six: a quarter of every capture answer is an outright sacrifice, and
+    /// announcing a queen sacrifice as `it wins the pawn` teaches the exact
+    /// opposite of the idea the puzzle exists to teach.
+    ///
+    /// The material claim is now checked by static exchange evaluation and made
+    /// only where it holds. A capture that does not statically win is explained
+    /// by what happens *next* — which is the entire content of a sacrifice —
+    /// and where the continuation is unknown the clause says something weaker
+    /// and true rather than something strong and wrong.
+    ///
     /// - Parameters:
     ///   - uci: the answer move.
     ///   - position: the position the move is played *from*.
-    static func clause(forAnswer uci: String?, in position: Position?) -> String? {
+    ///   - continuation: what follows the answer, the opponent's reply first. A
+    ///     stored puzzle line where there is one, the engine's principal
+    ///     variation otherwise, and empty when nothing is known.
+    static func clause(
+        forAnswer uci: String?,
+        in position: Position?,
+        continuation: [String] = []
+    ) -> String? {
         guard let uci, let position else { return nil }
 
         var board = Board(position: position)
@@ -99,9 +122,42 @@ enum PuzzleReason {
             return "it forks the \(names[0]) and \(names[1]) — both attacked, and only one can move away"
         }
 
-        if let captured {
-            let phrase = "it wins the \(noun(for: captured.kind))"
-            return isCheck ? phrase + ", with check" : phrase
+        if let captured, let mover {
+            let exchange = SEE.seeOfCapture(position: position, move: move) ?? 0
+
+            // Nothing takes back for enough. This is the only case in which
+            // "wins" is a fact rather than a hope.
+            if exchange > 0 {
+                let phrase = "it wins the \(noun(for: captured.kind))"
+                return isCheck ? phrase + ", with check" : phrase
+            }
+
+            // It can be taken back — which is precisely the objection the reader
+            // is about to raise. Answer it with the line rather than writing a
+            // sentence that pretends the recapture is not on the board.
+            if let mechanism = refutation(
+                ofRecaptureAfter: uci,
+                board: board,
+                continuation: continuation,
+                mover: mover
+            ) {
+                return mechanism
+            }
+
+            // An even exchange is worth naming as one. Calling it a win was the
+            // quieter half of the same untruth.
+            if exchange == 0 {
+                // "it trades the rook for the rook" is how a machine says it.
+                let phrase =
+                    mover.kind == captured.kind
+                    ? "it trades \(noun(for: mover.kind))s"
+                    : "it trades the \(noun(for: mover.kind)) for the \(noun(for: captured.kind))"
+                return isCheck ? phrase + ", with check" : phrase
+            }
+
+            // A sacrifice whose point cannot be shown falls through to the
+            // clauses below: the check or the attack is still true, and saying
+            // less is better than inventing the part we cannot see.
         }
 
         // "attacks the king, with check" says the same thing twice. Attacking
@@ -112,6 +168,95 @@ enum PuzzleReason {
         }
 
         return isCheck ? "it puts the king in check" : nil
+    }
+
+    /// Whether a search would tell the reader anything this position does not
+    /// already say.
+    ///
+    /// True only for a capture whose material claim static exchange cannot
+    /// support — the one shape ``refutation(ofRecaptureAfter:board:continuation:mover:)``
+    /// can turn into a mechanism once it has the line. Mate and forks explain
+    /// themselves; a capture that statically wins already says so; and a quiet
+    /// move has no recapture to answer for, so a search would buy a sentence
+    /// identical to the one on screen. Narrow on purpose: this is the gate on
+    /// whether the app spends an engine search at all.
+    static func needsTheLine(answer uci: String?, in position: Position?) -> Bool {
+        guard let uci, let position,
+            capturedPiece(playing: uci, in: position) != nil
+        else { return false }
+
+        var board = Board(position: position)
+        guard let move = PuzzleSolveMachine.move(uci: uci, on: &board) else { return false }
+
+        if move.checkState == .checkmate { return false }
+
+        let mover = position.piece(at: PuzzleConcept.origin(ofUCI: uci) ?? .a1)
+        if attackedPieces(after: uci, board: board, mover: mover).count >= 2 { return false }
+
+        return (SEE.seeOfCapture(position: position, move: move) ?? 0) <= 0
+    }
+
+    /// The answer to "but can't they just take it back?".
+    ///
+    /// The one question a defended capture always raises, and the one the old
+    /// wording answered by ignoring. It speaks only when the line contains the
+    /// recapture *and* the solver wins something at least as big afterwards.
+    /// Every other shape — the opponent declining, a line too short to show
+    /// anything, a follow-up that nets a pawn — returns nil, because a
+    /// half-remembered mechanism is worse than a plain description of the move.
+    ///
+    /// - Parameters:
+    ///   - uci: the answer move.
+    ///   - board: the position *after* the answer has been played.
+    ///   - continuation: the opponent's reply first, then alternating.
+    ///   - mover: the piece the answer moved, i.e. what is being given up.
+    private static func refutation(
+        ofRecaptureAfter uci: String,
+        board: Board,
+        continuation: [String],
+        mover: Piece
+    ) -> String? {
+        guard continuation.count >= 2,
+            let destination = PuzzleConcept.destination(ofUCI: uci),
+            // They have to take back on the square in question. Otherwise "if
+            // they take back" describes a position nobody is looking at.
+            PuzzleConcept.destination(ofUCI: continuation[0]) == destination
+        else { return nil }
+
+        var probe = board
+        guard PuzzleSolveMachine.move(uci: continuation[0], on: &probe) != nil else { return nil }
+
+        // Described before it is played: afterwards the piece has left the
+        // square that gives the phrase its subject.
+        let before = probe.position
+        guard let described = description(ofMove: continuation[1], in: before),
+            let punish = PuzzleSolveMachine.move(uci: continuation[1], on: &probe)
+        else { return nil }
+        let phrase = punish.checkState == .check ? described + " with check" : described
+
+        // The biggest thing the solver takes from here on. Odd indices are the
+        // solver's moves, because `continuation[0]` belonged to the opponent.
+        var won = capturedPiece(playing: continuation[1], in: before)?.kind
+        var index = 2
+        while index < continuation.count {
+            let step = continuation[index]
+            let from = probe.position
+            if index % 2 == 1, let taken = capturedPiece(playing: step, in: from) {
+                if let best = won {
+                    if value(of: taken.kind) > value(of: best) { won = taken.kind }
+                } else {
+                    won = taken.kind
+                }
+            }
+            guard PuzzleSolveMachine.move(uci: step, on: &probe) != nil else { break }
+            index += 1
+        }
+
+        // Winning back less than was given up is not the point of the move, and
+        // announcing it as though it were would be the old bug in new words.
+        guard let won, value(of: won) >= value(of: mover.kind) else { return nil }
+
+        return "if they take back, \(phrase) wins the \(noun(for: won))"
     }
 
     // MARK: The move you played
@@ -143,8 +288,18 @@ enum PuzzleReason {
         let gained = capturedPiece(playing: uci, in: position).map { value(of: $0.kind) } ?? 0
         let moverValue = value(of: mover.kind)
 
+        // `CalibrationScoring` scores the king 0, which is right for counting
+        // material — both sides always have one — and wrong for picking an
+        // attacker, because it makes the king the "cheapest" recapture whenever
+        // it happens to stand next to the square. The defending pawn is both
+        // the likelier recapture and the more useful thing to name, so the king
+        // sorts last and is reached only when nothing else attacks at all.
         let attackers = enemyPiecesAttacking(destination, in: board.position, mover: mover)
-        guard let cheapest = attackers.min(by: { value(of: $0) < value(of: $1) }),
+        let cheapestFirst = attackers.sorted { lhs, rhs in
+            if (lhs == .king) != (rhs == .king) { return rhs == .king }
+            return value(of: lhs) < value(of: rhs)
+        }
+        guard let cheapest = cheapestFirst.first,
             value(of: cheapest) < moverValue - gained
         else { return nil }
 

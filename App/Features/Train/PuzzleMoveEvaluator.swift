@@ -115,6 +115,21 @@ protocol PuzzleMoveEvaluator: Sendable {
     /// the side that played it. `nil` when the engine could not be reached, was
     /// busy, or the move is not legal.
     func evaluate(fen: String, playing uci: String) async -> PuzzleEvaluation?
+
+    /// The engine's principal continuation after `uci`, opponent's reply first.
+    ///
+    /// A different question from ``evaluate(fen:playing:)`` — that one sorts a
+    /// move into a band, this one is the *line*, which is the only thing that
+    /// can explain a move whose point arrives two moves later. Empty when the
+    /// engine could not be reached.
+    func continuation(fen: String, playing uci: String) async -> [String]
+}
+
+extension PuzzleMoveEvaluator {
+    /// No line, which the caller reads as "nothing to add" and leaves the
+    /// banner alone. Default so an evaluator that only scores moves — every
+    /// existing test double — keeps compiling.
+    func continuation(fen: String, playing uci: String) async -> [String] { [] }
 }
 
 /// The real one: a short, node-capped search on the shared engine.
@@ -137,6 +152,16 @@ struct EnginePuzzleEvaluator: PuzzleMoveEvaluator {
     /// five bands.
     static let nodes = 40_000
 
+    /// Larger, because a line is held to a harder standard than a band.
+    ///
+    /// The banner quotes this variation back as a claim about the position —
+    /// *if they take back, the rook to d1 with check wins the queen* — and a
+    /// shallow search that picks the wrong reply puts a wrong sentence on
+    /// screen. It is also spent at most once per puzzle, and only on the ones
+    /// the board could not explain by itself, so the budget buys accuracy where
+    /// nothing cheaper is available.
+    static let continuationNodes = 150_000
+
     func evaluate(fen: String, playing uci: String) async -> PuzzleEvaluation? {
         let device = await service.deviceProfile
         let lease = await service.acquire(.probe, configuration: .probe(device: device))
@@ -153,6 +178,24 @@ struct EnginePuzzleEvaluator: PuzzleMoveEvaluator {
 
         // The search ran *after* the move, so the score belongs to the opponent.
         return PuzzleEvaluation(score: principal.score).negated
+    }
+
+    func continuation(fen: String, playing uci: String) async -> [String] {
+        let device = await service.deviceProfile
+        let lease = await service.acquire(.probe, configuration: .probe(device: device))
+        defer { Task { await service.release(lease) } }
+
+        guard
+            let result = try? await service.search(
+                .fen(fen, moves: [uci]),
+                limit: .nodes(Self.continuationNodes),
+                lease: lease
+            )
+        else { return [] }
+
+        // The search started after `uci`, so the variation opens with the
+        // opponent's reply — which is exactly the order the clause wants.
+        return result.principal?.pv ?? []
     }
 }
 

@@ -113,6 +113,18 @@ struct PuzzleSolveMachine: Sendable {
     /// The FEN the puzzle was built from, *before* the setup move.
     let startFEN: String
 
+    /// The moves that follow the one currently expected, opponent's reply
+    /// first. Empty at the end of the line.
+    ///
+    /// This is the cheapest true answer to "why does the move work" the app
+    /// has: the puzzle already stores the refutation of the obvious objection,
+    /// and before this it was read only to grade the next move and then
+    /// discarded.
+    var continuationAfterExpected: [String] {
+        guard cursor + 1 < line.count else { return [] }
+        return Array(line[(cursor + 1)...])
+    }
+
     // MARK: Construction
 
     /// - Parameters:

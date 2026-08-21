@@ -337,7 +337,8 @@ final class PuzzleSessionModel {
                 solvedUnaided: false,
                 played: uci,
                 expected: before.expectedMove,
-                answeredFrom: before.board.position
+                answeredFrom: before.board.position,
+                continuation: before.continuationAfterExpected
             )
 
         case .illegal:
@@ -367,7 +368,8 @@ final class PuzzleSessionModel {
             solvedUnaided: false,
             played: nil,
             expected: expected,
-            answeredFrom: before.board.position
+            answeredFrom: before.board.position,
+            continuation: before.continuationAfterExpected
         )
     }
 
@@ -378,12 +380,17 @@ final class PuzzleSessionModel {
     ///   advances that snapshot past the move before this runs — the explanation
     ///   would then describe the position after the answer, which is the one
     ///   position in which the answer is not available.
+    /// - Parameter continuation: the rest of the stored line after ``expected``,
+    ///   opponent's reply first. The puzzle already knows how the opponent's
+    ///   best defence is refuted; without this the banner explained the answer
+    ///   as though the position ended with it.
     private func completeItem(
         plan: SessionItemPlan,
         solvedUnaided: Bool,
         played: String?,
         expected: String?,
-        answeredFrom: Position?
+        answeredFrom: Position?,
+        continuation: [String] = []
     ) {
         progress.completed += 1
         progress.total = driver.queueCount
@@ -422,16 +429,39 @@ final class PuzzleSessionModel {
                     theme: theme,
                     answer: expected,
                     position: answeredFrom,
-                    mistake: provenMistake
+                    mistake: provenMistake,
+                    continuation: continuation
                 ),
                 ring: ringSquare.map { BoardRing(square: $0, tone: solvedUnaided ? .correct : .wrong) },
                 answer: solvedUnaided ? nil : expected
             )
         )
 
+        // A solve is explained too.
+        //
+        // The engine used to run only on a miss, on the reasoning that a solved
+        // puzzle needs no feedback. But solving a puzzle you did not understand
+        // leaves you exactly as unable to find the idea again as missing it
+        // does, and the board can justify an answer outright only when it is
+        // mate, a fork, or a capture that statically wins. Everything else —
+        // every sacrifice, every deflection, and every position mined from the
+        // user's own game, which carries no stored line at all — ended at
+        // `the rook takes the knight` with the reason left unsaid.
+        if solvedUnaided {
+            guard let expected, let answeredFrom,
+                continuation.isEmpty,
+                PuzzleReason.needsTheLine(answer: expected, in: answeredFrom)
+            else { return }
+
+            explainTask = Task { [weak self] in
+                await self?.explainSolve(theme: theme, answer: expected, from: answeredFrom)
+            }
+            return
+        }
+
         // Most wrong moves hang nothing — they are simply not the best, and the
         // board alone cannot say why. That is the case the engine exists for.
-        guard !solvedUnaided, provenMistake == nil,
+        guard provenMistake == nil,
             let played, let expected, let answeredFrom
         else { return }
 
@@ -443,6 +473,36 @@ final class PuzzleSessionModel {
                 from: answeredFrom
             )
         }
+    }
+
+    /// Grows a solved puzzle's sentence into the reason the move worked.
+    ///
+    /// Same progressive reveal as the miss path, and for the same reason: the
+    /// verdict is already on screen, and this either improves it a moment later
+    /// or leaves it alone.
+    private func explainSolve(theme: ThemeTag, answer: String, from position: Position) async {
+        guard let evaluator else { return }
+
+        let line = await evaluator.continuation(fen: position.fen, playing: answer)
+        guard !line.isEmpty else { return }
+
+        let message = PuzzleConcept.verdictMessage(
+            solved: true,
+            theme: theme,
+            answer: answer,
+            position: position,
+            continuation: line
+        )
+
+        // The user may have tapped Continue while the engine was thinking.
+        guard case .verdict(let current) = stage, current.solved else { return }
+        // Nothing learned: rewriting the banner with the sentence it already
+        // shows would be a crossfade to itself.
+        guard message != current.message else { return }
+
+        var upgraded = current
+        upgraded.message = message
+        withAnimation(Motion.crossfade) { stage = .verdict(upgraded) }
     }
 
     /// Upgrades the banner once the engine has judged both moves.
