@@ -214,6 +214,17 @@ enum PuzzleMoveComparison {
     /// trust in every other line.
     static let significantGap = 150
 
+    /// Below this the two moves are the same move as far as the position is
+    /// concerned.
+    ///
+    /// Worth a sentence of its own. A puzzle mined from the user's own game has
+    /// one stored answer — whatever the analysis pass picked — and the second
+    /// and third choices are often within a few centipawns of it. The banner
+    /// says `Missed`, and until now the engine's considered opinion that the
+    /// user's move was just as good was expressed by saying nothing at all.
+    /// Silence there reads as agreement with the `Missed`.
+    static let equivalentGap = 50
+
     /// - Parameters:
     ///   - answer: the evaluation after the puzzle's answer.
     ///   - played: the evaluation after the move the user chose.
@@ -221,7 +232,15 @@ enum PuzzleMoveComparison {
     ///   the two moves are close enough that there is nothing honest to add.
     static func clause(answer: PuzzleEvaluation?, played: PuzzleEvaluation?) -> String? {
         guard let answer, let played else { return nil }
-        guard answer.centipawns - played.centipawns >= significantGap else { return nil }
+        let gap = answer.centipawns - played.centipawns
+
+        // Not worse in any way the position can tell. Say so rather than let
+        // "Missed" stand as the last word on a move that was fine.
+        if gap <= equivalentGap, played.band >= answer.band {
+            return "yours was just as good"
+        }
+
+        guard gap >= significantGap else { return nil }
         // A band that is not actually worse says nothing useful, however big the
         // raw gap: "also wins" is not a criticism.
         guard played.band < answer.band else { return nil }

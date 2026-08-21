@@ -77,7 +77,18 @@ struct ResultBanner: View {
                 // Three lines of room, always, on both outcomes. Reserving
                 // rather than growing is what keeps a miss that explains itself
                 // the same height as a solve that does not need to.
-                .lineLimit(3, reservesSpace: true)
+                // Four, not three. A measured sample of the corpus put 21.6%
+                // of banners over three lines, and a truncated explanation is
+                // the one failure this component cannot afford: the sentence
+                // is the entire feature. The copy above was shortened at the
+                // same time, so four lines is now headroom rather than the
+                // normal case — the longest message the app can build is 115
+                // characters and the median is 71.
+                //
+                // The symmetry rule is untouched: both outcomes reserve four,
+                // so the banner is still a fixed height and the button still
+                // sits in the same place whichever way the puzzle went.
+                .lineLimit(4, reservesSpace: true)
                 .frame(maxWidth: .infinity, alignment: .leading)
 
             Button(action: onContinue) {

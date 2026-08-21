@@ -94,6 +94,19 @@ final class PuzzleSessionModel {
 
     /// The position on screen. Frozen during a verdict.
     private(set) var machineSnapshot: PuzzleSolveMachine?
+
+    /// The board left showing the user's own move after a miss.
+    ///
+    /// The solve machine refuses a wrong move — correctly, it is not part of
+    /// the solution — and the board used to snap the piece back to where it
+    /// started. From the user's side that is indistinguishable from the app
+    /// ignoring the input: "it literally didn't let me move". The move was
+    /// being graded and the banner did appear, but the one piece of feedback
+    /// they were looking for — their own move, on the board — never arrived.
+    ///
+    /// A retry is different and still snaps back: the point of a retry is that
+    /// the position is unchanged and they get another go at it.
+    private(set) var missPosition: Position?
     private(set) var planOnScreen: SessionItemPlan?
 
     /// Hint arrow, once revealed. Drawn in grey, never in the accent colour:
@@ -269,6 +282,7 @@ final class PuzzleSessionModel {
         }
         planOnScreen = item
         machineSnapshot = machine
+        missPosition = nil
         keyMove = machine.expectedMove
         keyPosition = machine.board.position
         keyContinuation = machine.continuationAfterExpected
@@ -287,7 +301,7 @@ final class PuzzleSessionModel {
     // MARK: Board input
 
     /// The position the board renders.
-    var position: Position? { machineSnapshot?.board.position }
+    var position: Position? { missPosition ?? machineSnapshot?.board.position }
 
     /// The puzzle is always shown from the solver's side.
     ///
@@ -368,9 +382,20 @@ final class PuzzleSessionModel {
         case .illegal:
             return .rejected
 
-        case .retry, .failed:
+        case .retry:
             grade(uci: uci)
             return .rejected(reason: nil)
+
+        case .failed:
+            // Accepted so the board plays it, and held on screen underneath the
+            // verdict. The answer arrow is drawn from the move's own squares
+            // rather than from the position, so it still reads correctly over
+            // the board the user actually produced.
+            var shown = current.board
+            PuzzleSolveMachine.move(uci: uci, on: &shown)
+            missPosition = shown.position
+            grade(uci: uci)
+            return .accepted
 
         case .advanced, .solved:
             grade(uci: uci)
@@ -789,6 +814,7 @@ final class PuzzleSessionModel {
     private func present(conceptMachine machine: PuzzleSolveMachine, opponentMovesFirst: Bool) {
         conceptExercise = machine
         machineSnapshot = machine
+        missPosition = nil
         planOnScreen = nil
         isConceptItem = true
         orientation = machine.board.position.sideToMove
@@ -872,7 +898,12 @@ final class PuzzleSessionModel {
             let solved = outcome == .solved
             recordConceptAttempt(selection.concept, correct: solved)
             conceptDone = true
-            isConceptItem = false
+            // `isConceptItem` deliberately stays true until the session moves
+            // on. Clearing it here dropped the header back to "1 / 1" and the
+            // task line back to "find the best move" the instant the banner
+            // appeared — so the one screen where the concept's name matters
+            // most stopped saying it. `conceptDone` is what routes the session
+            // onward, so nothing else depends on this being cleared early.
 
             let expected = solved ? uci : machine.expectedMove
             let from = machine.board.position
@@ -913,6 +944,7 @@ final class PuzzleSessionModel {
     }
 
     private func finishSession() {
+        missPosition = nil
         progress.total = driver.queueCount
         progress.elapsed = startedAt.map { clock().timeIntervalSince($0) } ?? 0
         progress.ratingDelta = Int((driver.puzzleRating - baselineRating).rounded())

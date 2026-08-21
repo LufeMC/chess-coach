@@ -279,16 +279,20 @@ struct PuzzleSessionModelTests {
         #expect(model.missed.isEmpty)
     }
 
-    @Test("A wrong move fails the attempt, snaps the piece back and names the concept")
+    /// Once snapped the piece back. It does not any more — see
+    /// ``aMissIsShownOnTheBoard()`` for why refusing the move read to users as
+    /// the app ignoring them. Everything else this test asserts is unchanged.
+    @Test("A wrong move fails the attempt and names the concept")
     func wrongMoveFails() async {
         let driver = FakeDriver(plans: [singleMovePlan(theme: .pin)])
-        let model = PuzzleSessionModel(driver: driver)
+        let model = PuzzleSessionModel(driver: driver, database: nil)
         await model.start()
 
         let acceptance = model.attemptMove(from: .d7, to: .d5)
-        if case .rejected = acceptance {} else { Issue.record("a wrong move must snap back") }
+        if case .accepted = acceptance {} else { Issue.record("a wrong move must still be shown") }
 
         await model.waitForGrading()
+        #expect(model.position?.piece(at: .d5)?.kind == .pawn)
 
         let verdict = model.stage.verdict
         #expect(verdict?.solved == false)
@@ -412,6 +416,40 @@ struct PuzzleSessionModelTests {
     /// by ``ConceptSchedulerTests``. This test is about the *puzzle queue*
     /// finishing, and letting the concept run here would be testing two things
     /// and reporting one.
+    /// The complaint this fixes was "it literally didn't let me move". The move
+    /// was graded and the banner did appear — but the board snapped the piece
+    /// back, so the only feedback the user was actually looking for never came.
+    @Test("A wrong move is left on the board, not snapped back")
+    func aMissIsShownOnTheBoard() async {
+        let driver = FakeDriver(plans: [singleMovePlan()])
+        let model = PuzzleSessionModel(driver: driver, database: nil)
+        await model.start()
+
+        // b8-a6 is legal in the position after 1.e4 and is not the answer.
+        _ = model.attemptMove(from: .b8, to: .a6)
+        await model.waitForGrading()
+
+        #expect(model.position?.piece(at: .a6)?.kind == .knight, "the user's move is not on the board")
+        #expect(model.position?.piece(at: .b8) == nil)
+        #expect(model.stage.verdict?.solved == false)
+    }
+
+    /// A retry means the position is unchanged and you get another go, so the
+    /// board must *not* keep the refused move.
+    @Test("A move that still has a retry left does snap back")
+    func aRetryLeavesTheBoardAlone() async {
+        let plan = makePlan(line: ["e2e4", "e7e5"], kind: .relearn(cardID: UUID()))
+        let model = PuzzleSessionModel(driver: FakeDriver(plans: [plan]), database: nil)
+        await model.start()
+
+        let before = model.position
+        _ = model.attemptMove(from: .b8, to: .a6)
+        await model.waitForGrading()
+
+        #expect(model.position == before, "a retry has to leave the position alone")
+        #expect(model.position?.piece(at: .b8)?.kind == .knight)
+    }
+
     @Test("The session ends in a summary with the rating delta")
     func summaryAtTheEnd() async {
         let driver = FakeDriver(plans: [singleMovePlan()])
@@ -516,7 +554,7 @@ struct PuzzleReasonTests {
             forAnswer: "b5c7",
             in: position("r3k3/8/8/1N6/8/8/8/4K3 w - - 0 1")
         )
-        #expect(clause == "it forks the king and rook — both attacked, and only one can move away")
+        #expect(clause == "it forks the king and rook — only one of them can move away")
     }
 
     @Test("Mate is the whole explanation")
@@ -631,7 +669,7 @@ struct PuzzleReasonTests {
             in: position("4k3/8/1n6/8/3B4/8/8/4K2R w - - 0 1"),
             continuation: ["e8e7", "d4b6"]
         )
-        #expect(clause == "it checks, and after their king goes to e7 you win the knight")
+        #expect(clause == "it checks, and you win the knight")
     }
 
     @Test("Without the line, the same check can only say it is a check")
@@ -682,6 +720,33 @@ struct PuzzleReasonTests {
         #expect(mistake == "your queen could be taken by the pawn")
     }
 
+    /// The position that prompted this: Black's knight on c6 is attacked by the
+    /// queen on b5 and defended by nothing, and the answer simply defends it.
+    /// It captures nothing, checks nothing, forks nothing and attacks nothing
+    /// bigger than itself — so every other clause declined and the banner read
+    /// "Missed — the queen to d6." with no reason at all.
+    @Test("A quiet move that saves a hanging piece says so")
+    func namesTheDefence() {
+        let clause = PuzzleReason.clause(
+            forAnswer: "d8d6",
+            in: position("r1bqkb1r/p1p1pppp/2n2n2/1Q6/2pP4/5N2/PP2PPPP/RNB1KB1R b KQkq - 0 1")
+        )
+        #expect(clause == "it defends the knight, which had nothing guarding it")
+    }
+
+    /// A piece attacked but adequately defended is not hanging, and saying it
+    /// was would teach the reader to fear every attack instead of counting one.
+    @Test("A piece that is attacked but defended is not called hanging")
+    func defenceNeedsARealThreat() {
+        // The knight on c6 is attacked by the queen and defended by the b7
+        // pawn: taking it loses a queen for a knight.
+        let clause = PuzzleReason.clause(
+            forAnswer: "d8d6",
+            in: position("r1bqkb1r/pp2pppp/2n2n2/1Q6/2pP4/5N2/PP2PPPP/RNB1KB1R b KQkq - 0 1")
+        )
+        #expect(clause != "it defends the knight, which had nothing guarding it")
+    }
+
     @Test("A move with nothing to say says nothing")
     func silenceRatherThanFiller() {
         // A quiet pawn push that captures nothing, checks nothing, hits nothing.
@@ -718,7 +783,11 @@ struct PuzzleReasonTests {
             in: position("r3k3/8/8/1N6/8/8/8/4K3 w - - 0 1")
         )
         #expect(clause?.contains("forks") == true, "the word is still worth learning")
-        #expect(clause?.contains("only one can move away") == true, "and it has to be explained")
+        // Matched loosely on purpose: the rule is that the definition is
+        // *there*, not that it is phrased in one exact way. Pinning the whole
+        // sentence made this test fail when the clause was shortened to fit the
+        // banner, which is a wording change and not a doctrine change.
+        #expect(clause?.contains("can move away") == true, "and it has to be explained")
     }
 
     /// `attacks the king, with check` says the same thing twice.
@@ -793,7 +862,7 @@ struct PuzzleReasonTests {
         let solved = PuzzleConcept.verdictMessage(
             solved: true, theme: .fork, answer: "b5c7", position: board
         )
-        #expect(missed.contains("forks the king and rook — both attacked, and only one can move away"))
+        #expect(missed.contains("forks the king and rook — only one of them can move away"))
         #expect(missed.dropFirst("Missed".count) == solved.dropFirst("Solved".count))
     }
 }
@@ -848,6 +917,46 @@ private struct ScriptedEvaluator: PuzzleMoveEvaluator {
 
 /// Most wrong moves hang nothing — they are simply not the best. The board
 /// cannot say why; the engine can.
+/// A puzzle mined from the user's own game stores one answer — whatever the
+/// analysis pass picked — and its second and third choices are often within a
+/// few centipawns. The banner says `Missed`; the engine's opinion that the move
+/// played was just as good used to be expressed by saying nothing, which reads
+/// as agreement with the verdict.
+@Suite("Near-equal moves")
+struct PuzzleEquivalenceTests {
+
+    @Test("A move the engine rates as good as the answer is said to be")
+    func equalMoveIsNotLeftAsAMiss() {
+        let clause = PuzzleMoveComparison.clause(
+            answer: PuzzleEvaluation(centipawns: -147),
+            played: PuzzleEvaluation(centipawns: -130)
+        )
+        #expect(clause == "yours was just as good")
+    }
+
+    @Test("A move that is genuinely worse still gets named as worse")
+    func worseMoveIsStillCriticised() {
+        let clause = PuzzleMoveComparison.clause(
+            answer: PuzzleEvaluation(centipawns: 600),
+            played: PuzzleEvaluation(centipawns: 0)
+        )
+        #expect(clause == "yours only keeps things level")
+    }
+
+    /// The gap between "the same move really" and "worse" stays silent, which
+    /// is the original behaviour and still the right one: there is nothing
+    /// honest to say about a move that is slightly but not meaningfully worse.
+    @Test("The middle ground still says nothing")
+    func theMiddleStaysQuiet() {
+        #expect(
+            PuzzleMoveComparison.clause(
+                answer: PuzzleEvaluation(centipawns: 300),
+                played: PuzzleEvaluation(centipawns: 220)
+            ) == nil
+        )
+    }
+}
+
 @Suite("Engine explanations")
 struct PuzzleEvaluationTests {
 
@@ -886,14 +995,20 @@ struct PuzzleEvaluationTests {
 
     /// Puzzles often have a second move that is very nearly as good. Telling the
     /// user it "only keeps things level" would be false coaching.
-    @Test("A near-equal move is not criticised")
+    ///
+    /// This used to assert silence. Silence turned out to be the wrong way to
+    /// express it: the banner above still reads `Missed`, so saying nothing
+    /// reads as agreeing with that verdict rather than as declining to
+    /// criticise. The rule the test exists for is unchanged — a near-equal move
+    /// is never called worse — but it is now said out loud.
+    @Test("A near-equal move is credited rather than criticised")
     func closeMovesGetNoLecture() {
-        #expect(
-            PuzzleMoveComparison.clause(
-                answer: PuzzleEvaluation(centipawns: 300),
-                played: PuzzleEvaluation(centipawns: 260)
-            ) == nil
+        let clause = PuzzleMoveComparison.clause(
+            answer: PuzzleEvaluation(centipawns: 300),
+            played: PuzzleEvaluation(centipawns: 260)
         )
+        #expect(clause == "yours was just as good")
+        #expect(clause != PuzzleEvaluation.Band.level.playedPhrase)
     }
 
     @Test("A move in the same band is never called worse")

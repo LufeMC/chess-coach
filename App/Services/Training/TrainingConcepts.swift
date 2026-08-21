@@ -56,6 +56,18 @@ struct TrainingConcept: Sendable, Hashable, Identifiable {
         var idea: String
         var why: String
         var lookFor: String
+
+        /// The first sentence of ``lookFor``, for the result banner.
+        ///
+        /// The full cue is written for the lesson card, where there is a whole
+        /// screen for it — it runs to about 130 characters, which is more than
+        /// the banner can show without cutting the end off. The first sentence
+        /// is the instruction; everything after it is the justification, and
+        /// the reader has already had that on the card.
+        var cue: String {
+            guard let end = lookFor.firstIndex(of: ".") else { return lookFor }
+            return String(lookFor[...end])
+        }
     }
 
     /// What the user does after being taught.
@@ -149,8 +161,8 @@ extension TrainingConcept {
                 why: "It claims an equal share of the centre and points every piece at it. There is "
                     + "nothing here to memorise — it is the opening principles, played one move at "
                     + "a time.",
-                lookFor: "Knights before bishops, castled by move six, and do not chase their pieces "
-                    + "with pawns while your own king is still in the middle."
+                lookFor: "Knights before bishops, and castled by move six. Do not chase their "
+                    + "pieces with pawns while your own king is still in the middle."
             ),
             fromRating: 0,
             exercise: .line(
@@ -372,8 +384,8 @@ extension TrainingConcept {
                     + "fourth rank to shelter your king from checks.",
                 why: "This is the single most common winning rook ending there is. Rook endings are "
                     + "most of all endings, and this is the position they funnel into.",
-                lookFor: "Your pawn on the seventh, your king in front of it, and their rook checking "
-                    + "from the side. The bridge is the answer to those checks."
+                lookFor: "Pawn on the seventh, your king in front of it. Their rook checks from "
+                    + "the side, and building the bridge is what stops the checks."
             ),
             fromRating: 1400,
             exercise: .drill(.lucena)

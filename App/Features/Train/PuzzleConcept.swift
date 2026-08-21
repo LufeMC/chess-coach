@@ -222,17 +222,13 @@ enum PuzzleConcept {
     ) -> String {
         let verb = solved ? "Solved" : "Missed"
         let move = PuzzleReason.description(ofMove: answer, in: position)
-        let reason = PuzzleReason.clause(forAnswer: answer, in: position)
 
-        let opening: String
-        if let move, let reason {
-            opening = "\(verb) — \(move): \(reason)."
-        } else if let move {
-            opening = "\(verb) — \(move)."
-        } else {
-            opening = "\(verb) — \(concept.title)."
-        }
-        return "\(opening) \(concept.teaching.lookFor)"
+        // No tactical clause here, unlike a puzzle. The reader was taught this
+        // idea by name two screens ago, and the sentence that connects "I
+        // played the right move" to "I know what to look for" is the concept's
+        // own cue — not a generic observation about what the move attacks.
+        let opening = move.map { "\(verb) — \($0)." } ?? "\(verb) — \(concept.title)."
+        return "\(opening) \(concept.teaching.cue)"
     }
 
     /// The destination square of a UCI move.

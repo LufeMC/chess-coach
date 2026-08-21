@@ -73,7 +73,7 @@ enum PuzzleReason {
     // MARK: The right move
 
     /// Why the answer works, e.g.
-    /// `"forks the queen and rook — both attacked, and only one can move away"`.
+    /// `"forks the queen and rook — only one of them can move away"`.
     /// Nil when nothing certain can be said.
     ///
     /// ## A capture is not a win
@@ -125,7 +125,7 @@ enum PuzzleReason {
         // that repeats. Named and defined in one breath.
         if hit.count >= 2 {
             let names = hit.prefix(2).map(noun(for:))
-            return "it forks the \(names[0]) and \(names[1]) — both attacked, and only one can move away"
+            return "it forks the \(names[0]) and \(names[1]) — only one of them can move away"
         }
 
         if let captured, let mover, let destination = PuzzleConcept.destination(ofUCI: uci) {
@@ -187,6 +187,19 @@ enum PuzzleReason {
         // board — the reader can see the check and see the attacked piece. What
         // they cannot see is what it forces.
         if let gain = outcome(from: line, isCheck: isCheck) { return gain }
+
+        // A quiet move whose whole point is that something of yours was
+        // hanging. Nothing above this can see it: it captures nothing, forks
+        // nothing, checks nothing and attacks nothing bigger than itself, so
+        // every clause so far declines and the banner used to fall through to
+        // naming the square. "The queen to d6" with no reason is the single
+        // least useful thing this file can say, and defence is the most common
+        // reason it was saying it.
+        if let mover, let destination = PuzzleConcept.destination(ofUCI: uci),
+            let held = defence(before: position, after: board, mover: mover, movedTo: destination)
+        {
+            return isCheck ? held + ", with check" : held
+        }
 
         // "attacks the king, with check" says the same thing twice. Attacking
         // the king *is* check, so the single-target phrasing skips it.
@@ -328,8 +341,6 @@ enum PuzzleReason {
     /// pawn win at all — it is the whole point of every pawn endgame, and the
     /// threshold alone would have said nothing about it.
     private static func outcome(from line: Line, isCheck: Bool) -> String? {
-        guard let reply = line.replyDescription else { return nil }
-
         let gain: String
         if line.promotes {
             gain = "your pawn queens"
@@ -339,9 +350,55 @@ enum PuzzleReason {
             return nil
         }
 
-        return isCheck
-            ? "it checks, and after \(reply) \(gain)"
-            : "after \(reply), \(gain)"
+        // A check does not spell out the reply. Answering a check is forced
+        // enough that the reader can see it coming, and naming it was the
+        // single commonest way this sentence overran the banner and got its
+        // ending cut off — which costs more than the reply was worth.
+        //
+        // A quiet move is the opposite case: "after what?" is exactly the
+        // question it raises, so there the reply is the whole point.
+        if isCheck { return "it checks, and \(gain)" }
+
+        guard let reply = line.replyDescription else { return nil }
+        return "after \(reply), \(gain)"
+    }
+
+    /// A move whose point is that something of yours could simply be taken.
+    ///
+    /// Read with static exchange rather than "is it attacked": a knight
+    /// attacked by a queen and defended by a pawn is not hanging, and telling
+    /// the user it was would teach them to fear every attack instead of
+    /// counting. Only pieces are considered — announcing the rescue of a pawn
+    /// would drown the clause that matters.
+    private static func defence(
+        before: Position,
+        after: Board,
+        mover: Piece,
+        movedTo: Square
+    ) -> String? {
+        let enemy = mover.color.opposite
+
+        // The most valuable thing of ours the opponent could actually profit by
+        // taking, before the move was made.
+        let exposed = before.pieces
+            .filter { $0.color == mover.color && $0.kind != .king }
+            .filter { SEE.see(position: before, target: $0.square, side: enemy) > 0 }
+            .max { value(of: $0.kind) < value(of: $1.kind) }
+
+        guard let exposed, value(of: exposed.kind) >= value(of: .knight) else { return nil }
+
+        // The piece that was hanging is the piece that moved.
+        if exposed.square == mover.square {
+            guard SEE.see(position: after.position, target: movedTo, side: enemy) <= 0 else { return nil }
+            return "it moves the \(noun(for: exposed.kind)) out of the attack"
+        }
+
+        // Otherwise the move has to have actually settled it — a "defence" that
+        // leaves the piece just as takeable is not one.
+        guard SEE.see(position: after.position, target: exposed.square, side: enemy) <= 0 else {
+            return nil
+        }
+        return "it defends the \(noun(for: exposed.kind)), which had nothing guarding it"
     }
 
     /// A move as a clause rather than a label — `the rook goes to d1` — so it

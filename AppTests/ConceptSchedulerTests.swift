@@ -131,6 +131,27 @@ struct ConceptSchedulerTests {
         }
     }
 
+    /// The banner shows four lines and cuts anything past them. A measured
+    /// sample put the full `lookFor` at a median of 128 characters — longer
+    /// than the whole banner — so the concept verdict uses only its first
+    /// sentence. This holds that sentence to a length the banner can show.
+    @Test("Every concept's banner cue fits the result banner")
+    func cuesFitTheBanner() {
+        // Four lines at roughly 29 characters, less the longest realistic
+        // "Missed — the bishop takes the knight." opening.
+        let budget = 116 - 40
+
+        for concept in TrainingConcept.catalogue {
+            let cue = concept.teaching.cue
+            #expect(!cue.isEmpty, "\(concept.id): empty cue")
+            #expect(cue.hasSuffix("."), "\(concept.id): cue is not a whole sentence")
+            #expect(
+                cue.count <= budget,
+                "\(concept.id): cue is \(cue.count) characters, over the \(budget) the banner can show"
+            )
+        }
+    }
+
     @Test("Every concept in the catalogue carries a real lesson")
     func everyConceptTeaches() {
         for concept in TrainingConcept.catalogue {
