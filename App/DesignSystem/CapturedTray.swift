@@ -51,8 +51,29 @@ struct CapturedTray: View {
     /// ``glyphSize`` after the board inset is applied.
     private var compensatedSize: CGFloat { glyphSize / BoardMetrics.pieceScale }
 
+    /// The most glyphs one tray will draw.
+    ///
+    /// The overlap below was meant to solve this and does not go far enough. At
+    /// ``glyphSize`` 30, with a third of each piece tucked under the last, nine
+    /// captures is 188pt of tray; two of those plus the badge and the padding
+    /// comes to roughly 434pt, which is wider than any iPhone. Nothing in the
+    /// column constrains its width, so what actually happened was that the
+    /// *whole screen* grew to fit — the board overflowed both edges and the task
+    /// line above it lost its first word.
+    ///
+    /// The glyphs are the working and the badge is the answer, so dropping the
+    /// least valuable of them costs the reader nothing the number does not
+    /// already tell them. Accessibility still reads the full list.
+    static let maxGlyphs = 5
+
     private var captured: [Piece.Kind] {
         CapturedMaterial.lost(by: side.opposite, in: position)
+    }
+
+    /// Ordered most valuable first by ``CapturedMaterial/lost(by:in:)``, so the
+    /// prefix keeps the pieces actually worth looking at.
+    private var visibleGlyphs: [Piece.Kind] {
+        Array(captured.prefix(Self.maxGlyphs))
     }
 
     private var advantage: Int {
@@ -73,7 +94,7 @@ struct CapturedTray: View {
             // page was swallowing.
             if !captured.isEmpty {
                 HStack(spacing: -glyphSize * 0.34) {
-                    ForEach(Array(captured.enumerated()), id: \.offset) { _, kind in
+                    ForEach(Array(visibleGlyphs.enumerated()), id: \.offset) { _, kind in
                         PieceView(kind: kind, color: side.opposite, renderer: renderer, size: compensatedSize)
                             .frame(width: glyphSize, height: glyphSize)
                     }

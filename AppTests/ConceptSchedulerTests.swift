@@ -6,6 +6,7 @@
 import Foundation
 import ChessKit
 import Testing
+import TrainingCore
 
 @testable import ChessCoach
 
@@ -162,4 +163,85 @@ struct ConceptSchedulerTests {
         }
         #expect(Set(TrainingConcept.catalogue.map(\.id)).count == TrainingConcept.catalogue.count)
     }
+}
+
+/// The set's shape: the concept opens it, the puzzles follow.
+///
+/// It used to close the set, and almost nobody reached it — getting there meant
+/// finishing all ten puzzles in one sitting, so a set abandoned partway taught
+/// nothing at all.
+@Suite("Set composition")
+@MainActor
+struct SetCompositionTests {
+
+    private var aDrill: TrainingConcept {
+        TrainingConcept.catalogue.first {
+            if case .drill = $0.exercise { return true }
+            return false
+        } ?? TrainingConcept.catalogue[0]
+    }
+
+    @Test("The set opens on the concept, not on a puzzle")
+    func conceptOpensTheSet() async {
+        let model = PuzzleSessionModel(
+            driver: SetShapeDriver(),
+            database: nil,
+            concept: .init(concept: aDrill, teachFirst: true)
+        )
+        await model.start()
+
+        #expect(model.teachingConcept?.id == aDrill.id, "the lesson has to come first")
+    }
+
+    /// A drill cannot run inside the session — it needs its own screen — so it
+    /// is handed to the Train tab and the puzzles carry on immediately. The bug
+    /// this guards is the set ending right there, before a single puzzle.
+    @Test("After the concept the puzzles still run")
+    func puzzlesFollowTheConcept() async {
+        let model = PuzzleSessionModel(
+            driver: SetShapeDriver(),
+            database: nil,
+            concept: .init(concept: aDrill, teachFirst: true)
+        )
+        await model.start()
+        model.beginConceptExercise()
+
+        #expect(model.pendingDrill != nil, "the drill should be handed to the Train tab")
+        #expect(model.stage == .solving, "the puzzles have to follow the concept")
+    }
+}
+
+/// A driver with one puzzle queued, which is all these tests need.
+@MainActor
+private final class SetShapeDriver: PuzzleSessionDriver {
+    var queueCount: Int { 1 }
+    var currentIndex: Int { 0 }
+    var itemOnScreen: SessionItemPlan? { plan }
+    var solveMachine: PuzzleSolveMachine? { machine }
+    var isSessionFinished: Bool { false }
+    var loadFailure: String? { nil }
+    var puzzleRating: Double { 1200 }
+
+    private let plan: SessionItemPlan
+    private var machine: PuzzleSolveMachine?
+
+    init() {
+        let item = SolvableItem(
+            backing: .corpusPuzzle(id: UUID().uuidString),
+            fen: "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1",
+            line: ["e2e4", "e7e5"],
+            opponentMovesFirst: true,
+            rating: 1200,
+            primaryTheme: .fork
+        )
+        plan = SessionItemPlan(kind: .fresh, presented: PresentedPuzzle(item: item, preferring: .identity))
+    }
+
+    func startSession(focus: WeeklyFocus?) async {
+        machine = plan.presented.machine(retryPolicy: plan.retryPolicy)
+        machine?.start()
+    }
+    func offer(uci: String) async -> PuzzleSolveMachine.MoveResult { .illegal }
+    func revealHint() -> String? { nil }
+    func skipCurrent() async {}
 }

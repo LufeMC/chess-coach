@@ -75,6 +75,16 @@ struct TrainHomeScreen: View {
         .trainingCover(item: $route) { route in
             destination(for: route)
         }
+        // A set closed early still did work. The concept is marked taught the
+        // moment its lesson is shown, and every puzzle is graded and written as
+        // it is answered — none of that waits for the summary. What did wait
+        // was this screen: `.task` runs once on appear, and dismissing a
+        // full-screen cover does not re-trigger it, so the training list went
+        // on showing the counts from before the session.
+        .onChange(of: route) { _, newValue in
+            guard newValue == nil else { return }
+            Task { await home.load() }
+        }
         .onChange(of: pendingDrill) { _, kind in
             guard let kind else { return }
             pendingDrill = nil

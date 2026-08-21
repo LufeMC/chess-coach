@@ -248,7 +248,7 @@ struct PuzzleSessionModelTests {
     @Test("Starting a session serves the first item with its setup move played")
     func startServesFirstItem() async {
         let driver = FakeDriver(plans: [singleMovePlan()])
-        let model = PuzzleSessionModel(driver: driver)
+        let model = PuzzleSessionModel(driver: driver, database: nil)
         await model.start()
 
         #expect(model.stage == .solving)
@@ -264,7 +264,7 @@ struct PuzzleSessionModelTests {
     @Test("A correct final move solves the puzzle and raises a success verdict")
     func correctMoveSolves() async {
         let driver = FakeDriver(plans: [singleMovePlan()])
-        let model = PuzzleSessionModel(driver: driver)
+        let model = PuzzleSessionModel(driver: driver, database: nil)
         await model.start()
 
         let acceptance = model.attemptMove(from: .e7, to: .e5)
@@ -312,7 +312,7 @@ struct PuzzleSessionModelTests {
     @Test("An illegal move is not scored")
     func illegalMoveIsNotScored() async {
         let driver = FakeDriver(plans: [singleMovePlan()])
-        let model = PuzzleSessionModel(driver: driver)
+        let model = PuzzleSessionModel(driver: driver, database: nil)
         await model.start()
 
         // White's rook, with Black to move.
@@ -327,7 +327,7 @@ struct PuzzleSessionModelTests {
     @Test("The full line must be played; the opponent's reply arrives in between")
     func fullLineRequired() async {
         let driver = FakeDriver(plans: [twoMovePlan()])
-        let model = PuzzleSessionModel(driver: driver)
+        let model = PuzzleSessionModel(driver: driver, database: nil)
         await model.start()
 
         _ = model.attemptMove(from: .e7, to: .e5)
@@ -352,7 +352,7 @@ struct PuzzleSessionModelTests {
     @Test("A hinted solve counts as hinted, not solved")
     func hintedSolveIsNotASolve() async {
         let driver = FakeDriver(plans: [singleMovePlan(theme: .skewer)])
-        let model = PuzzleSessionModel(driver: driver)
+        let model = PuzzleSessionModel(driver: driver, database: nil)
         await model.start()
 
         model.revealHint()
@@ -371,7 +371,7 @@ struct PuzzleSessionModelTests {
     @Test("A second hint on the same item does not double-count")
     func hintIsIdempotentPerItem() async {
         let driver = FakeDriver(plans: [singleMovePlan()])
-        let model = PuzzleSessionModel(driver: driver)
+        let model = PuzzleSessionModel(driver: driver, database: nil)
         await model.start()
 
         model.revealHint()
@@ -382,7 +382,7 @@ struct PuzzleSessionModelTests {
     @Test("Skipping is graded as a failure")
     func skipCountsAsFailure() async {
         let driver = FakeDriver(plans: [singleMovePlan(theme: .fork)])
-        let model = PuzzleSessionModel(driver: driver)
+        let model = PuzzleSessionModel(driver: driver, database: nil)
         await model.start()
 
         await model.skip()
@@ -395,7 +395,7 @@ struct PuzzleSessionModelTests {
     @Test("Continue advances to the next puzzle and moves the counter")
     func continueAdvances() async {
         let driver = FakeDriver(plans: [singleMovePlan(), twoMovePlan()])
-        let model = PuzzleSessionModel(driver: driver)
+        let model = PuzzleSessionModel(driver: driver, database: nil)
         await model.start()
         #expect(model.progress.counterLabel == "1 / 2")
 
@@ -479,7 +479,7 @@ struct PuzzleSessionModelTests {
     func loadFailure() async {
         let driver = FakeDriver(plans: [])
         driver.loadFailure = "no database"
-        let model = PuzzleSessionModel(driver: driver)
+        let model = PuzzleSessionModel(driver: driver, database: nil)
         await model.start()
         #expect(model.stage == .unavailable("no database"))
     }
@@ -879,7 +879,7 @@ struct PuzzleOrientationTests {
     @Test("Solving a puzzle does not spin the board")
     func orientationHoldsThroughTheVerdict() async {
         let driver = FakeDriver(plans: [makePlan(line: ["e2e4", "e7e5"])])
-        let model = PuzzleSessionModel(driver: driver)
+        let model = PuzzleSessionModel(driver: driver, database: nil)
         await model.start()
 
         let solving = model.orientation
@@ -1051,7 +1051,8 @@ struct PuzzleExplanationUpgradeTests {
         let driver = FakeDriver(plans: [makePlan(line: ["e2e4", "e7e5"])])
         let model = PuzzleSessionModel(
             driver: driver,
-            evaluator: ScriptedEvaluator(scores: ["e7e5": 500, "b8c6": 0])
+            evaluator: ScriptedEvaluator(scores: ["e7e5": 500, "b8c6": 0]),
+            database: nil
         )
         await model.start()
 
@@ -1084,7 +1085,8 @@ struct PuzzleExplanationUpgradeTests {
             evaluator: ScriptedEvaluator(
                 scores: [:],
                 lines: ["c6c4": ["b4c4", "d5d1", "e1d1", "e6c4"]]
-            )
+            ),
+            database: nil
         )
         await model.start()
 
@@ -1105,7 +1107,7 @@ struct PuzzleExplanationUpgradeTests {
     @Test("With no engine the banner keeps its shorter sentence")
     func withoutAnEvaluatorNothingChanges() async {
         let driver = FakeDriver(plans: [makePlan(line: ["e2e4", "e7e5"])])
-        let model = PuzzleSessionModel(driver: driver)
+        let model = PuzzleSessionModel(driver: driver, database: nil)
         await model.start()
 
         _ = model.attemptMove(from: .b8, to: .c6)

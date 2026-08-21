@@ -180,6 +180,7 @@ final class PuzzleSessionModel {
         evaluator: (any PuzzleMoveEvaluator)? = nil,
         database: AppDatabase? = AppDatabase.sharedIfAvailable,
         soloConcept: TrainingConcept? = nil,
+        concept: ConceptScheduler.Selection? = nil,
         clock: @escaping @Sendable () -> Date = { Date() }
     ) {
         self.driver = driver
@@ -187,8 +188,14 @@ final class PuzzleSessionModel {
         self.evaluator = evaluator
         self.database = database
         self.soloConcept = soloConcept
+        self.injectedConcept = concept
         self.clock = clock
     }
+
+    /// A concept handed in rather than scheduled, so the set's shape can be
+    /// tested without a store behind it. The driver and the evaluator are
+    /// injected the same way and for the same reason.
+    private let injectedConcept: ConceptScheduler.Selection?
 
     /// Set when the user asked to revisit one concept rather than play a set.
     ///
@@ -268,8 +275,21 @@ final class PuzzleSessionModel {
         baselineRating = driver.puzzleRating
         progress.total = driver.queueCount
 
-        guard !driver.isSessionFinished, driver.itemOnScreen != nil else {
+        // The concept goes first.
+        //
+        // It used to close the set, on the reasoning that the puzzles are what
+        // the user came for. The effect was that almost nobody ever saw one:
+        // reaching it meant finishing all ten puzzles in a sitting, and a set
+        // abandoned at puzzle four — which is most of them — taught nothing at
+        // all. Opening with it also puts the idea in front of the tactics
+        // rather than after them, which is the order it is useful in.
+        if conceptSelection != nil, !conceptDone {
             beginConcept()
+            return
+        }
+
+        guard !driver.isSessionFinished, driver.itemOnScreen != nil else {
+            finishSession()
             return
         }
         beginItem()
@@ -710,12 +730,14 @@ final class PuzzleSessionModel {
         liveRing = nil
         hintMove = nil
 
-        if isConceptItem || conceptDone {
-            finishSession()
-            return
+        // The concept has just been answered, so the puzzles are what is left.
+        if isConceptItem {
+            isConceptItem = false
+            conceptExercise = nil
         }
+
         if driver.isSessionFinished || driver.itemOnScreen == nil {
-            beginConcept()
+            finishSession()
             return
         }
         beginItem()
@@ -727,6 +749,10 @@ final class PuzzleSessionModel {
     /// perfectly good set of puzzles, and a user whose store is unavailable
     /// should not be shown an error about a slot they never asked for.
     private func loadConcept() async {
+        if let injectedConcept {
+            conceptSelection = injectedConcept
+            return
+        }
         guard let database else { return }
         let rating = Int(driver.puzzleRating.rounded())
 
@@ -756,7 +782,7 @@ final class PuzzleSessionModel {
     /// there is nothing to teach.
     private func beginConcept() {
         guard let selection = conceptSelection, !conceptDone else {
-            finishSession()
+            abandonConcept()
             return
         }
 
@@ -778,17 +804,24 @@ final class PuzzleSessionModel {
     /// Starts the exercise for the concept on screen.
     func beginConceptExercise() {
         guard let selection = conceptSelection else {
-            finishSession()
+            abandonConcept()
             return
         }
 
         switch selection.concept.exercise {
         case .drill(let kind):
-            // Played out against the engine on its own screen; the set ends
-            // here and hands the drill to the Train tab.
+            // A drill needs its own screen and its own twenty moves, so it
+            // cannot run inline the way a line or a position can. The lesson
+            // has been read; the drill itself is handed to the Train tab when
+            // the set closes, and the puzzles carry on in between.
             pendingDrill = kind
             conceptDone = true
-            finishSession()
+            isConceptItem = false
+            if driver.isSessionFinished || driver.itemOnScreen == nil {
+                finishSession()
+            } else {
+                beginItem()
+            }
 
         case .line(let fen, let moves, let opponentMovesFirst):
             guard
@@ -799,8 +832,7 @@ final class PuzzleSessionModel {
                     retryPolicy: .allowRetries(1)
                 )
             else {
-                conceptDone = true
-                finishSession()
+                abandonConcept()
                 return
             }
             machine.start()
@@ -808,6 +840,21 @@ final class PuzzleSessionModel {
 
         case .corpusFeature(let feature):
             Task { [weak self] in await self?.presentCorpusConcept(feature: feature) }
+        }
+    }
+
+    /// Gives up on the concept and gets on with the puzzles.
+    ///
+    /// A concept that cannot be built is a disappointment, not a failure of the
+    /// set — and before the slot moved to the front, this path ended the whole
+    /// session before a single puzzle had been served.
+    private func abandonConcept() {
+        conceptDone = true
+        isConceptItem = false
+        if driver.isSessionFinished || driver.itemOnScreen == nil {
+            finishSession()
+        } else {
+            beginItem()
         }
     }
 
@@ -832,8 +879,7 @@ final class PuzzleSessionModel {
     /// does not demonstrate the concept.
     private func presentCorpusConcept(feature: PositionalFeature) async {
         guard let database else {
-            conceptDone = true
-            finishSession()
+            abandonConcept()
             return
         }
         let rating = Int(driver.puzzleRating.rounded())
@@ -867,8 +913,7 @@ final class PuzzleSessionModel {
                 retryPolicy: .allowRetries(1)
             )
         else {
-            conceptDone = true
-            finishSession()
+            abandonConcept()
             return
         }
         machine.start()
