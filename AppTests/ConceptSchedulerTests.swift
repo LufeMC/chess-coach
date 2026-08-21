@@ -245,3 +245,45 @@ private final class SetShapeDriver: PuzzleSessionDriver {
     func revealHint() -> String? { nil }
     func skipCurrent() async {}
 }
+
+/// The lesson draws the position its exercise reaches, so the card and the
+/// practice cannot describe different things.
+@Suite("Concept previews")
+struct ConceptPreviewTests {
+
+    @Test("Every opening and endgame lesson has a board to show")
+    func teachableConceptsDraw() {
+        for concept in TrainingConcept.catalogue {
+            switch concept.exercise {
+            case .line, .drill:
+                #expect(concept.preview != nil, "\(concept.id): nothing to draw")
+                #expect(concept.previewCaption != nil, "\(concept.id): drawn with no caption")
+            case .corpusFeature:
+                // Searched for at run time, so there is no fixed position.
+                #expect(concept.preview == nil)
+            }
+        }
+    }
+
+    /// The London card named d4, Bf4 and e3; the exercise then asked for Nf3
+    /// and Nbd2. The drawn position is the end of the line, so the knights are
+    /// on the board whether or not anybody wrote them into the prose.
+    @Test("The drawn position is where the moves actually end")
+    func previewIsTheFinishedSetup() throws {
+        let london = try #require(TrainingConcept.catalogue.first { $0.id == "opening.london" })
+        let preview = try #require(london.preview)
+
+        // Nf3 and Nbd2 — the two moves the lesson never mentioned.
+        #expect(preview.position.piece(at: .f3)?.kind == .knight)
+        #expect(preview.position.piece(at: .d2)?.kind == .knight)
+        // And the bishop the lesson is actually about.
+        #expect(preview.position.piece(at: .f4)?.kind == .bishop)
+        #expect(preview.orientation == .white, "shown from the side doing the learning")
+    }
+
+    @Test("A lesson for the side moving second is drawn from their side")
+    func orientationFollowsTheSolver() throws {
+        let italian = try #require(TrainingConcept.catalogue.first { $0.id == "opening.italian" })
+        #expect(try #require(italian.preview).orientation == .black)
+    }
+}

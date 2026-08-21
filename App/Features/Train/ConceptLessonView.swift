@@ -3,6 +3,7 @@
 //  ChessCoach
 //
 
+import BoardUI
 import SwiftUI
 
 /// The lesson, shown once, before the concept is ever exercised.
@@ -23,10 +24,16 @@ import SwiftUI
 ///
 /// *What it is*, *why it matters*, *what to look for* answer three different
 /// questions, and a reader skimming for the third should not have to read the
-/// first two to find it. The cue is last and stressed because it is the only
-/// part that survives to the next game — and it is repeated verbatim in the
-/// banner after the exercise, so the two halves of the idea are said the same
-/// way both times.
+/// first two to find it. The cue is stressed because it is the only part that
+/// survives to the next game — and its first sentence is repeated in the banner
+/// after the exercise, so the two halves of the idea are said the same way both
+/// times.
+///
+/// It sits directly under the board rather than at the end. Adding the position
+/// pushed the card past a screen, and the cue — the one line meant to be
+/// remembered — went below the fold behind the button, while "why it matters",
+/// which is the argument for caring, kept the space above it. The picture and
+/// the instruction now arrive together.
 struct ConceptLessonView: View {
 
     let concept: TrainingConcept
@@ -39,8 +46,9 @@ struct ConceptLessonView: View {
                     header
 
                     section("The idea", concept.teaching.idea)
-                    section("Why it matters", concept.teaching.why)
+                    boardPreview
                     cue
+                    section("Why it matters", concept.teaching.why)
                 }
                 .padding(.horizontal, 20)
                 .padding(.top, 8)
@@ -67,6 +75,33 @@ struct ConceptLessonView: View {
                 .fixedSize(horizontal: false, vertical: true)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    /// The idea as a position, directly under the sentence describing it.
+    ///
+    /// Placed after "the idea" and before "why it matters" on purpose: it is
+    /// the illustration of the first, and the reader who skims should hit the
+    /// picture before the argument.
+    @ViewBuilder
+    private var boardPreview: some View {
+        if let preview = concept.preview {
+            VStack(spacing: 8) {
+                BoardView(
+                    position: preview.position,
+                    orientation: preview.orientation,
+                    interaction: .locked,
+                    style: BoardAppearance.shared.style
+                )
+                .frame(maxWidth: 280)
+                .accessibilityHidden(true)
+
+                if let caption = concept.previewCaption {
+                    Text(caption)
+                        .typeRole(.caption)
+                }
+            }
+            .frame(maxWidth: .infinity)
+        }
     }
 
     private func section(_ title: String, _ body: String) -> some View {
