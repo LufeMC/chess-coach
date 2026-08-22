@@ -236,7 +236,7 @@ struct CurriculumLadderStateTests {
         let skill = try #require(state.rung(1)?.skills.first)
         // Playing sparring games never writes a drill streak, so "Needs 1 more
         // game" was an instruction that could not work.
-        #expect(skill.pending?.note == "Not run yet — Train › Endgames")
+        #expect(skill.pending?.note == "Not run yet — a training set")
     }
 
     @Test("A puzzle-theme gate counts puzzles, and a critical-moment gate counts moments")
@@ -396,9 +396,9 @@ struct CurriculumLadderStateTests {
         )
         let rung = try #require(state.rung(1))
         #expect(rung.isReadyToAdvance)
-        #expect(rung.blockerMessages == ["Ready for Rung 2 — take it on the Train tab"])
+        #expect(rung.blockerMessages == ["Ready for Rung 2 — take it on Home"])
         // Not wrapped in "To reach Rung 2:" — it is already a whole sentence.
-        #expect(rung.blockerSummary == "Ready for Rung 2 — take it on the Train tab")
+        #expect(rung.blockerSummary == "Ready for Rung 2 — take it on Home")
     }
 
     @Test("Completed and locked rungs never claim a promotion is waiting")

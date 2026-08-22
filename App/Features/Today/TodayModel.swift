@@ -55,6 +55,34 @@ final class TodayModel {
     /// "loaded and empty", which are completely different screens.
     private(set) var snapshot: TodaySnapshot?
 
+    /// How many puzzles today's set holds.
+    ///
+    /// Owned here, on the screen that displays it, which is the whole point of
+    /// the merge. It used to live on the Train tab's model, and Today read the
+    /// stored value once in `load()` — so choosing 5 on Train left Home saying
+    /// "10 puzzles · ~4 min" and then opening a five-puzzle set. `TodayModel`'s
+    /// own comment described that failure and did not close it, because a
+    /// `.task` does not re-run when you switch back to a tab that is already
+    /// alive.
+    ///
+    /// The setter writes through to the same stored key the session reads, and
+    /// updates the snapshot in place so the squares and the CTA redraw on the
+    /// same frame as the tap rather than waiting for a reload.
+    var setLength: Int {
+        get { snapshot?.progress.puzzleTarget ?? DailyProgress.puzzlesTarget }
+        set {
+            guard newValue != setLength, var snapshot else { return }
+            try? AppDatabase.sharedIfAvailable?.metrics.set(
+                TrainHomeModel.lengthKey,
+                value: Double(newValue),
+                sampleCount: 1,
+                at: Date()
+            )
+            snapshot.progress.puzzleTarget = newValue
+            self.snapshot = snapshot
+        }
+    }
+
     /// Required-skill progress. Arrives after the cheap read — the rung card
     /// renders immediately with a skeleton where the bar goes rather than
     /// holding the whole screen back for it. Progressive reveal: render what is
@@ -283,13 +311,29 @@ final class TodayModel {
     /// the skill stays unmet, and rung 2 → 3 is unreachable however well they
     /// play — with nothing anywhere saying which door is shut.
     ///
-    /// Unmeasured, not unmet: a criterion the user is simply failing needs
-    /// practice, and the ordinary loop supplies it. This is the narrower case of
-    /// a number the loop cannot produce at all.
+    /// Failing counts as well as unmeasured, and only for these metrics.
+    ///
+    /// The rule everywhere else in the app is "unmeasured, not unmet": a
+    /// criterion the user is failing needs practice, and the ordinary loop
+    /// supplies it. That reasoning does not hold here, and following it opened a
+    /// trapdoor. `guided.scanThreats.hitRate` is produced by exactly one thing —
+    /// a guided prompt that fired and was answered — so once the user had eight
+    /// prompts in the window at a hit rate under the bar, the criterion flipped
+    /// from unmeasured to *failing*, this returned nil, the coached-game CTA
+    /// disappeared, and the only route in the app to the one activity that can
+    /// move the number closed. The user was left failing a required skill with
+    /// no way to practise it, and rung 2 stopped being passable.
+    ///
+    /// So the gate opens for both states, but strictly for metrics whose only
+    /// producer is a guided game — `guidedHabit(for:)` is the whitelist, and
+    /// anything a sparring game or a drill can move is deliberately excluded so
+    /// this does not become a second CTA competing with the daily loop.
     nonisolated static func guidedGate(for state: CurriculumState) -> Habit? {
         let requiredIDs = Set((Curriculum.rung(state.rung)?.requiredSkills ?? []).map(\.id))
         for evaluation in state.decision.evaluations where requiredIDs.contains(evaluation.skillID) {
-            for criterion in evaluation.unmeasuredCriteria {
+            // Unmeasured first: a user who has never been offered a coached game
+            // should be pointed at one before a user who is mid-practice.
+            for criterion in evaluation.unmeasuredCriteria + evaluation.failingCriteria {
                 if let habit = guidedHabit(for: criterion.metricKey) { return habit }
             }
         }

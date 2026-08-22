@@ -173,7 +173,7 @@ struct ProfileNumbersTests {
         // The gates that are not measured by playing another game are exactly
         // the ones the ladder used to mislabel.
         #expect(MetricKey.criticalMomentHitRate.presentation.sampleNoun == "critical moments")
-        #expect(MetricKey.kqkDrillCleanStreak.presentation.sampleSource == "Train › Endgames")
+        #expect(MetricKey.kqkDrillCleanStreak.presentation.sampleSource == "a training set")
         #expect(
             MetricKey.puzzleThemeSuccess(.backRankMate, ratingFloor: 1200).presentation.name
                 == "Back-rank mates at 1200+"

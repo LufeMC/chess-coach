@@ -4,6 +4,7 @@
 //
 
 import SwiftUI
+import TrainingCore
 
 /// The daily loop: 1 game → 3 moments → 10 puzzles.
 ///
@@ -24,6 +25,20 @@ struct TodayScreen: View {
     @Environment(AppModel.self) private var model
     @State private var todayModel = TodayModel()
 
+    // The training surface, hosted here since the merge. Home and Train were two
+    // front doors to one daily loop — Home's "Puzzles 1 of 10" *was* Train's
+    // "Today's set" — and the split was already producing disagreeing numbers,
+    // because Home never saw the length chosen on the other screen. One screen
+    // cannot disagree with itself.
+    @State private var trainModel = TrainHomeModel()
+    @State private var trainingRoute: TrainRoute?
+    /// A focus carried in from a rating leak, replacing the week's habit for
+    /// exactly one session.
+    @State private var requestedFocus: WeeklyFocus?
+    /// The drill the set just finished wants played, opened once the session
+    /// cover is out of the way.
+    @State private var pendingDrill: EndgameDrillKind?
+
     var body: some View {
         let plan = todayModel.plan
 
@@ -34,6 +49,20 @@ struct TodayScreen: View {
                 returnBanner(plan)
 
                 unavailableBanner
+
+                // Directly above the card it rewrites. This control used to
+                // exist only on the Train tab, so a user who lived on Home sat
+                // at a full rung bar forever with no way to take the promotion
+                // the bar was telling them they had earned.
+                if let promotion = trainModel.promotion {
+                    PromotionRow(promotion: promotion) {
+                        Task {
+                            await trainModel.acceptPromotion()
+                            await todayModel.load()
+                        }
+                    }
+                    .transition(.opacity.combined(with: .move(edge: .top)))
+                }
 
                 RungCard(rung: todayModel.rung, isMeasuring: todayModel.isRungProgressPending)
 
@@ -46,6 +75,15 @@ struct TodayScreen: View {
                 completionBanner(plan)
 
                 checklist(plan)
+
+                // The one decision left to the user, next to the squares it
+                // resizes. It is not a judgement about chess — it is them
+                // saying how much time they have today, which is the one thing
+                // only they know. Hidden once the set is done, when changing it
+                // would resize a promise already kept.
+                setLengthControl
+
+                practiceMore(plan)
 
                 // The long arc. The three squares above are only today; this is
                 // the thing they are for.
@@ -74,7 +112,80 @@ struct TodayScreen: View {
         .safeAreaInset(edge: .bottom) {
             actionBar(plan)
         }
-        .task { await todayModel.load() }
+        .task {
+            await todayModel.load()
+            await trainModel.prepare()
+            consumeLeakRequest()
+            consumeStartRequest()
+        }
+        // The tab stays alive once visited, so a request arriving later would
+        // never reach `task`. Both entry points run the same consume, which is
+        // what stops a stale request aiming a session the user has moved on
+        // from.
+        .onChange(of: model.pendingTrainingHabit) { _, habit in
+            if habit != nil { consumeLeakRequest() }
+        }
+        .onChange(of: model.pendingTrainRequest) { _, requested in
+            if requested { consumeStartRequest() }
+        }
+        .trainingCover(item: $trainingRoute) { route in
+            trainingDestination(for: route)
+        }
+        // A set closed early still did work: the concept is marked taught the
+        // moment its lesson is shown and every puzzle is graded as it is
+        // answered. Both models are reloaded, not just the training one — the
+        // squares, the streak and the CTA all live on this screen now, and
+        // dismissing a cover does not re-run `task`.
+        .onChange(of: trainingRoute) { _, newValue in
+            guard newValue == nil else { return }
+            requestedFocus = nil
+            Task {
+                await todayModel.load()
+                await trainModel.load()
+            }
+        }
+        .onChange(of: pendingDrill) { _, kind in
+            guard let kind else { return }
+            pendingDrill = nil
+            trainingRoute = .drill(kind)
+        }
+    }
+
+    /// The one decision left to the user, next to the squares it resizes.
+    ///
+    /// Not a judgement about chess — it is them saying how much time they have
+    /// today, which is the one thing only they know. Hidden once the set is
+    /// done, when changing it would resize a promise already kept.
+    @ViewBuilder
+    private var setLengthControl: some View {
+        if todayModel.snapshot?.hasHistory == true,
+            todayModel.snapshot?.progress.isDone(.puzzles) == false
+        {
+            LengthSelector(lengths: TrainHomeModel.lengths, selection: $todayModel.setLength)
+        }
+    }
+
+    /// Below the plan, always.
+    ///
+    /// The plan is the day's recommendation; this is the answer to "what if I
+    /// want more", and putting them side by side would make them read as two
+    /// ways to train and invite picking one. Hidden on a first run, where the
+    /// user has no context for anything beyond the first instruction.
+    @ViewBuilder
+    private func practiceMore(_ plan: TodayPlan) -> some View {
+        if todayModel.snapshot?.hasHistory == true {
+            PracticeMoreSection(
+                calculationSupply: trainModel.calculationSupply,
+                calculationBand: trainModel.calculationBand,
+                dueCount: trainModel.dueCount,
+                taughtCount: trainModel.covered.filter(\.isTaught).count,
+                conceptCount: trainModel.covered.count,
+                canRepeatSet: todayModel.snapshot?.progress.isDone(.puzzles) == true,
+                onAnotherSet: { startSet(focus: nil) },
+                onCalculation: { trainingRoute = .calculation },
+                onTraining: { model.navigate(to: .training) }
+            )
+        }
     }
 
     // MARK: Banners
@@ -231,7 +342,162 @@ struct TodayScreen: View {
             model.navigate(toGuidedGame: habit)
             return
         }
+        // The set opens here rather than anywhere else, which is the merge in
+        // one line: `.train` used to select a tab, and now it is a request this
+        // screen consumes.
+        if case .train = action.destination {
+            startSet(focus: nil)
+            return
+        }
         model.navigate(to: todayModel.route(for: action.destination))
+    }
+
+    // MARK: Training
+
+    /// Opens today's set.
+    ///
+    /// The `canStartSession` guard is the same one the old `Start` button
+    /// carried: a build with no puzzle corpus must not answer the CTA with a
+    /// full-screen "Training unavailable" the user has to find their way out of.
+    private func startSet(focus: WeeklyFocus?) {
+        guard trainModel.canStartSession, trainingRoute == nil else { return }
+        requestedFocus = focus
+        trainingRoute = .puzzles
+    }
+
+    /// Turns a tapped rating leak into the next session's focus and opens it.
+    ///
+    /// The habit is resolved against the live leak table so the session carries
+    /// the leak's own cost and cause tag rather than a bare habit id — that is
+    /// what `SessionAssembler` weights the drill mix by.
+    private func consumeLeakRequest() {
+        guard let habit = model.consumeTrainingHabit() else { return }
+        guard trainModel.canStartSession else { return }
+        startSet(focus: trainModel.focus(for: habit))
+    }
+
+    /// Opens the set a route asked for — Review's Done button, Profile's leak
+    /// table, or Today's own CTA.
+    ///
+    /// Deferred by one runloop turn on purpose. `advance(to:)` pops `todayPath`
+    /// and sets the request in the same state change, so presenting immediately
+    /// races a navigation pop that is still animating — the classic dropped
+    /// SwiftUI presentation, where the cover simply never appears and the button
+    /// looks broken.
+    private func consumeStartRequest() {
+        guard model.consumeTrainRequest() else { return }
+        Task { @MainActor in
+            await Task.yield()
+            startSet(focus: requestedFocus)
+        }
+    }
+
+    @ViewBuilder
+    private func trainingDestination(for route: TrainRoute) -> some View {
+        switch route {
+        case .puzzles:
+            if let service = trainModel.makeTrainingService() {
+                // The concept the card has been advertising, handed over rather
+                // than resolved a second time. Both sides ask the same
+                // scheduler with the same rows, so they normally agree — but
+                // "an endgame to learn, then 10 puzzles" is a promise, and a
+                // second resolution can answer differently the moment anything
+                // in between touches `lastSeenAt`. Nil when the home screen's
+                // read has not landed yet, in which case the session resolves
+                // its own, which is what it always did.
+                let session = PuzzleSessionModel(
+                    driver: service,
+                    focus: requestedFocus ?? trainModel.focus,
+                    evaluator: EnginePuzzleEvaluator(service: model.engineService),
+                    concept: trainModel.nextConcept,
+                    // A leak drill names its own subject on the button that
+                    // opened it, so it skips the lesson slot: the scheduler's
+                    // next concept is chosen by rotation, and arriving at one
+                    // after tapping "Train blunder-checking" reads as the app
+                    // ignoring the request.
+                    teachesConcept: requestedFocus == nil
+                )
+                NavigationStack {
+                    // A set whose concept was an endgame ends by *offering* the
+                    // drill. Handed back rather than pushed from inside the
+                    // session, because the drill has its own screen and its own
+                    // model and the session cover is not the place to host a
+                    // second one — and handed back only when the user asked for
+                    // it, so closing a set early is not answered with another
+                    // twenty moves.
+                    PuzzleSessionScreen(
+                        model: session,
+                        focusName: (requestedFocus ?? trainModel.focus).map { FocusVocabulary.chipTitle($0.habit) }
+                    ) { kind in pendingDrill = kind }
+                }
+            } else {
+                unavailable
+            }
+        case .calculation:
+            if let service = trainModel.makeCalculationService() {
+                NavigationStack {
+                    // No concept, no focus, no drill handoff. The card priced
+                    // this at three puzzles; anything else in front of them is
+                    // time the user was not told about, and on the one set whose
+                    // premise is that the minutes go on the position.
+                    PuzzleSessionScreen(
+                        model: PuzzleSessionModel(
+                            driver: service,
+                            evaluator: EnginePuzzleEvaluator(service: model.engineService),
+                            isCalculationSet: true
+                        )
+                    )
+                }
+            } else {
+                unavailable
+            }
+        case let .concept(concept):
+            if let service = trainModel.makeTrainingService() {
+                NavigationStack {
+                    // The same handoff as the set. Without it, revisiting an
+                    // endgame technique from the training list showed the
+                    // lesson, said "Got it", and then went back to this screen
+                    // having practised nothing — which is the one thing that
+                    // row advertises.
+                    PuzzleSessionScreen(
+                        model: PuzzleSessionModel(
+                            driver: service,
+                            evaluator: EnginePuzzleEvaluator(service: model.engineService),
+                            soloConcept: concept
+                        )
+                    ) { kind in pendingDrill = kind }
+                }
+            } else {
+                unavailable
+            }
+        case let .drill(kind):
+            NavigationStack {
+                EndgameDrillScreen(
+                    model: EndgameDrillModel(
+                        kind: kind,
+                        opponent: EngineDrillOpponent(engine: model.engineService),
+                        recorder: trainModel.makeTrainingService()
+                    )
+                )
+            }
+        }
+    }
+
+
+    /// The cover's root when there is nothing to serve.
+    ///
+    /// It carries its own way out: this is a full-screen cover, which cannot be
+    /// swiped away, and the stage it replaces is the one that would have had
+    /// the close button.
+    private var unavailable: some View {
+        ContentUnavailableView {
+            Label("Training unavailable", systemImage: "square.grid.3x3")
+        } description: {
+            Text("The app could not open its databases.")
+        } actions: {
+            Button("Close") { trainingRoute = nil }
+                .buttonStyle(.secondaryAction)
+        }
     }
 }
 

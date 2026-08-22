@@ -974,7 +974,15 @@ struct PuzzleReasonTests {
             in: position("2k5/ppp2p1p/2r1qn2/3r2p1/1QN1p3/P3P2P/2P1NPP1/R3KR2 b - - 0 1"),
             continuation: ["b4c4", "d5d1", "e1d1", "e6c4"]
         )
-        #expect(clause == "if they take back, the rook goes to d1 with check and you win the queen")
+        // No material clause, and that is the correction rather than a loss.
+        // Black wins the knight and then the queen (+12) but gives up both
+        // rooks getting there (-10), so the line nets +2 — about the exchange,
+        // which is what this test's own doc comment says it is worth. "You win
+        // the queen" named the biggest piece captured anywhere in the line and
+        // subtracted nothing; a sweep of all 120,000 corpus puzzles found 3,104
+        // making that claim falsely. The mechanism is the part that was true and
+        // the part the reader asked for, so it stays.
+        #expect(clause == "if they take back, the rook goes to d1 with check")
     }
 
     @Test("Without the line, that same capture claims only what it can prove")
@@ -1512,7 +1520,7 @@ struct PuzzleExplanationUpgradeTests {
         #expect(
             model.stage.verdict?.message
                 == "Solved — the rook takes the knight: if they take back, "
-                    + "the rook goes to d1 with check and you win the queen."
+                    + "the rook goes to d1 with check."
         )
     }
 
@@ -1584,7 +1592,7 @@ struct PuzzleMissExplanationTests {
         _ = model.attemptMove(from: .c8, to: .b8)
         await model.waitForGrading()
 
-        let mechanism = "if they take back, the rook goes to d1 with check and you win the queen"
+        let mechanism = "if they take back, the rook goes to d1 with check"
         #expect(model.stage.verdict?.message.contains(mechanism) == true)
 
         await model.waitForExplanation()
@@ -2022,7 +2030,7 @@ struct OpeningVariationTests {
                 )
             }
 
-            let selection = try #require(ConceptScheduler.next(rating: 3000, states: states))
+            let selection = try #require(ConceptScheduler.next(rating: 3000, rung: 4, states: states))
             #expect(selection.concept.id == target.id)
             guard case let .line(_, moves, _) = selection.concept.exercise else {
                 Issue.record("\(target.id): expected a line exercise")
@@ -2063,11 +2071,11 @@ struct ConceptRoutingTests {
     func openingPressurePromotesTheFamily() throws {
         let states = exhaustedOpenings()
 
-        let calm = try #require(ConceptScheduler.next(rating: 1600, states: states))
+        let calm = try #require(ConceptScheduler.next(rating: 1600, rung: 3, states: states))
         #expect(calm.concept.family != .opening, "nothing here asks for an opening")
 
         let pressured = try #require(
-            ConceptScheduler.next(rating: 1600, states: states, openingMistakesPerGame: 1.2)
+            ConceptScheduler.next(rating: 1600, rung: 3, states: states, openingMistakesPerGame: 1.2)
         )
         #expect(pressured.concept.family == .opening)
     }
@@ -2076,7 +2084,7 @@ struct ConceptRoutingTests {
     func pressureBelowThresholdChangesNothing() throws {
         let states = exhaustedOpenings()
         let selection = try #require(
-            ConceptScheduler.next(rating: 1600, states: states, openingMistakesPerGame: 0.2)
+            ConceptScheduler.next(rating: 1600, rung: 3, states: states, openingMistakesPerGame: 0.2)
         )
         #expect(selection.concept.family != .opening)
     }
@@ -2094,7 +2102,7 @@ struct ConceptRoutingTests {
         }
 
         let selection = try #require(
-            ConceptScheduler.next(rating: 1600, states: states, focus: .endgameTechnique)
+            ConceptScheduler.next(rating: 1600, rung: 3, states: states, focus: .endgameTechnique)
         )
         #expect(selection.concept.family == .endgame)
     }
@@ -2104,9 +2112,18 @@ struct ConceptRoutingTests {
     /// answer to their leak.
     @Test("A habit no lesson teaches leaves the rotation alone")
     func habitWithoutAFamilyDoesNotSteerTheSlot() throws {
-        let plain = try #require(ConceptScheduler.next(rating: 1600, states: [:]))
+        // The ladder's own asks are taught already, so the rotation is what is
+        // deciding here — which is what this test is about. Left untaught they
+        // would win either call, and the comparison would pass for the wrong
+        // reason.
+        var states: [String: ConceptScheduler.State] = [:]
+        for id in Curriculum.requiredConcepts(throughRung: 3) {
+            states[id] = ConceptScheduler.State(id: id, isIntroduced: true)
+        }
+
+        let plain = try #require(ConceptScheduler.next(rating: 1600, rung: 3, states: states))
         let steered = try #require(
-            ConceptScheduler.next(rating: 1600, states: [:], focus: .blunderCheck)
+            ConceptScheduler.next(rating: 1600, rung: 3, states: states, focus: .blunderCheck)
         )
         #expect(plain.concept.id == steered.concept.id)
     }

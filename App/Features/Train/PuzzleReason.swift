@@ -175,7 +175,11 @@ enum PuzzleReason {
             // It can be taken back — which is precisely the objection the reader
             // is about to raise. Answer it with the line rather than writing a
             // sentence that pretends the recapture is not on the board.
-            if let mechanism = refutation(from: line, mover: mover) { return mechanism }
+            if let mechanism = refutation(
+                from: line,
+                mover: mover,
+                answerGain: value(of: captured.kind)
+            ) { return mechanism }
 
             // An even exchange is worth naming as one. Calling it a win was the
             // quieter half of the same untruth.
@@ -419,14 +423,34 @@ enum PuzzleReason {
     /// recapture *and* the solver wins something at least as big afterwards;
     /// every other shape returns nil, because a half-remembered mechanism is
     /// worse than a plain description of the move.
-    private static func refutation(from line: Line, mover: Piece) -> String? {
-        guard line.isRecapture,
-            let described = line.punishDescription,
-            let won = line.won,
-            value(of: won) >= value(of: mover.kind)
-        else { return nil }
+    private static func refutation(from line: Line, mover: Piece, answerGain: Int) -> String? {
+        guard line.isRecapture, let described = line.punishDescription else { return nil }
 
         let punish = line.punishGivesCheck ? described + " with check" : described
+
+        // The material half of this sentence is only allowed if the material
+        // survives the whole line.
+        //
+        // The old test was `value(of: won) >= value(of: mover.kind)`: the
+        // biggest thing the solver captures *anywhere*, measured against the
+        // piece that moved, with nothing subtracted for what the solver gave up
+        // getting there. On a sweep of all 120,000 corpus puzzles that claimed
+        // material the line does not win on 3,104 of them — "the rook takes the
+        // bishop: if they take back, the knight goes to f3 with check and you
+        // win the rook", on a line that nets a bishop. `outcome` has always
+        // applied the net test; this branch simply never did, and it is the
+        // branch that fires on every recapture puzzle.
+        //
+        // `answerGain + line.net` is the true net: the loop in `read` walks the
+        // entire continuation and counts both sides' captures, so nothing later
+        // in the line can quietly take the claim back.
+        let net = answerGain + line.net
+        guard let won = line.won, net >= value(of: won) else {
+            // The mechanism still answers the question the reader asked — "can
+            // they not just take it back?" — so it is kept. Only the material
+            // boast goes, because it is the part that was not true.
+            return "if they take back, \(punish)"
+        }
 
         // When the punishing move *is* the capture that wins the piece, naming
         // the piece again turns the sentence into a stutter — "the queen takes
@@ -660,10 +684,43 @@ enum PuzzleReason {
     /// What the move captures, if anything. Read before the move is played.
     private static func capturedPiece(playing uci: String, in position: Position) -> Piece? {
         guard let destination = PuzzleConcept.destination(ofUCI: uci) else { return nil }
-        guard let piece = position.piece(at: destination) else { return nil }
-        // Only an enemy piece is a capture; a friendly piece on the destination
-        // means the move is castling notated as king-takes-rook, which is not.
-        return piece.color == position.sideToMove ? nil : piece
+
+        if let piece = position.piece(at: destination) {
+            // Only an enemy piece is a capture; a friendly piece on the
+            // destination means the move is castling notated as
+            // king-takes-rook, which is not.
+            return piece.color == position.sideToMove ? nil : piece
+        }
+
+        // En passant: the pawn that comes off is not standing on the square the
+        // capturing pawn lands on, so the lookup above finds an empty square and
+        // reports no capture at all.
+        //
+        // That was wrong twice over. The material accounting silently lost the
+        // pawn — which is how "you win the knight" survived onto lines that net
+        // two — and the move description called it "their pawn goes to c6" when
+        // it had just taken something. A sweep of all 120,000 corpus puzzles
+        // found eleven of these; rare, but wrong in the one way this file is not
+        // allowed to be.
+        //
+        // Detected geometrically rather than from `Position.enPassant`, which is
+        // internal to ChessKit: a pawn that changes file onto an empty square
+        // has captured en passant, and the pawn it took is the one beside it, on
+        // the rank it started from.
+        guard let origin = PuzzleConcept.origin(ofUCI: uci),
+            let mover = position.piece(at: origin),
+            mover.kind == .pawn,
+            origin.file != destination.file
+        else { return nil }
+
+        // Built from notation because `Square(File, Rank)` is internal to
+        // ChessKit and this file lives in the app target.
+        let capturedSquare = Square(destination.file.rawValue + "\(origin.rank.value)")
+        guard let captured = position.piece(at: capturedSquare),
+            captured.kind == .pawn,
+            captured.color != mover.color
+        else { return nil }
+        return captured
     }
 
     /// Enemy pieces the moved piece attacks from its new square, worth more than

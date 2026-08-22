@@ -1132,6 +1132,13 @@ final class PuzzleSessionModel {
         let openingWindow = Self.openingPressureWindow.key
 
         let selection = await Task.detached(priority: .userInitiated) { () -> ConceptScheduler.Selection? in
+            // The rung, alongside the rating, because they gate different
+            // things: the rating says which ideas are worth offering yet, the
+            // rung which ones the ladder has already required. An unreadable
+            // settings row falls back to rung 1, which unlocks nothing the
+            // rating would not — the failure mode is the old behaviour rather
+            // than a concept served early.
+            let rung = max(1, (try? database.settings.current())?.currentRung ?? 1)
             let stored = (try? database.concepts.all()) ?? []
             let states = Dictionary(
                 stored.map {
@@ -1176,6 +1183,7 @@ final class PuzzleSessionModel {
 
             return ConceptScheduler.next(
                 rating: rating,
+                rung: rung,
                 states: states,
                 lastFamily: lastFamily,
                 focus: habit,

@@ -42,56 +42,46 @@ struct TodayStatHeader: View {
     /// labels around it grew, which reads as a rendering fault.
     @ScaledMetric(relativeTo: .largeTitle) private var ratingSize: CGFloat = 40
 
+    /// At the accessibility text sizes the header stops being a row.
+    ///
+    /// The rating scales with the user's text size on purpose — a fixed 40pt
+    /// figure surrounded by growing labels reads as a rendering fault. But at
+    /// AX3 the scaled number needs most of the screen's width on its own, and
+    /// sharing a row with two labelled glyphs left it nowhere to go: first it
+    /// wrapped between digits, rendering "1045" as four stacked digits, then
+    /// (once wrapping was forbidden) it truncated to "1…". Both are worse than
+    /// the layout simply changing shape. Above the threshold the glyphs move to
+    /// their own row underneath, which is the arrangement iOS itself falls back
+    /// to, and the rating keeps its full width.
+    @Environment(\.dynamicTypeSize) private var dynamicTypeSize
+
     var body: some View {
-        HStack(alignment: .center, spacing: 14) {
-            VStack(alignment: .leading, spacing: 0) {
-                HStack(alignment: .firstTextBaseline, spacing: 8) {
-                    // Verbatim, always: a rating is an identifier, not a
-                    // quantity, and the localised form prints "1,051".
-                    Text(verbatim: rating.map { "\($0)" } ?? "—")
-                        .font(.system(size: ratingSize, design: .rounded).weight(.heavy))
-                        .monospacedDigit()
-                        .foregroundStyle(Palette.accent.dynamic)
-
-                    if let ratingDelta, ratingDelta != 0 {
-                        RatingDelta(value: ratingDelta)
-                    }
+        if dynamicTypeSize.isAccessibilitySize {
+            VStack(alignment: .leading, spacing: 12) {
+                ratingBlock
+                HStack(spacing: 14) {
+                    Spacer(minLength: 0)
+                    gamesLink
+                    settingsLink
                 }
-
-                // Named for the app, matching the Profile chart's headline
-                // unit. The number under it is measured only against Rookly's
-                // own opponents — `Docs/humanizer-calibration.md` is explicit
-                // that self-play fixes the *spacing* between them and says
-                // nothing about the absolute offset, so this ladder can be
-                // uniformly a few hundred points away from a rated site and
-                // these games would look identical either way. A bare "RATING"
-                // beside a 40pt figure invites a club player to read it as the
-                // rating they already hold; one word stops that, and the climb
-                // strip below says the rest.
-                Text("ROOKLY RATING")
-                    .typeRole(.label, appliesForeground: false)
-                    .foregroundStyle(.secondary)
             }
+            .padding(.horizontal)
+            .padding(.top, 4)
+            .padding(.bottom, 10)
+            .background(Palette.surfaceGround.dynamic)
+        } else {
+            standardLayout
+        }
+    }
+
+    private var standardLayout: some View {
+        HStack(alignment: .center, spacing: 14) {
+            ratingBlock
 
             Spacer(minLength: 0)
 
-            NavigationLink {
-                GameLibraryScreen()
-            } label: {
-                // Labelled, because a clock-arrow glyph is a generic history
-                // icon and the game library is otherwise only findable by
-                // tapping things. The word matches the title of the screen it
-                // opens — a door and its room have to have one name.
-                HeaderGlyph(symbol: "clock.arrow.circlepath", label: "Games")
-            }
-            .accessibilityLabel("Games")
-
-            NavigationLink {
-                SettingsScreen()
-            } label: {
-                HeaderGlyph(symbol: "gearshape.fill", label: "Settings")
-            }
-            .accessibilityLabel("Settings")
+            gamesLink
+            settingsLink
         }
         .padding(.horizontal, 20)
         .padding(.top, 4)
@@ -99,6 +89,65 @@ struct TodayStatHeader: View {
         .frame(maxWidth: .infinity)
         .background(Palette.surfaceGround.dynamic)
         .accessibilityElement(children: .contain)
+    }
+
+    /// The rating and its unit, shared by both layouts.
+    private var ratingBlock: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            HStack(alignment: .firstTextBaseline, spacing: 8) {
+                // Verbatim, always: a rating is an identifier, not a quantity,
+                // and the localised form prints "1,051".
+                Text(verbatim: rating.map { "\($0)" } ?? "—")
+                    .font(.system(size: ratingSize, design: .rounded).weight(.heavy))
+                    .monospacedDigit()
+                    .foregroundStyle(Palette.accent.dynamic)
+                    // A number never wraps and never truncates. Both happened
+                    // here before the accessibility layout existed.
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.5)
+
+                if let ratingDelta, ratingDelta != 0 {
+                    RatingDelta(value: ratingDelta)
+                }
+            }
+
+            // Named for the app, matching the Profile chart's headline unit.
+            // The number under it is measured only against Rookly's own
+            // opponents — `Docs/humanizer-calibration.md` is explicit that
+            // self-play fixes the *spacing* between them and says nothing about
+            // the absolute offset, so this ladder can be uniformly a few hundred
+            // points away from a rated site and these games would look identical
+            // either way. A bare "RATING" beside a 40pt figure invites a club
+            // player to read it as the rating they already hold; one word stops
+            // that, and the climb strip below says the rest.
+            Text("ROOKLY RATING")
+                .typeRole(.label, appliesForeground: false)
+                .foregroundStyle(.secondary)
+                .lineLimit(2)
+                .minimumScaleFactor(0.8)
+        }
+    }
+
+    /// Labelled, because a clock-arrow glyph is a generic history icon and the
+    /// game library is otherwise only findable by tapping things. The word
+    /// matches the title of the screen it opens — a door and its room have to
+    /// have one name.
+    private var gamesLink: some View {
+        NavigationLink {
+            GameLibraryScreen()
+        } label: {
+            HeaderGlyph(symbol: "clock.arrow.circlepath", label: "Games")
+        }
+        .accessibilityLabel("Games")
+    }
+
+    private var settingsLink: some View {
+        NavigationLink {
+            SettingsScreen()
+        } label: {
+            HeaderGlyph(symbol: "gearshape.fill", label: "Settings")
+        }
+        .accessibilityLabel("Settings")
     }
 }
 
@@ -136,6 +185,11 @@ private struct HeaderGlyph: View {
                 .font(.system(size: 18, weight: .bold))
             Text(label)
                 .typeRole(.label, appliesForeground: false)
+                // "SETTINGS" hyphenated itself across two lines at the
+                // accessibility sizes. These are one-word labels under a glyph;
+                // shrinking beats breaking.
+                .lineLimit(1)
+                .minimumScaleFactor(0.6)
         }
         .foregroundStyle(DualColor(light: 0xA9A4B5, dark: 0x6B6280).dynamic)
         .frame(minWidth: 30)

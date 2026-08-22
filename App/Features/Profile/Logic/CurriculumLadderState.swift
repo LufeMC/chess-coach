@@ -32,7 +32,7 @@ struct LadderSkillPending: Sendable, Hashable {
     /// Where the observation comes from when playing will not produce one.
     let source: String?
 
-    /// `Needs 15 more puzzles rated 1200+` / `Not run yet — Train › Endgames`.
+    /// `Needs 15 more puzzles rated 1200+` / `Not run yet — a training set`.
     var note: String {
         if let source { return "Not run yet — \(source)" }
         return count == 1 ? "Needs 1 more \(nounSingular)" : "Needs \(count) more \(noun)"
@@ -137,10 +137,10 @@ struct LadderRungRow: Sendable, Hashable, Identifiable {
     /// A rung with nothing outstanding used to produce an empty list, which the
     /// section renders as no line at all — so the one state worth telling the
     /// user about, the one where they have earned the next rung, was the only
-    /// state that said nothing. Promotion is a tap on the Train tab and never a
+    /// state that said nothing. Promotion is a tap on Home and never a
     /// side effect of a recompute, so the line has to name where that tap is.
     var blockerMessages: [String] {
-        if isReadyToAdvance { return ["Ready for Rung \(id + 1) — take it on the Train tab"] }
+        if isReadyToAdvance { return ["Ready for Rung \(id + 1) — take it on Home"] }
         var messages: [String] = []
         let unmetRequired = blockers.filter {
             if case .requiredSkillUnmet = $0 { return true }

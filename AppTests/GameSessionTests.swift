@@ -184,6 +184,44 @@ struct SecondTryRetractionTests {
         #expect(session.userClockMs <= base + increment)
     }
 
+    /// The catch is the highest-signal event the app produces — the user
+    /// thought, committed, and was proved wrong while the position was still in
+    /// their head — and `retract` deletes the move from every list it was in.
+    /// Before this it left no trace anywhere, so a game where the coach caught
+    /// four blunders reviewed as clean, and playing *with* the coach yielded
+    /// less durable material than playing without it.
+    @Test("A retracted move survives on the move that replaced it")
+    func retractionIsRecordedOnItsReplacement() async throws {
+        let engine = ScriptedEngine()
+        engine.onSearch = blunderScript(blunder: "e2e4")
+        let session = makeSession(.sparring(userColor: .white, opponentRating: 1200), engine: engine)
+
+        await session.start()
+        _ = await session.attemptUserMove(from: .e2, to: .e4)
+        session.resumeAfterSecondTry()
+        _ = await session.attemptUserMove(from: .d2, to: .d4)
+
+        let kept = try #require(session.moves.first(where: { $0.byUser }))
+        #expect(kept.san == "d4", "the replacement is what stands")
+        #expect(kept.retractedUCI == "e2e4", "the move that was taken back")
+        #expect(kept.retractedRefutation == "e7e5", "the reply the coach showed")
+        #expect((kept.retractedDeltaEP ?? 0) > 0, "and what it would have cost")
+    }
+
+    @Test("A move nobody retracted carries no retraction")
+    func ordinaryMovesCarryNoRetraction() async throws {
+        let engine = ScriptedEngine()
+        engine.onSearch = blunderScript(blunder: "e2e4")
+        let session = makeSession(.sparring(userColor: .white, opponentRating: 1200), engine: engine)
+
+        await session.start()
+        _ = await session.attemptUserMove(from: .d2, to: .d4)
+
+        let kept = try #require(session.moves.first(where: { $0.byUser }))
+        #expect(kept.retractedUCI == nil)
+        #expect(kept.retractedDeltaEP == nil)
+    }
+
     @Test("Keeping the original move records it exactly once")
     func keepingTheOriginalRecordsItOnce() async throws {
         let engine = ScriptedEngine()

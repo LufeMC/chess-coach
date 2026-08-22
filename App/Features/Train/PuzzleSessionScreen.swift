@@ -112,7 +112,7 @@ struct PuzzleSessionScreen: View {
     }
 
     private var nextStep: SessionSummaryView.NextStep {
-        guard let kind = model.pendingDrill else { return .backToTrain }
+        guard let kind = model.pendingDrill else { return .done }
         let drills = EndgameDrill.drills(kind: kind)
         return .drill(
             title: DrillFamilyPresentation.all.first { $0.kind == kind }?.title ?? "endgame",
@@ -395,7 +395,7 @@ struct PuzzleSessionScreen: View {
         } description: {
             Text(message)
         } actions: {
-            Button("Back to Train") { dismiss() }
+            Button("Done") { dismiss() }
                 .buttonStyle(.secondaryAction)
         }
     }

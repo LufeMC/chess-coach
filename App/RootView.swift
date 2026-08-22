@@ -184,10 +184,6 @@ private struct PhoneRootView: View {
                 NavigationStack { PlayScreen() }
                     .toolbar(.hidden, for: .tabBar)
             }
-            Tab("Train", systemImage: "dumbbell.fill", value: AppModel.Tab.train) {
-                NavigationStack { TrainHomeScreen() }
-                    .toolbar(.hidden, for: .tabBar)
-            }
             Tab("Profile", systemImage: "person.fill", value: AppModel.Tab.profile) {
                 NavigationStack { ProfileView() }
                     .toolbar(.hidden, for: .tabBar)
@@ -208,9 +204,13 @@ private struct PhoneRootView: View {
             ReviewScreen(gameID: gameID, focusMomentID: momentID)
         case .settings:
             SettingsScreen()
+        case .training:
+            TrainingListScreen()
         case .play, .train, .profile:
-            // Unreachable: these change the tab rather than pushing. Rendering
-            // nothing is better than a crash if a future deep link says otherwise.
+            // Not pushes. `.play` and `.profile` change the tab; `.train` is a
+            // request Today consumes to present the set as a cover. Rendering
+            // nothing is better than a crash if a future deep link says
+            // otherwise.
             EmptyView()
         }
     }
@@ -225,7 +225,7 @@ private struct MacRootView: View {
     enum SidebarItem: String, CaseIterable, Identifiable {
         case today = "Today"
         case games = "Games"
-        case train = "Train"
+        case training = "Training"
         case profile = "Profile"
         case settings = "Settings"
 
@@ -235,7 +235,7 @@ private struct MacRootView: View {
             switch self {
             case .today: "target"
             case .games: "list.bullet.rectangle"
-            case .train: "square.grid.3x3"
+            case .training: "books.vertical"
             case .profile: "chart.line.uptrend.xyaxis"
             case .settings: "gearshape"
             }
@@ -253,7 +253,7 @@ private struct MacRootView: View {
             switch selection {
             case .today, nil: TodayScreen()
             case .games: GameLibraryScreen()
-            case .train: TrainHomeScreen()
+            case .training: TrainingListScreen()
             case .profile: ProfileView()
             case .settings: SettingsScreen()
             }

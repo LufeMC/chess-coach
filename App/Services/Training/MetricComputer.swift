@@ -427,10 +427,14 @@ enum MetricComputer {
         var epByPly: [Int: Double] = [:]
         var bestByPly: [Int: UCIScore] = [:]
         var secondByPly: [Int: UCIScore] = [:]
+        // The engine's own line for each ply, kept because `Criticality` reads
+        // it. See the call site below for what happened without it.
+        var bestLineByPly: [Int: [String]] = [:]
         for eval in analysed.evals {
             guard let best = score(cp: eval.pv1Cp, mate: eval.pv1Mate) else { continue }
             bestByPly[eval.ply] = best
             epByPly[eval.ply] = EvalMath.expectedPoints(score: best)
+            bestLineByPly[eval.ply] = eval.pv1.split(separator: " ").map(String.init)
             if let second = score(cp: eval.pv2Cp, mate: eval.pv2Mate) {
                 secondByPly[eval.ply] = second
             }
@@ -477,10 +481,24 @@ enum MetricComputer {
 
                 // Criticality, using the same evaluator the analysis pass uses
                 // so the two never disagree about what a key moment was.
+                //
+                // The line handed over is the *engine's*, read back from the
+                // stored `pv1`. It used to be `pv: [move.uci]` — the move the
+                // user actually played — which is a different question
+                // entirely. `Criticality` reads the principal variation to spot
+                // the shapes that make a big evaluation gap meaningless: a free
+                // capture, a forced recapture. Given the user's move instead, it
+                // judged those against whatever they happened to do, so a
+                // position was called critical or not for reasons unconnected to
+                // the position. `criticalMomentHitRate` is a required rung-3
+                // criterion counted from this flag, and `AnalysisPipeline` makes
+                // the same call correctly — so the two disagreed about the same
+                // game, which is the one thing the comment above promises they
+                // never do.
                 var isCritical = false
                 if let best = bestByPly[ply] {
                     let result = Criticality.evaluate(
-                        best: UCIInfo(score: best, pv: [move.uci]),
+                        best: UCIInfo(score: best, pv: bestLineByPly[ply] ?? []),
                         secondBest: secondByPly[ply].map { UCIInfo(multipv: 2, score: $0) },
                         board: board,
                         lastCaptureSquare: lastCaptureSquare

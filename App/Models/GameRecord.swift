@@ -27,6 +27,12 @@ struct FinishedGameRecord: Sendable {
         /// the coach rather than about them. `GameMovePromptLog` drops those
         /// rows from the hit rate instead of counting them as misses.
         var guidedPromptHit: Bool?
+        /// The move a second-try catch took back before this one was played,
+        /// with the refutation the coach showed and what it would have cost.
+        /// See the `v9.secondTryCatch` migration for why it is kept.
+        var retractedUCI: String?
+        var retractedRefutation: String?
+        var retractedDeltaEP: Double?
     }
 
     var id: UUID
@@ -138,7 +144,10 @@ extension FinishedGameRecord {
                 winPctAfter: nil,
                 thinkTimeMs: move.thinkTimeMs,
                 guidedPromptHabit: move.guidedPromptHabit,
-                guidedPromptHit: move.guidedPromptHit
+                guidedPromptHit: move.guidedPromptHit,
+                retractedUCI: move.retractedUCI,
+                retractedRefutation: move.retractedRefutation,
+                retractedDeltaEP: move.retractedDeltaEP
             )
         }
     }

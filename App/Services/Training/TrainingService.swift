@@ -672,17 +672,42 @@ extension TrainingService {
         // Round-robin by fewest attempts, so the scarcest theme is served
         // first, and only above the floor the gate counts at — a 900-rated fork
         // does not move the number.
+        // How far above the curriculum's theme floor the reserved slot may
+        // reach when the user's own serving band does not get there. Narrow on
+        // purpose: the slot has to be allowed above the band, but only just — a
+        // puzzle far above the user is one they fail without learning anything,
+        // and the gate counts attempts, not miracles.
+        let gatedThemeReach = 100
         var gated: [Puzzle] = []
         let gateWanted = freshSlots - focusThemed.count
-        // Only once the serving band actually reaches the floor. Below that the
-        // gate is out of reach anyway, and reserving a slot for a puzzle two
-        // hundred points above the user is a worse trade than waiting.
-        if gateWanted > 0, band.upperBound >= tuning.curriculum.themeRatingFloor,
+        // The reserved slot fires whatever the band says, and that is the whole
+        // point of reserving it.
+        //
+        // It used to be guarded on `band.upperBound >= themeRatingFloor`, on the
+        // reasoning that below the floor "the gate is out of reach anyway". The
+        // gate is not out of reach — it is *only* reachable through this slot,
+        // and the guard was what put it out of reach. `r2.themes` is a REQUIRED
+        // rung-2 skill needing 15 attempts per theme on puzzles rated
+        // `themeRatingFloor`+ , and every other source of fresh puzzles draws
+        // from `puzzleRating ± freshServingBand`. So a user placed on rung 2
+        // with a puzzle rating below `floor - band` had no path to a single
+        // countable attempt: the five criteria sat unmeasured forever, unmeasured
+        // counts as unmet, and **rung 2 could not be passed at all**. Calibration
+        // can place exactly that user, because the rung comes from the combined
+        // playing-scale estimate and the serving band comes from the Glicko
+        // puzzle rating — two different scales, neither aware of the other.
+        //
+        // Reaching above the band is the correct trade rather than a concession:
+        // one puzzle in a set of ten, on a theme the curriculum has explicitly
+        // asked the user to demonstrate. The alternative on offer was a rung
+        // nobody could leave.
+        let gateCeiling = max(band.upperBound, tuning.curriculum.themeRatingFloor + gatedThemeReach)
+        if gateWanted > 0,
             let deficient = Self.deficientGatedTheme(metrics: metrics, tuning: tuning.curriculum),
             let puzzleTheme = TrainingVocabulary.puzzleTheme(deficient)
         {
             gated = try corpus.puzzles(
-                ratingRange: tuning.curriculum.themeRatingFloor...band.upperBound,
+                ratingRange: tuning.curriculum.themeRatingFloor...gateCeiling,
                 themes: ThemeMask([puzzleTheme]),
                 limit: 1,
                 excluding: seenPuzzleIDs
@@ -960,10 +985,36 @@ extension TrainingService {
         if case .fresh = item.kind {
             let floor = tuning.curriculum.themeRatingFloor
             if !item.isCalculation, item.presented.item.rating >= floor {
-                let theme = item.presented.item.primaryTheme
-                try metrics.increment(TrainingMetricKeys.themeAttempts(theme, ratingFloor: floor), at: context.now)
-                if context.solvedUnaided {
-                    try metrics.increment(TrainingMetricKeys.themeSolves(theme, ratingFloor: floor), at: context.now)
+                // Credit every gated theme the puzzle genuinely carries, not the
+                // single theme `primaryTheme` elects.
+                //
+                // `primaryTheme` picks one label off a ranked list, for naming a
+                // puzzle in copy — one puzzle, one noun. The gate is a different
+                // question: it asks how often the user solves positions
+                // *containing* a fork, a pin, a skewer, a discovered attack, a
+                // back-rank mate. A puzzle honestly carries several of those at
+                // once, and Lichess tags them that way.
+                //
+                // Crediting only the elected theme made the scarcest gates
+                // starve. The reserved slot would go and fetch a backRankMate
+                // puzzle precisely because that counter was lowest, and then the
+                // attempt would be credited to whatever outranked backRankMate
+                // in the naming order — so the counter it was fetched to feed
+                // did not move, and the next set fetched another one. Round and
+                // round, at roughly 2.5x the intended cost, on a gate that is
+                // required to leave rung 2.
+                let carried = tuning.curriculum.rung2Themes.filter { gatedTheme in
+                    guard let puzzleTheme = TrainingVocabulary.puzzleTheme(gatedTheme) else { return false }
+                    return item.presented.item.themes.contains(puzzleTheme)
+                }
+                // A puzzle carrying none of them still counts for the theme it is
+                // named by, which is what the pre-gate behaviour was for.
+                let credited = carried.isEmpty ? [item.presented.item.primaryTheme] : carried
+                for theme in credited {
+                    try metrics.increment(TrainingMetricKeys.themeAttempts(theme, ratingFloor: floor), at: context.now)
+                    if context.solvedUnaided {
+                        try metrics.increment(TrainingMetricKeys.themeSolves(theme, ratingFloor: floor), at: context.now)
+                    }
                 }
             }
             // The serve record is kept for every fresh item, calculation

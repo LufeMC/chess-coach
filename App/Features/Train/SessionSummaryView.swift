@@ -34,13 +34,13 @@ struct SessionSummaryView: View {
     /// twenty-move drill to the Train screen, which opened it as a second
     /// full-screen board the user had not been told about.
     enum NextStep: Equatable {
-        case backToTrain
+        case done
         case drill(title: String, positions: Int, moveBudget: Int)
     }
 
     let progress: SessionProgress
     let missed: [MissedItem]
-    var nextStep: NextStep = .backToTrain
+    var nextStep: NextStep = .done
     /// Whether this was the calculation set. Only ``ratingNote`` cares, and it
     /// cares a great deal: the reason a daily set's rating can end flat is not
     /// the reason a calculation set's can.
@@ -114,8 +114,8 @@ struct SessionSummaryView: View {
 
     private var continueTitle: String {
         switch nextStep {
-        case .backToTrain:
-            return "Back to Train"
+        case .done:
+            return "Done"
         case let .drill(title, positions, budget):
             let count = positions == 1 ? "1 position" : "\(positions) positions"
             return "Play the \(title) drill · \(count), up to \(budget) moves"

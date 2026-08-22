@@ -563,6 +563,75 @@ public enum Curriculum {
     }
 }
 
+// MARK: - What the ladder asks to be taught
+
+extension Curriculum {
+
+    /// The catalogue ids of the concepts a skill's evidence can only come from.
+    ///
+    /// ## Why any of this is needed
+    ///
+    /// Most gates measure something the user was going to do anyway: `r3.opening`
+    /// moves whenever they open a game, `r2.missedTactics` whenever they miss a
+    /// tactic. Three do not. A drill streak is written by one screen, that screen
+    /// is reached only as a concept's exercise, and the concept catalogue serves
+    /// a concept only once the user's *puzzle* rating has passed its `fromRating`
+    /// — a number with no relationship to which rung they are standing on, since
+    /// the rung is a counter advanced by skills and seeded from a fused
+    /// playing-scale estimate. So the ladder could, and did, require Lucena of a
+    /// rung-3 user the catalogue would not show Lucena to until 1400: the row was
+    /// unpassable, and the weekly micro-goal built on it was arithmetic nobody
+    /// could move.
+    ///
+    /// Naming the teacher here is what closes it. `fromRating` stays what it was
+    /// written to be — the app's guess at when an idea starts being worth
+    /// offering, for content nobody has asked for yet — and an explicit
+    /// requirement outranks a guess.
+    ///
+    /// ## What belongs in it
+    ///
+    /// Only skills whose metric has **no other producer**. "The opening concepts
+    /// teach `r3.opening`" is true as pedagogy and wrong here twice over: that
+    /// gate is measured from the user's own games, so it is reachable without
+    /// them, and listing them would unlock the whole opening tier for anybody who
+    /// reached rung 3 — which is the spoiler the tiers exist to prevent.
+    ///
+    /// The ids are plain strings because the catalogue lives in the app target,
+    /// above this package. `ConceptCurriculumReachabilityTests` checks both
+    /// directions: that every id here resolves to a real concept, and that every
+    /// drill-backed criterion on the ladder is named here by the skill that gates
+    /// on it.
+    public static let conceptTeachers: [Skill.ID: [String]] = [
+        "r1.basicMates": ["endgame.kqk", "endgame.krk"],
+        "r2.kpk": ["endgame.kpk"],
+        "r3.rookEndings": ["endgame.lucena", "endgame.philidor"]
+    ]
+
+    /// Every concept the ladder has already asked this user to demonstrate.
+    ///
+    /// Through the rung rather than at it: calibration can place someone on rung
+    /// 3 who has never been asked for the basic mates, and rung 1's rows are
+    /// still on their ladder saying so. Rungs *above* are left alone — the app
+    /// has not asked for them yet, so their rating floors still hold, which is
+    /// the whole of the anti-spoiler property.
+    ///
+    /// Derived from the ladder rather than from ``conceptTeachers`` directly, so
+    /// a skill dropped from the curriculum stops unlocking its teacher without
+    /// anybody having to remember this table exists.
+    public static func requiredConcepts(
+        throughRung rung: Int,
+        tuning: DomainTuning.Curriculum = DomainTuning.default.curriculum
+    ) -> Set<String> {
+        var ids: Set<String> = []
+        for laddered in ladder(tuning: tuning) where laddered.id <= rung {
+            for skill in laddered.skills {
+                ids.formUnion(conceptTeachers[skill.id] ?? [])
+            }
+        }
+        return ids
+    }
+}
+
 // MARK: - Composite helpers
 
 extension Curriculum {

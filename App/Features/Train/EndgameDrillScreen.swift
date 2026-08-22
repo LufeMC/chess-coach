@@ -706,7 +706,7 @@ struct EndgameDrillScreen: View {
                     .typeRole(.headline)
                     .multilineTextAlignment(.center)
                     .fixedSize(horizontal: false, vertical: true)
-                Button("Back to Train") { dismiss() }
+                Button("Done") { dismiss() }
                     .buttonStyle(.primaryAction)
             }
             .frame(minHeight: ResultBanner.height)

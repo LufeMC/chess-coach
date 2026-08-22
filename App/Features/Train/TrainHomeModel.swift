@@ -371,15 +371,20 @@ final class TrainHomeModel {
         /// the row read `0 of 3` at a user who had passed every run. The streak
         /// is what the curriculum gates on and the only honest number here.
         var drillMastery: DrillMastery?
-        /// Whether the rating has reached this concept yet.
+        /// Whether this concept can turn up in a set yet.
         ///
-        /// `ConceptScheduler` only ever picks from `TrainingConcept.available(atRating:)`,
-        /// so an untaught concept above the current rating is not "next" in any
-        /// sense — it is not in the running at all. Counting the two together
-        /// produced the screen's most misleading sentence: at 1051 the list said
-        /// thirteen were coming one per set, which reads as thirteen sessions of
-        /// work, when eleven of the thirteen were waiting on rating and only two
-        /// could actually arrive.
+        /// `ConceptScheduler` only ever picks from
+        /// `TrainingConcept.available(atRating:rung:)`, so an untaught concept
+        /// the rating has not reached is not "next" in any sense — it is not in
+        /// the running at all. Counting the two together produced the screen's
+        /// most misleading sentence: at 1051 the list said thirteen were coming
+        /// one per set, which reads as thirteen sessions of work, when eleven of
+        /// the thirteen were waiting on rating and only two could actually
+        /// arrive.
+        ///
+        /// Asked the same way the scheduler asks it, rung included, so a rook
+        /// ending the ladder is gating on does not appear under "waiting on
+        /// rating" in the very sets that are about to teach it.
         var isUnlocked: Bool = true
 
         var id: String { concept.id }
@@ -400,10 +405,15 @@ final class TrainHomeModel {
     /// every time a new tier opened.
     private func loadCovered(from database: AppDatabase) async {
         let rating = Int(puzzleRating.rounded())
+        // Restored from settings a line earlier in `prepare()`. Both numbers are
+        // needed: the rating decides what is worth offering, the rung what the
+        // ladder has already required, and the two are free to disagree.
+        let rung = self.rung
         let loaded = await Task.detached(priority: .utility) { () -> ([CoveredConcept], ConceptScheduler.Selection?) in
             let all = (try? database.concepts.all()) ?? []
             let stored = Dictionary(all.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
             let required = DomainTuning.default.curriculum.drillCleanStreakRequired
+            let askedFor = Curriculum.requiredConcepts(throughRung: rung)
             let rows = TrainingConcept.catalogue.map { concept -> CoveredConcept in
                 let progress = stored[concept.id]
                 var drillMastery: DrillMastery?
@@ -420,7 +430,7 @@ final class TrainHomeModel {
                     timesSeen: progress?.timesSeen ?? 0,
                     timesCorrect: progress?.timesCorrect ?? 0,
                     drillMastery: drillMastery,
-                    isUnlocked: concept.fromRating <= rating
+                    isUnlocked: concept.isAvailable(atRating: rating, curriculumRequires: askedFor)
                 )
             }
 
@@ -451,7 +461,10 @@ final class TrainHomeModel {
                 }
                 .max { $0.0 < $1.0 }?
                 .1
-            return (rows, ConceptScheduler.next(rating: rating, states: states, lastFamily: lastFamily))
+            return (
+                rows,
+                ConceptScheduler.next(rating: rating, rung: rung, states: states, lastFamily: lastFamily)
+            )
         }.value
 
         withAnimation(Motion.standard) {

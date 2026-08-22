@@ -356,15 +356,21 @@ extension MetricKey {
 extension MetricPresentation {
 
     /// A drill streak: a whole number of clean runs, produced only by running
-    /// the drill, so the row can send the user somewhere instead of asking for
+    /// the drill, so the row can say where it comes from instead of asking for
     /// a game that will never move it.
+    ///
+    /// It names the *occasion* rather than a screen. There is no Endgames shelf
+    /// to send anyone to — the string used to read "Train › Endgames", which was
+    /// a destination the app had already removed — and a drill now arrives as
+    /// the exercise of a training set's concept, at the rung that gates on it.
+    /// Naming a tab that does not exist is worse than naming nothing.
     static func drill(name: String) -> MetricPresentation {
         MetricPresentation(
             name: name,
             style: .count,
             sampleNoun: "clean runs",
             sampleNounSingular: "clean run",
-            sampleSource: "Train › Endgames"
+            sampleSource: "a training set"
         )
     }
 }

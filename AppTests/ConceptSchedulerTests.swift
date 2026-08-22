@@ -21,21 +21,25 @@ struct ConceptSchedulerTests {
 
     @Test("A concept never seen is taught before it is tested")
     func teachesBeforeTesting() throws {
-        let selection = try #require(ConceptScheduler.next(rating: 1000, states: [:]))
+        let selection = try #require(ConceptScheduler.next(rating: 1000, rung: 1, states: [:]))
         #expect(selection.teachFirst)
     }
 
     /// The whole point of the rating tier: Philidor taught at 900 is Philidor
     /// forgotten by the time a rook ending ever appears.
+    ///
+    /// Rung 1 throughout, which is the case where the tier is the only thing
+    /// deciding. The rung that *asks* for Philidor overrides it —
+    /// `ConceptCurriculumReachabilityTests` covers that side.
     @Test("Concepts above the user's rating are not served yet")
     func respectsRatingTiers() {
-        let early = TrainingConcept.available(atRating: 900).map(\.id)
+        let early = TrainingConcept.available(atRating: 900, rung: 1).map(\.id)
         #expect(early.contains("opening.london"))
         #expect(early.contains("endgame.kqk"))
         #expect(early.contains("endgame.philidor") == false)
         #expect(early.contains("positional.outpost") == false)
 
-        let later = TrainingConcept.available(atRating: 1500).map(\.id)
+        let later = TrainingConcept.available(atRating: 1500, rung: 1).map(\.id)
         #expect(later.contains("endgame.philidor"))
         #expect(later.contains("positional.outpost"))
     }
@@ -43,7 +47,7 @@ struct ConceptSchedulerTests {
     @Test("The family rotates rather than repeating yesterday's subject")
     func rotatesFamilies() throws {
         let selection = try #require(
-            ConceptScheduler.next(rating: 1500, states: [:], lastFamily: .opening)
+            ConceptScheduler.next(rating: 1500, rung: 1, states: [:], lastFamily: .opening)
         )
         #expect(selection.concept.family != .opening)
     }
@@ -54,19 +58,19 @@ struct ConceptSchedulerTests {
     func rotationNeverStarvesTheSlot() throws {
         // At rating 0 only openings and the three basic endgames exist; ask for
         // something that is not an endgame or an opening and it must still pick.
-        let openingsOnly = TrainingConcept.available(atRating: 0)
+        let openingsOnly = TrainingConcept.available(atRating: 0, rung: 1)
             .filter { $0.family == .opening }
         #expect(openingsOnly.isEmpty == false)
 
         let selection = try #require(
-            ConceptScheduler.next(rating: 0, states: [:], lastFamily: .positional)
+            ConceptScheduler.next(rating: 0, rung: 1, states: [:], lastFamily: .positional)
         )
         #expect(selection.concept.fromRating <= 0)
     }
 
     @Test("Once everything is taught, the least practised comes back")
     func returnsToTheLeastPractised() throws {
-        let all = TrainingConcept.available(atRating: 1500)
+        let all = TrainingConcept.available(atRating: 1500, rung: 1)
         var seen = states(
             all.map {
                 ($0.id, ConceptScheduler.State(id: $0.id, isIntroduced: true, timesSeen: 5,
@@ -79,7 +83,7 @@ struct ConceptSchedulerTests {
             lastSeenAt: Date(timeIntervalSince1970: 20)
         )
 
-        let selection = try #require(ConceptScheduler.next(rating: 1500, states: seen))
+        let selection = try #require(ConceptScheduler.next(rating: 1500, rung: 1, states: seen))
         #expect(selection.concept.id == neglected.id)
         #expect(selection.teachFirst == false, "it has been taught; this is an exercise")
     }
@@ -88,7 +92,7 @@ struct ConceptSchedulerTests {
     /// last week, not less.
     @Test("Taught but never practised sorts before recently practised")
     func neverPractisedIsMostOverdue() throws {
-        let all = TrainingConcept.available(atRating: 1500)
+        let all = TrainingConcept.available(atRating: 1500, rung: 1)
         var seen = states(
             all.map {
                 ($0.id, ConceptScheduler.State(id: $0.id, isIntroduced: true, timesSeen: 3,
@@ -98,7 +102,7 @@ struct ConceptSchedulerTests {
         let untouched = try #require(all.first { $0.family == .endgame })
         seen[untouched.id] = ConceptScheduler.State(id: untouched.id, isIntroduced: true, timesSeen: 0)
 
-        let selection = try #require(ConceptScheduler.next(rating: 1500, states: seen))
+        let selection = try #require(ConceptScheduler.next(rating: 1500, rung: 1, states: seen))
         #expect(selection.concept.id == untouched.id)
     }
 

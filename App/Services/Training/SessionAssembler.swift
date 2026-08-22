@@ -33,6 +33,16 @@ struct SolvableItem: Sendable, Hashable {
     var opponentMovesFirst: Bool
     var rating: Int
     var primaryTheme: ThemeTag
+    /// Every theme the corpus row carries.
+    ///
+    /// `primaryTheme` elects one label for naming the puzzle in copy — one
+    /// puzzle, one noun. The curriculum's theme gates ask a different question:
+    /// how often the user solves a position *containing* a fork, a pin, a
+    /// skewer. A puzzle honestly carries several at once and Lichess tags them
+    /// that way, so crediting an attempt needs the mask, not the elected name.
+    /// Empty for a position mined from the user's own game, which has no corpus
+    /// tags at all.
+    var themes: ThemeMask = .empty
 
     init(
         backing: Backing,
@@ -40,7 +50,8 @@ struct SolvableItem: Sendable, Hashable {
         line: [String],
         opponentMovesFirst: Bool,
         rating: Int,
-        primaryTheme: ThemeTag
+        primaryTheme: ThemeTag,
+        themes: ThemeMask = .empty
     ) {
         self.backing = backing
         self.fen = fen
@@ -48,6 +59,7 @@ struct SolvableItem: Sendable, Hashable {
         self.opponentMovesFirst = opponentMovesFirst
         self.rating = rating
         self.primaryTheme = primaryTheme
+        self.themes = themes
     }
 
     init(puzzle: Puzzle) {
@@ -57,7 +69,8 @@ struct SolvableItem: Sendable, Hashable {
             line: puzzle.moveList,
             opponentMovesFirst: true,
             rating: puzzle.rating,
-            primaryTheme: TrainingVocabulary.primaryTheme(of: puzzle)
+            primaryTheme: TrainingVocabulary.primaryTheme(of: puzzle),
+            themes: puzzle.themes
         )
     }
 

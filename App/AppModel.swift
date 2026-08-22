@@ -46,7 +46,12 @@ final class AppModel {
         case play
         case review(gameID: UUID)
         case moment(gameID: UUID, momentID: UUID)
+        /// Start today's set. Named as a destination because that is how the
+        /// callers think of it; since the merge it opens a cover over Today
+        /// rather than selecting a tab.
         case train
+        /// The training catalogue, pushed from Practice more.
+        case training
         case profile
         case settings
     }
@@ -65,10 +70,17 @@ final class AppModel {
     /// of a position the user is meant to be concentrating on.
     var isPlayingGame = false
 
+    /// The tab bar's three destinations.
+    ///
+    /// Training used to be a fourth. It was removed rather than restyled: Home
+    /// and Train were two front doors to one daily loop — Home's "Puzzles 1 of
+    /// 10" *was* Train's "Today's set" — and the split was already producing
+    /// disagreeing numbers, because Home could not see the length chosen on
+    /// Train. The set is now presented from Today, and the catalogue behind it
+    /// is a push from Practice more.
     enum Tab: Hashable {
         case today
         case play
-        case train
         case profile
     }
 
@@ -344,8 +356,15 @@ final class AppModel {
             selectedTab = .play
             pendingPlayRequest = true
         case .train:
-            selectedTab = .train
+            // Today owns the set now, so this selects Home and leaves a request
+            // for `TodayScreen` to consume. It is still phrased as a route
+            // because the callers — Profile's leak table, Review's Done button —
+            // should go on naming where they want to go, not how to get there.
+            selectedTab = .today
             pendingTrainRequest = true
+        case .training:
+            selectedTab = .today
+            todayPath = [route]
         case .profile:
             selectedTab = .profile
         case .review, .moment:
@@ -405,7 +424,8 @@ final class AppModel {
     /// Opens Train with its next session aimed at one habit.
     func navigate(toTrain habit: Habit?) {
         pendingTrainingHabit = habit
-        selectedTab = .train
+        selectedTab = .today
+        pendingTrainRequest = true
     }
 
     /// Takes the requested habit, so coming back to Train later gets the week's

@@ -157,3 +157,34 @@ extension CauseTag {
         }
     }
 }
+
+extension Habit {
+
+    /// Whether any `CauseTag` can nominate this habit.
+    ///
+    /// `CauseTag.habit(rung:)` maps sixteen detector tags onto six habits, so
+    /// three of the nine are unreachable from a leak: nothing detects "you
+    /// failed to convert a won game", "you managed the clock badly", or a king
+    /// exposure that is about king safety rather than a missed threat
+    /// (`kingExposure` is deliberately routed to `scanThreats`). A rung whose
+    /// required skill names one of the three could never make it the week's
+    /// focus — see `FocusSelector.unaskedRungHabits`, which is what stops that
+    /// being a dead end.
+    ///
+    /// Derived rather than hardcoded so it cannot drift: it asks the map, over
+    /// `CauseTag.known`, which is the roster the tagger actually emits.
+    public static func hasCauseTag(_ habit: Habit) -> Bool {
+        causeBackedHabits.contains(habit)
+    }
+
+    /// Every habit some cause tag maps to, at any rung.
+    private static let causeBackedHabits: Set<Habit> = {
+        var out: Set<Habit> = []
+        for tag in CauseTag.known {
+            for rung in 1...4 {
+                if let habit = tag.habit(rung: rung) { out.insert(habit) }
+            }
+        }
+        return out
+    }()
+}

@@ -211,6 +211,19 @@ final class GameSession {
         var guidedPromptHabit: String?
         /// Whether the move counted as answering that prompt.
         var guidedPromptHit: Bool?
+        /// The move a second-try catch took back before this one was played.
+        ///
+        /// The retracted move is not in `moves` — leaving it there would put a
+        /// move the user never made into the PGN, the ply numbering and the
+        /// history the opponent searches — so it rides on the move that
+        /// replaced it. Without this the app's highest-signal training event
+        /// left no trace at all: a game where the coach caught four blunders
+        /// reviewed as clean.
+        var retractedUCI: String?
+        /// The reply that refuted it, which is what the coach showed.
+        var retractedRefutation: String?
+        /// What it would have cost, in expected points, per the live probe.
+        var retractedDeltaEP: Double?
     }
 
     // MARK: - Dependencies
@@ -237,6 +250,8 @@ final class GameSession {
     /// Set while a guided prompt has been answered but the move it was asked
     /// about has not been played yet.
     private var pendingGuidedPrompt: PendingGuidedPrompt?
+    /// The second-try catch whose replacement move has not been played yet.
+    private var pendingRetraction: PendingRetraction?
     /// What the engine saw at the position the live guided prompt paused on.
     private var guidedProbe: GuidedProbe?
     private var guidedPausesUsed = 0
@@ -694,7 +709,8 @@ final class GameSession {
                 lastMove: lastMoveBefore,
                 clockBeforeMove: clockBeforeMove,
                 thinkTimeMs: thinkTimeMs,
-                guided: guided
+                guided: guided,
+                blunder: blunder
             )
             phase = .secondTry(blunder)
             moveStartedAt = Date()
@@ -744,14 +760,32 @@ final class GameSession {
     /// not completed; the thinking, on the other hand, genuinely happened, and
     /// refunding it would make blundering the cheapest way to buy time — which
     /// now costs rating, because sparring feeds the ladder.
+    /// A second-try catch waiting for the move that replaces it.
+    struct PendingRetraction {
+        var uci: String
+        var refutation: String?
+        var deltaEP: Double
+    }
+
     private func retract(
         to boardBefore: Board,
         lastMove lastMoveBefore: (from: Square, to: Square)?,
         clockBeforeMove: Int,
         thinkTimeMs: Int,
-        guided: GuidedPromptOutcome?
+        guided: GuidedPromptOutcome?,
+        blunder: SecondTryState? = nil
     ) {
         board = boardBefore
+        // Captured before the move leaves the list, and attached to whichever
+        // move ends up standing in its place. This is the only record that the
+        // catch happened: `moves.removeLast()` is otherwise total.
+        if let blunder {
+            pendingRetraction = PendingRetraction(
+                uci: blunder.retractedMove,
+                refutation: blunder.refutationArrow.map { $0.from.notation + $0.to.notation },
+                deltaEP: blunder.deltaEP
+            )
+        }
         moves.removeLast()
         lastMove = lastMoveBefore
         userClockMs = max(0, clockBeforeMove - thinkTimeMs)
@@ -1704,6 +1738,11 @@ final class GameSession {
         clockAfterMs: Int,
         guided: GuidedPromptOutcome? = nil
     ) {
+        // A retraction is claimed by the next move the user plays, which is the
+        // move that replaced it, and cleared so it cannot attach twice.
+        let retraction = byUser ? pendingRetraction : nil
+        if byUser { pendingRetraction = nil }
+
         moves.append(
             PlayedMove(
                 ply: moves.count + 1,
@@ -1713,7 +1752,10 @@ final class GameSession {
                 thinkTimeMs: thinkTimeMs,
                 clockAfterMs: clockAfterMs,
                 guidedPromptHabit: guided?.habitID,
-                guidedPromptHit: guided.flatMap(\.hit)
+                guidedPromptHit: guided.flatMap(\.hit),
+                retractedUCI: retraction?.uci,
+                retractedRefutation: retraction?.refutation,
+                retractedDeltaEP: retraction?.deltaEP
             )
         )
 
@@ -1832,7 +1874,10 @@ final class GameSession {
                     thinkTimeMs: $0.thinkTimeMs,
                     clockAfterMs: $0.clockAfterMs,
                     guidedPromptHabit: $0.guidedPromptHabit,
-                    guidedPromptHit: $0.guidedPromptHit
+                    guidedPromptHit: $0.guidedPromptHit,
+                    retractedUCI: $0.retractedUCI,
+                    retractedRefutation: $0.retractedRefutation,
+                    retractedDeltaEP: $0.retractedDeltaEP
                 )
             },
             opponentParams: FinishedGameRecord.OpponentParams(

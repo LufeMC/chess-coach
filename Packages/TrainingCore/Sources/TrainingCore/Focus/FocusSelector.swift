@@ -279,7 +279,46 @@ public enum FocusSelector {
         // user whose leaks all sit outside their rung's skills still deserves a
         // focus, and "no focus" is a worse answer than "a focus the ladder does
         // not happen to measure".
-        return onRung.isEmpty ? group(restrictToRung: false) : onRung
+        let ranked = onRung.isEmpty ? group(restrictToRung: false) : onRung
+        return ranked + unaskedRungHabits(rung: rung, ranked: ranked, ladder: ladder, tuning: tuning)
+    }
+
+    /// The rung's own habits that no leak can ever nominate, ranked last.
+    ///
+    /// `CauseTag.habit(rung:)` maps the detectors' sixteen tags onto six habits.
+    /// Three habits have no tag at all — `convertCleanly`, `clockDiscipline` and
+    /// `kingSafety` — because no detector emits a "you failed to convert" or a
+    /// "you used your clock badly" cause. Every candidate here is built *from a
+    /// leak*, so those three could never appear, and a rung whose required skill
+    /// names one of them had no way to make it the week's focus. `r4.conversion`
+    /// is exactly that: required, `habit: .convertCleanly`, and unreachable.
+    ///
+    /// The honest fix upstream is cause tags the detectors can emit, which is
+    /// detector work and a change to what gets persisted. This is the cheap half
+    /// that removes the dead end today: seed the missing habits at zero weight
+    /// so they sit *below* every measured leak and are chosen only when nothing
+    /// real outranks them — which is precisely the situation the dead end
+    /// described, a user with no leaks pointing at a skill the ladder demands.
+    private static func unaskedRungHabits(
+        rung: Int,
+        ranked: [Candidate],
+        ladder: [Rung],
+        tuning: DomainTuning.Focus
+    ) -> [Candidate] {
+        let rungHabits = ladder.first { $0.id == rung }?.habits ?? []
+        let already = Set(ranked.map(\.habit))
+        return rungHabits
+            .filter { !already.contains($0) && !Habit.hasCauseTag($0) }
+            .map {
+                Candidate(
+                    habit: $0,
+                    weight: 0,
+                    primaryCauseTag: nil,
+                    epLostPerGame: 0,
+                    drillability: tuning.habitDrillability[$0] ?? 0.5
+                )
+            }
+            .sorted { $0.drillability > $1.drillability }
     }
 
     private static func focus(

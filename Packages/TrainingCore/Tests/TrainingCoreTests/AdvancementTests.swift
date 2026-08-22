@@ -46,6 +46,47 @@ struct AdvancementTests {
         #expect(Set(ids).count == ids.count)
     }
 
+    // MARK: - What the ladder asks to be taught
+
+    /// A key naming a skill that no longer exists unlocks nothing and reports
+    /// nothing — it just quietly stops being true. Since the whole point of the
+    /// table is that a required skill's teacher is reachable, a dead entry is
+    /// exactly the failure it was written to prevent.
+    @Test("Every concept-teacher entry belongs to a skill on the ladder")
+    func conceptTeachersNameLadderSkills() {
+        let skillIDs = Set(Curriculum.default.flatMap { $0.skills.map(\.id) })
+        for skillID in Curriculum.conceptTeachers.keys {
+            #expect(skillIDs.contains(skillID), "\(skillID) is not on the ladder")
+        }
+        for (skillID, concepts) in Curriculum.conceptTeachers {
+            #expect(!concepts.isEmpty, "\(skillID) names an empty list of teachers")
+        }
+    }
+
+    /// Through the rung, not at it: calibration can place a user on rung 3 who
+    /// has never been asked for the basic mates, and rung 1's rows are still on
+    /// their ladder.
+    @Test("A rung owes everything the rungs below it owe")
+    func requiredConceptsAccumulateUpTheLadder() {
+        let byRung = (1...4).map { Curriculum.requiredConcepts(throughRung: $0) }
+        for (index, ids) in byRung.enumerated() where index > 0 {
+            #expect(ids.isSuperset(of: byRung[index - 1]), "rung \(index + 1) dropped an earlier ask")
+        }
+
+        #expect(Curriculum.requiredConcepts(throughRung: 1) == ["endgame.kqk", "endgame.krk"])
+        // The rook endings are rung 3's, and a rung-2 user has not been asked
+        // for them — which is what keeps the rating floor meaningful for
+        // everybody the ladder has not reached yet.
+        #expect(Curriculum.requiredConcepts(throughRung: 2).contains("endgame.lucena") == false)
+        #expect(Curriculum.requiredConcepts(throughRung: 3).contains("endgame.lucena"))
+        #expect(Curriculum.requiredConcepts(throughRung: 3).contains("endgame.philidor"))
+    }
+
+    @Test("A rung below the ladder asks for nothing")
+    func requiredConceptsBelowTheLadderIsEmpty() {
+        #expect(Curriculum.requiredConcepts(throughRung: 0).isEmpty)
+    }
+
     @Test("Rung 2 gates on all five named tactical themes")
     func rung2Themes() {
         let skill = Curriculum.rung(2)?.skills.first { $0.id == "r2.themes" }

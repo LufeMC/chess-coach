@@ -75,7 +75,6 @@ struct MainTabBar: View {
 private enum MainTab: String, CaseIterable, Identifiable {
     case today
     case play
-    case train
     case profile
 
     var id: String { rawValue }
@@ -84,7 +83,6 @@ private enum MainTab: String, CaseIterable, Identifiable {
         switch self {
         case .today: .today
         case .play: .play
-        case .train: .train
         case .profile: .profile
         }
     }
@@ -105,7 +103,6 @@ private enum MainTab: String, CaseIterable, Identifiable {
         switch self {
         case .today: "house.fill"
         case .play: "play.fill"
-        case .train: "puzzlepiece.fill"
         case .profile: "chart.bar.fill"
         }
     }
@@ -118,7 +115,6 @@ private enum MainTab: String, CaseIterable, Identifiable {
         switch self {
         case .today: Palette.accent
         case .play: Palette.blue
-        case .train: Palette.gold
         case .profile: Palette.coral
         }
     }
@@ -127,7 +123,6 @@ private enum MainTab: String, CaseIterable, Identifiable {
         switch self {
         case .today: "Today"
         case .play: "Play"
-        case .train: "Train"
         case .profile: "Profile"
         }
     }

@@ -184,6 +184,21 @@ public struct GameMove: Hashable, Identifiable, Sendable {
     /// with no verdict would be indistinguishable from a stretch of misses.
     public var guidedPromptHit: Bool?
 
+    /// The move a second-try catch took back, in UCI, or `nil` when nothing was
+    /// retracted on this turn.
+    ///
+    /// The retracted move is deliberately not left in `moves` — it would put a
+    /// move the user never made into the PGN, the ply numbering and the history
+    /// the opponent searches — so it is recorded here, against the move that
+    /// replaced it. See the `v9.secondTryCatch` migration for why the event is
+    /// worth keeping at all.
+    public var retractedUCI: String?
+    /// The reply that refuted it, in UCI: what the coach showed them.
+    public var retractedRefutation: String?
+    /// What the retracted move would have cost, in expected points, as measured
+    /// by the live probe. Positive means the user was about to lose ground.
+    public var retractedDeltaEP: Double?
+
     public init(
         id: UUID = UUID(),
         gameID: Game.ID,
@@ -196,7 +211,10 @@ public struct GameMove: Hashable, Identifiable, Sendable {
         thinkTimeMs: Int = 0,
         accuracy: Double? = nil,
         guidedPromptHabit: String? = nil,
-        guidedPromptHit: Bool? = nil
+        guidedPromptHit: Bool? = nil,
+        retractedUCI: String? = nil,
+        retractedRefutation: String? = nil,
+        retractedDeltaEP: Double? = nil
     ) {
         self.id = id
         self.gameID = gameID
@@ -210,6 +228,9 @@ public struct GameMove: Hashable, Identifiable, Sendable {
         self.accuracy = accuracy
         self.guidedPromptHabit = guidedPromptHabit
         self.guidedPromptHit = guidedPromptHit
+        self.retractedUCI = retractedUCI
+        self.retractedRefutation = retractedRefutation
+        self.retractedDeltaEP = retractedDeltaEP
     }
 }
 

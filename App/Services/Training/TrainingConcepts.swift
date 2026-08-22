@@ -5,6 +5,7 @@
 
 import ChessKit
 import Foundation
+import TrainingCore
 
 /// One idea the app teaches before it tests.
 ///
@@ -92,6 +93,12 @@ struct TrainingConcept: Sendable, Hashable, Identifiable {
     var title: String
     var teaching: Teaching
     /// The rating from which this concept is worth teaching.
+    ///
+    /// A sequencing hint, not a permission: it is the app's guess at when this
+    /// position starts turning up in the user's games, and it applies to content
+    /// nobody has asked for yet. Where the curriculum has explicitly asked the
+    /// user to demonstrate the skill this concept teaches, the ask wins — see
+    /// ``TrainingConcept/isAvailable(atRating:curriculumRequires:)``.
     var fromRating: Int
     var exercise: Exercise
 
@@ -563,12 +570,41 @@ extension TrainingConcept {
         )
     ]
 
-    /// The concepts worth teaching at a rating, in catalogue order.
-    static func available(atRating rating: Int) -> [TrainingConcept] {
-        catalogue.filter { $0.fromRating <= rating }
+    /// The concepts the app may serve right now, in catalogue order.
+    ///
+    /// Both numbers are needed and neither substitutes for the other. The rating
+    /// says which ideas are worth *offering*; the rung says which the curriculum
+    /// has already *required*. They are measured on different scales by different
+    /// machinery — the rung is a counter advanced by met skills, the rating a
+    /// Glicko estimate moved by puzzles — so a user can be two hundred points
+    /// below a concept's floor and be standing on the rung whose ladder gates on
+    /// it. When that happens the requirement wins.
+    static func available(atRating rating: Int, rung: Int) -> [TrainingConcept] {
+        available(atRating: rating, curriculumRequires: Curriculum.requiredConcepts(throughRung: rung))
+    }
+
+    /// The same question against a requirement set the caller already has.
+    static func available(
+        atRating rating: Int,
+        curriculumRequires required: Set<String>
+    ) -> [TrainingConcept] {
+        catalogue.filter { $0.isAvailable(atRating: rating, curriculumRequires: required) }
     }
 
     static func concept(id: String) -> TrainingConcept? {
         catalogue.first { $0.id == id }
+    }
+}
+
+extension TrainingConcept {
+
+    /// Whether this concept may be served, against a precomputed requirement set.
+    ///
+    /// Takes the set rather than the rung because every caller asks about the
+    /// whole catalogue in a row, and `Curriculum.requiredConcepts` walks all four
+    /// rungs to answer — eighteen questions would otherwise build eighteen
+    /// ladders.
+    func isAvailable(atRating rating: Int, curriculumRequires required: Set<String>) -> Bool {
+        fromRating <= rating || required.contains(id)
     }
 }

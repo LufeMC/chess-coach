@@ -135,6 +135,7 @@ public struct UserDatabase: Sendable {
         migrator.registerMigration("v6.clayPieceSet", migrate: adoptClayPieceSet)
         migrator.registerMigration("v7.reviewSelfCheck", migrate: addReviewSelfCheck)
         migrator.registerMigration("v8.conceptProgress", migrate: addConceptProgress)
+        migrator.registerMigration("v9.secondTryCatch", migrate: addSecondTryCatch)
         return migrator
     }
 
@@ -490,6 +491,54 @@ public struct UserDatabase: Sendable {
             """
             ALTER TABLE "games"
             ADD COLUMN "selfCheckScore" INTEGER
+            """
+        )
+        .execute(db)
+    }
+
+    /// The move a second-try catch took back, and what it would have cost.
+    ///
+    /// ## Why this is worth three columns
+    ///
+    /// The second-try probe fires on the one moment the app can be certain
+    /// about *and* the user is most engaged: they thought, they committed, and
+    /// the engine proved them wrong while the position was still in their head.
+    /// `GameSession.retract` then removed the move from `moves` entirely — with
+    /// good reason, since a retracted move left in place corrupts the PGN, the
+    /// ply numbering and the history the opponent's search is given — and
+    /// nothing else recorded that it had happened.
+    ///
+    /// So the highest-signal event the app generates produced no moment, no
+    /// cause tag, no leak attribution and no card. A game where the coach caught
+    /// four blunders reviewed as clean, which means playing *with* the coach
+    /// yielded less durable material than playing without it.
+    ///
+    /// Three nullable columns on the move that replaced it, rather than a table:
+    /// the event belongs to that turn, it is at most one per turn, and a row
+    /// with no retraction is the overwhelmingly common case that should cost
+    /// nothing. Additive and defaulted, so an existing database migrates without
+    /// a rebuild — the sync rules at the top of this file forbid table rebuilds.
+    private static func addSecondTryCatch(_ db: Database) throws {
+        try #sql(
+            """
+            ALTER TABLE "gameMoves"
+            ADD COLUMN "retractedUCI" TEXT
+            """
+        )
+        .execute(db)
+
+        try #sql(
+            """
+            ALTER TABLE "gameMoves"
+            ADD COLUMN "retractedRefutation" TEXT
+            """
+        )
+        .execute(db)
+
+        try #sql(
+            """
+            ALTER TABLE "gameMoves"
+            ADD COLUMN "retractedDeltaEP" REAL
             """
         )
         .execute(db)

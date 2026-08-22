@@ -31,7 +31,15 @@ import TrainingCore
 /// slot, a family comes round roughly every eighteen sets — so a player who
 /// loses every game out of the opening keeps being served endgames while the
 /// metrics that know it sit unread. A measured weakness therefore *overrides*
-/// the rotation rather than joining it: see ``next(rating:states:lastFamily:focus:openingMistakesPerGame:)``.
+/// the rotation rather than joining it: see
+/// ``next(rating:rung:states:lastFamily:focus:openingMistakesPerGame:)``.
+///
+/// ## And when the ladder is waiting on one
+///
+/// Ahead of all of that sits what the curriculum has actually asked for. A rung
+/// gates on Lucena and Philidor; the only place either is taught is this slot;
+/// so until they have been taught, an opening lesson nobody asked for is not a
+/// reasonable thing to spend the slot on. Those come first — see `owed` below.
 enum ConceptScheduler {
 
     /// What the scheduler needs to know about one concept.
@@ -69,7 +77,12 @@ enum ConceptScheduler {
     /// Picks the concept for one set.
     ///
     /// - Parameters:
-    ///   - rating: gates which concepts have been unlocked.
+    ///   - rating: the user's puzzle rating, which gates the concepts the
+    ///     curriculum has not asked for yet.
+    ///   - rung: the rung they are standing on. Everything the ladder gates on
+    ///     up to and including it is unlocked whatever the rating says, and is
+    ///     served before anything else — the app cannot require a skill and
+    ///     withhold the one screen that teaches it.
     ///   - states: progress by concept id. A concept with no row has never
     ///     been seen, which is the common case on the first sets.
     ///   - lastFamily: the family the previous set used, so this one can differ.
@@ -83,17 +96,40 @@ enum ConceptScheduler {
     ///     ``openingPressureThreshold`` it promotes the opening family over
     ///     everything else, so a player losing games out of the opening stops
     ///     waiting eighteen sessions for the slot to come round to it.
-    /// - Returns: nil only when the catalogue has nothing at this rating, which
-    ///   would mean a misconfigured catalogue rather than a finished user.
+    /// - Returns: nil only when the catalogue has nothing at this rating and
+    ///   rung, which would mean a misconfigured catalogue rather than a finished
+    ///   user.
     static func next(
         rating: Int,
+        rung: Int,
         states: [String: State],
         lastFamily: TrainingConcept.Family? = nil,
         focus: Habit? = nil,
         openingMistakesPerGame: Double = 0
     ) -> Selection? {
-        let available = TrainingConcept.available(atRating: rating)
+        let required = Curriculum.requiredConcepts(throughRung: rung)
+        let available = TrainingConcept.available(atRating: rating, curriculumRequires: required)
         guard !available.isEmpty else { return nil }
+
+        // What the ladder is waiting on, and has not been taught yet. This beats
+        // the rotation, the weekly focus and the opening-pressure override,
+        // because those three are all the app's opinion about what would help
+        // and this is a row on the user's ladder that cannot tick until the
+        // lesson has been given.
+        //
+        // It does not beat the rotation *twice in a row*, hence the family
+        // filter: rung 1 owes two basic mates and rung 3 owes two rook endings,
+        // and a week of nothing but endgames is the set the user starts
+        // skipping. Filtered to nothing means "not this set" rather than "serve
+        // it anyway" — it comes round next set, when the last family has moved.
+        let owed = available.filter {
+            required.contains($0.id)
+                && states[$0.id]?.isIntroduced != true
+                && $0.family != lastFamily
+        }
+        if let first = owed.first {
+            return selection(for: first, state: states[first.id], teachFirst: true)
+        }
 
         let pool = self.pool(
             from: available,
