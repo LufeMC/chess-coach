@@ -57,9 +57,17 @@ struct CalibrationSeedTests {
         #expect(CalibrationSeed.nextOpponentRating(current: 1100, outcome: .draw) == 1100)
     }
 
-    @Test("The ladder has a floor")
+    /// The floor is where the *measured* profiles stop, not an arbitrary low
+    /// number. `Humanizer.Profile.anchors` starts at 800 and clamps below it, so
+    /// a ladder that walked to 600 would show "Opponent 600" and feed 600 into
+    /// `mean(opponentRatings)` while the 800 profile played every move.
+    @Test("The opponent ladder floors at the weakest profile the engine has")
     func ladderFloor() {
-        #expect(CalibrationSeed.nextOpponentRating(current: 420, outcome: .loss) == 400)
+        #expect(CalibrationSeed.weakestOpponent == 800)
+        #expect(CalibrationSeed.nextOpponentRating(current: 900, outcome: .loss) == 800)
+        #expect(CalibrationSeed.nextOpponentRating(current: 800, outcome: .loss) == 800)
+        // The gentlest seed and the floor are the same number by construction.
+        #expect(CalibrationSeed.opponentRating(for: .new) == CalibrationSeed.weakestOpponent)
         #expect(CalibrationSeed.nextPuzzleRating(current: 420, solved: false) == 400)
     }
 }
@@ -158,6 +166,28 @@ struct PositioningScaleTests {
         #expect(PositioningScaleGeometry(estimate: 1500, sigma: 0).bandName() == "Club")
         #expect(PositioningScaleGeometry(estimate: 1900, sigma: 0).bandName() == "Strong club")
     }
+
+    /// The chip and the starting rung are cut on the same boundaries, so any
+    /// disagreement between them is the `r − 0.5σ` shading and never a second
+    /// opinion about the rating. The reveal leans on exactly that to decide
+    /// whether it has one placement to report or two.
+    @Test("The band's rung and the placed rung part company only where sigma shades it")
+    func bandRungTracksTheSameBoundaries() {
+        #expect(PositioningScaleGeometry(estimate: 900, sigma: 0).bandRung() == 1)
+        #expect(PositioningScaleGeometry(estimate: 1000, sigma: 0).bandRung() == 2)
+        #expect(PositioningScaleGeometry(estimate: 1400, sigma: 0).bandRung() == 3)
+        #expect(PositioningScaleGeometry(estimate: 1800, sigma: 0).bandRung() == 4)
+
+        // The case the reveal used to contradict itself on: 1420 is inside the
+        // club band, and 1420 − 0.5 × 150 bands down to rung 2.
+        #expect(PositioningScaleGeometry(estimate: 1420, sigma: 150).bandRung() == 3)
+        #expect(CalibrationCombiner.startingRung(rating: 1420, sigma: 150) == 2)
+
+        // Comfortably inside a band, the two agree and the reveal reports one
+        // placement.
+        #expect(PositioningScaleGeometry(estimate: 1600, sigma: 150).bandRung() == 3)
+        #expect(CalibrationCombiner.startingRung(rating: 1600, sigma: 150) == 3)
+    }
 }
 
 // MARK: - Flow
@@ -192,10 +222,44 @@ struct CalibrationFlowTests {
         #expect(model.puzzleRating == CalibrationSeed.puzzleRating(for: .competitive))
     }
 
-    @Test("The framing line is said once, and does not console")
+    /// The count was always there; the minutes were not, and the minutes are
+    /// what a first-run user is being asked to commit. The first person went
+    /// with them: no other screen has a narrating "I".
+    @Test("The framing line is said once, states the cost, and does not console")
     func framingLine() {
         #expect(CalibrationModel.framingLine.contains("measurement, not a test"))
         #expect(!CalibrationModel.framingLine.contains("Don't worry"))
+        #expect(CalibrationModel.framingLine.contains("15-minute"))
+        #expect(!CalibrationModel.framingLine.contains("I'll"))
+    }
+
+    /// Drafts have always survived a quit. Nothing said so, which left the flow
+    /// reading as an hour that has to be spent in one sitting.
+    @Test("The cost line names the hour and says leaving is safe")
+    func costLine() {
+        #expect(CalibrationModel.costLine.contains("hour"))
+        #expect(CalibrationModel.costLine.contains("picks up where you left off"))
+    }
+
+    /// "Why am I doing this" was answered for the first time by the reveal, an
+    /// hour after it was asked.
+    @Test("Step one says what the rating buys")
+    func payoffLine() {
+        #expect(CalibrationModel.payoffLine.contains("review"))
+        #expect(CalibrationModel.payoffLine.contains("puzzles"))
+    }
+
+    /// `Docs/humanizer-calibration.md` measures the *spacing* between opponent
+    /// profiles and explicitly cannot say where the ladder sits as a block, so
+    /// until the anchoring described there is done the reveal must not let a
+    /// 600–2000 track be read as a Lichess or Chess.com number. This is the one
+    /// sentence standing between those two readings; deleting it is the
+    /// regression.
+    @Test("The reveal names whose scale the number is on")
+    func revealNamesTheScale() {
+        #expect(CalibrationRevealView.scaleCaveat.contains("Rookly's own scale"))
+        #expect(CalibrationRevealView.scaleCaveat.contains("Lichess"))
+        #expect(CalibrationRevealView.scaleCaveat.contains("Chess.com"))
     }
 
     @Test("Games are recorded against the opponent that was actually played")
@@ -286,6 +350,51 @@ struct CalibrationFlowTests {
         for _ in 0..<20 { model.record(puzzleRating: 2000, solved: true) }
 
         #expect(model.estimate?.ceilingNotFound == true)
+    }
+
+    /// The bug: `restore` moved to the games stage only when the question had
+    /// been answered. A user who skipped it, played two games and was then
+    /// interrupted came back to the self-assessment screen with two games
+    /// banked, and answering it there re-seeded the ladder those games had
+    /// already walked.
+    @Test("A calibration resumed without an answer lands on the games, not back on the question")
+    func resumesWithoutAnAnswer() {
+        let drafts = InMemoryCalibrationDraftStore(
+            draft: CalibrationDraft(
+                experience: nil,
+                opponentRating: 1300,
+                puzzleRating: 1400,
+                games: [
+                    .init(opponentRating: 1100, outcome: .win),
+                    .init(opponentRating: 1200, outcome: .win)
+                ],
+                puzzles: []
+            )
+        )
+        let model = CalibrationModel(drafts: drafts)
+
+        #expect(model.stage == .games)
+        #expect(model.games.count == 2)
+        // The ladder is where the games left it, not where the question would
+        // have put it.
+        #expect(model.opponentRating == 1300)
+        #expect(model.didResume)
+    }
+
+    /// The other half of the same fix: the answer is a seed, and a seed cannot
+    /// be planted after something has grown from it.
+    @Test("Answering the question after a game has been played does not re-seed the ladder")
+    func lateAnswerDoesNotReseedTheLadder() {
+        let (model, _, _) = makeModel()
+        model.beginMeasurement()
+        model.record(gameOutcome: .win)
+        #expect(model.opponentRating == 1200)
+
+        model.select(.new)
+        // Recorded, because a re-test wants to know that someone who said
+        // "beginner" measured 1600 — but not acted on.
+        #expect(model.experience == .new)
+        #expect(model.opponentRating == 1200)
     }
 
     @Test("Results arriving out of phase are ignored")

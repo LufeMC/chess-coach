@@ -273,9 +273,19 @@ struct DenominatorText: View {
             Text(denominator.value)
                 .typeRole(role, monospacedDigits: true, appliesForeground: false)
                 .foregroundStyle(valueStyle)
+                // The number is the one thing on the card that must survive
+                // intact. Without this the value is just another flexible text
+                // in an HStack, so a long unit competes with it for width and
+                // wins: at display size "1051 Rookly rating" broke the rating
+                // itself across two lines, reading as "105" over "1". A unit
+                // can wrap or truncate and still be understood; a number cannot.
+                .lineLimit(1)
+                .fixedSize(horizontal: true, vertical: false)
             Text(denominator.denominator)
                 .typeRole(role.demoted, monospacedDigits: true, appliesForeground: false)
                 .foregroundStyle(.secondary)
+                .lineLimit(2)
+                .minimumScaleFactor(0.85)
         }
         .accessibilityElement(children: .ignore)
         .accessibilityLabel(denominator.accessibilityText)

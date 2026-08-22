@@ -134,6 +134,21 @@ enum TrainingVocabulary {
         return low...high
     }
 
+    /// The raised band the calculation set is drawn from.
+    ///
+    /// Deliberately **not** clamped to the corpus's own range. A clamp would
+    /// quietly slide the band down onto puzzles the user can already recognise
+    /// and go on calling them calculation work, which is the one failure this
+    /// mode must not have; an empty band is a fact the entry point states
+    /// instead. See ``SessionAssembler/calculationSet(candidates:tuning:)``.
+    static func calculationBand(
+        userPuzzleRating: Int,
+        tuning: DomainTuning.Calculation = DomainTuning.default.calculation
+    ) -> ClosedRange<Int> {
+        let low = max(0, userPuzzleRating + tuning.bandOffset)
+        return low...(low + tuning.bandWidth)
+    }
+
     /// The rating band a puzzle's latency is normalised against.
     ///
     /// 200-point buckets: wide enough that a bucket accumulates samples in days

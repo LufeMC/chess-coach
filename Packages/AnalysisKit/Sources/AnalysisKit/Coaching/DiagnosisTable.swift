@@ -49,9 +49,15 @@ enum DiagnosisTable {
             subtype: .moved,
             cause: .hungMovedPiece,
             step: .s5BlunderCheck,
+            // "It can just be taken" is a claim about what happens next, so it
+            // is spoken only where the engine's own line takes it — see
+            // ``MomentFacts/engineTakesTarget``. Where the finding rests on the
+            // exchange count alone the sentence says exactly that instead, which
+            // is still the mechanism and is still true when the capturer turns
+            // out to be pinned.
             phrasings: [
-                { "\($0.playedSAN) put your \($0.targetPiece) on \($0.targetSquareName), where it can just be taken." },
-                { "You moved your \($0.targetPiece) to \($0.targetSquareName) and left it hanging there." }
+                { "\($0.playedSAN) put your \($0.targetPiece) on \($0.targetSquareName), \($0.hangingClaim)." },
+                { "You moved your \($0.targetPiece) to \($0.targetSquareName) and \($0.hangingOutcome)." }
             ]
         ),
         DiagnosisRow(
@@ -60,8 +66,8 @@ enum DiagnosisTable {
             cause: .hungLeftPiece,
             step: .s5BlunderCheck,
             phrasings: [
-                { "\($0.playedSAN) left your \($0.targetPiece) on \($0.targetSquareName) loose." },
-                { "Your \($0.targetPiece) on \($0.targetSquareName) was hanging, and \($0.playedSAN) attended to something else." }
+                { "\($0.playedSAN) left your \($0.targetPiece) on \($0.targetSquareName), \($0.hangingClaim)." },
+                { "Your \($0.targetPiece) on \($0.targetSquareName) was already sitting \($0.hangingClaim), and \($0.playedSAN) attended to something else." }
             ]
         ),
 

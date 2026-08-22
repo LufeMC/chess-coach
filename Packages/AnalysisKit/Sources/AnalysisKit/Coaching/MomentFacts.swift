@@ -99,7 +99,48 @@ struct MomentFacts: Sendable {
         "\(count(n)) \(singular)\(n == 1 ? "" : "s")"
     }
 
-    func points(_ value: Double) -> String { String(format: "%.2f", value) }
+    // MARK: How strongly a hanging piece may be described
+
+    /// Whether the engine itself, and not only the exchange count, showed the
+    /// piece coming off the board.
+    ///
+    /// ``HangingPieceDetector`` emits a finding either when the opponent's best
+    /// reply captures the piece or when the move merely cost an inaccuracy's
+    /// worth of ground while static exchange says the square is winnable. Static
+    /// exchange is blind to pins, checks and desperados, so on that second path
+    /// the would-be capturer may be pinned to its king, or the capture may lose
+    /// to a tactic the search found and the count could not — and the sentence
+    /// "where it can just be taken" is then false about the position the player
+    /// is looking at.
+    ///
+    /// The flag covers the ordinary case, where their best reply takes it at
+    /// once. The line walk covers the rest: an engine that inserts a check or a
+    /// clearing capture first is still taking the piece two moves later, and a
+    /// note that called that one unproven would be pedantic rather than honest.
+    var engineTakesTarget: Bool {
+        guard let evidence, evidence.detector == .hangingPiece, let square = evidence.squares.first else {
+            return false
+        }
+        if evidence.flags.contains(.refutationCapturesTarget) { return true }
+
+        let steps = Array(context.refutationSteps.prefix(4))
+        let takesIt = steps.contains { $0.mover == opponent && $0.move.end == square && $0.isCapture }
+        // Taking it is not enough: a capture the line hands straight back is an
+        // exchange, not a piece won, and the material has to end up with them.
+        return takesIt && LineReplay.materialSwing(steps, for: opponent) > 0
+    }
+
+    /// The clause that says how loose the piece was, at the strength the
+    /// evidence supports. See ``engineTakesTarget``.
+    var hangingClaim: String {
+        engineTakesTarget ? "where it can just be taken" : "where the exchange count is against it"
+    }
+
+    /// The same claim as a verb phrase, so the alternate wording is a different
+    /// sentence rather than the first one with the words moved around.
+    var hangingOutcome: String {
+        engineTakesTarget ? "left it hanging there" : "left the count on that square against you"
+    }
 
     // MARK: Variation
 

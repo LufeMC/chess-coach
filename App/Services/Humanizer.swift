@@ -261,20 +261,11 @@ struct Humanizer: Sendable {
     }
 }
 
-/// Maps the user's rating to the opponent's rating for the next game.
-///
-/// The opponent sits slightly above the user most of the time: a training
-/// partner that is always beatable stops producing mistakes worth studying.
-/// The cycle mixes in one stretch game and one confidence game per four so the
-/// user isn't permanently under pressure.
-enum OpponentLadder {
-
-    static func rating(forUserRating userRating: Double, gameIndex: Int) -> Int {
-        let offsets = [50, 50, 150, 0]
-        let offset = offsets[gameIndex % offsets.count]
-        let raw = Int(userRating.rounded()) + offset
-        // Round to 25 so the displayed opponent rating looks deliberate.
-        let rounded = (raw / 25) * 25
-        return min(max(rounded, 800), 2200)
-    }
-}
+// The opponent ladder used to be duplicated here as `OpponentLadder`, with the
+// offsets, the rounding step and the range all written out a second time. The
+// copy had drifted: it truncated to 25 with integer division where
+// `EloLadder.opponentRating` rounds to nearest, so a user at 1013 met a 1050
+// rather than the tuned and tested 1075 — the effective offset was +25 instead
+// of +50, which pushes the target score above the ~45% the cycle aims for. The
+// shipped path now calls `TrainingCore.EloLadder` directly, from
+// `OpponentPicker`, so there is one rule and the tests cover the one that runs.

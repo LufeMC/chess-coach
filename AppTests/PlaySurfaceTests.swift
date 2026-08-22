@@ -141,7 +141,8 @@ struct EvalMaterialTests {
         let behind = PlayEvalReading.material(-2)
         #expect(behind.direction == .behind)
         // A real minus sign, not a hyphen: at monospaced-digit widths a hyphen
-        // reads as a dash between two numbers.
+        // reads as a dash between two numbers. And no unit — material is in
+        // pawns, which is what the captured tray beside it is counting.
         #expect(behind.text == "\u{2212}2")
         #expect(behind.symbolName == "arrowtriangle.down.fill")
 
@@ -196,7 +197,7 @@ struct EvalMaterialTests {
 @Suite("Eval capsule: win percentage")
 struct EvalWinPercentTests {
 
-    @Test("Bucketed around even, in points either side of fifty")
+    @Test("Bucketed around even, and never printed as a number")
     func buckets() {
         #expect(PlayEvalReading.winPercent(50).direction == .level)
         #expect(PlayEvalReading.winPercent(52).direction == .level)
@@ -205,12 +206,12 @@ struct EvalWinPercentTests {
         let slight = PlayEvalReading.winPercent(58)
         #expect(slight.direction == .ahead)
         #expect(slight.magnitude == .slight)
-        #expect(slight.text == "+8")
+        #expect(slight.text == "BETTER")
 
         let clear = PlayEvalReading.winPercent(30)
         #expect(clear.direction == .behind)
         #expect(clear.magnitude == .clear)
-        #expect(clear.text == "\u{2212}20")
+        #expect(clear.text == "WORSE")
 
         #expect(PlayEvalReading.winPercent(95).magnitude == .decisive)
         #expect(PlayEvalReading.winPercent(2).magnitude == .decisive)
@@ -219,6 +220,88 @@ struct EvalWinPercentTests {
     @Test("A level reading says EVEN rather than a signed near-zero")
     func levelText() {
         #expect(PlayEvalReading.winPercent(53).text == "EVEN")
+    }
+
+    /// The source is the opponent's own depth-capped search, run on the position
+    /// before its own move — so it is a weak opinion, one ply stale, and it
+    /// moves only when the opponent moves. A number would claim a precision
+    /// none of that supports, and would claim it in the same glyph, weight and
+    /// grammar as an exact material count.
+    @Test("The engine reading carries no digits and no verdict")
+    func readingIsAWordNotANumber() {
+        let digits = CharacterSet.decimalDigits
+        for percent in stride(from: 0.0, through: 100.0, by: 5.0) {
+            let reading = PlayEvalReading.winPercent(percent)
+            #expect(
+                reading.text.rangeOfCharacter(from: digits) == nil,
+                "\(percent)% printed a number: \(reading.text)"
+            )
+            #expect(["BETTER", "EVEN", "WORSE"].contains(reading.text))
+            // "You are winning" is the sentence guided mode spends a pause
+            // trying not to say; a 1200 told it stops looking for counterplay.
+            #expect(!reading.accessibilityText.lowercased().contains("winning"))
+            #expect(!reading.accessibilityText.lowercased().contains("losing"))
+            // And it is named as the estimate it is, where there is room to.
+            #expect(reading.accessibilityText.hasPrefix("Estimate:"))
+        }
+    }
+
+    /// Material stays a count, because it is one: derived from the board the
+    /// user is looking at, exact, and changing only on captures.
+    @Test("Material is still printed as a number")
+    func materialKeepsItsDigits() {
+        #expect(PlayEvalReading.material(3).text == "+3")
+        #expect(PlayEvalReading.material(-2).text == "\u{2212}2")
+    }
+}
+
+// MARK: - Second try
+
+@Suite("Second-try sheet copy")
+struct SecondTryCopyTests {
+
+    @Test("The rung that costs the rating says so before it is tapped")
+    func assistedRungNamesItsCost() {
+        // `GameSession.resumeAfterSecondTry` sets `usedAssistedRetry` once the
+        // refutation has been drawn, and `EloLadder` then scores the whole game
+        // unrated. The app exists to move one number; a control that quietly
+        // freezes it for ten minutes of play has to say so first.
+        #expect(SecondTrySheet.hintTitle(hintLevel: 0) == "Show me why")
+        #expect(SecondTrySheet.hintTitle(hintLevel: 1).contains("unrated"))
+
+        #expect(SecondTrySheet.primaryTitle(hintLevel: 0) == "Try again")
+        #expect(SecondTrySheet.primaryTitle(hintLevel: 1) == "Try again")
+        #expect(
+            SecondTrySheet.primaryTitle(
+                hintLevel: GameSession.SecondTryState.assistedHintLevel
+            ).contains("unrated")
+        )
+    }
+
+    @Test("The primary describes what it does, not what already happened")
+    func primaryIsNotATakeBack() {
+        // The retraction runs before the phase that shows this sheet, so the
+        // user watched the move come back before reading a word.
+        for level in 0...2 {
+            #expect(!SecondTrySheet.primaryTitle(hintLevel: level).contains("Take it back"))
+        }
+        #expect(SecondTrySheet.prompt(hintLevel: 0).hasPrefix("Taken back"))
+    }
+
+    @Test("Every rung names a mechanism rather than announcing an outcome")
+    func promptsShowTheMethod() {
+        // A pulsed square and an arrow are not an explanation. Each rung has to
+        // say what to do with what is on the board — and none of them may claim
+        // material, because the session knows the evaluation dropped and not
+        // what the refutation wins.
+        #expect(SecondTrySheet.prompt(hintLevel: 0).contains("board is live"))
+        #expect(SecondTrySheet.prompt(hintLevel: 1).contains("highlighted square"))
+        #expect(SecondTrySheet.prompt(hintLevel: 2).contains("Count"))
+        for level in 0...2 {
+            let prompt = SecondTrySheet.prompt(hintLevel: level)
+            #expect(!prompt.lowercased().contains("wins a"))
+            #expect(!prompt.contains("piece for free"))
+        }
     }
 }
 
@@ -231,14 +314,18 @@ struct OpponentStatusLineTests {
         isThinking: Bool,
         ply: Int = 20,
         lastUserSAN: String? = nil,
-        material: Int = 0
+        material: Int = 0,
+        canAnswerLastCapture: Bool = true,
+        guidedVerdict: Bool? = nil
     ) -> OpponentStatusLine.Input {
         OpponentStatusLine.Input(
-            trait: "trades early, hates pressure",
+            trait: "looks three moves ahead; still misses short tactics",
             isThinking: isThinking,
             ply: ply,
             lastUserSAN: lastUserSAN,
-            materialBalance: material
+            materialBalance: material,
+            canAnswerLastCapture: canAnswerLastCapture,
+            guidedVerdict: guidedVerdict
         )
     }
 
@@ -246,7 +333,7 @@ struct OpponentStatusLineTests {
     func trait() {
         let line = OpponentStatusLine.line(for: input(isThinking: false))
         #expect(line.kind == .trait)
-        #expect(line.text == "trades early, hates pressure")
+        #expect(line.text == "looks three moves ahead; still misses short tactics")
     }
 
     @Test("Thinking: the trait is replaced by a spoken line")
@@ -272,10 +359,10 @@ struct OpponentStatusLineTests {
         #expect(capture.text == "So we're trading, then.")
     }
 
-    @Test("Openings are not agonised over")
+    @Test("Openings are not agonised over, and not described in slang")
     func opening() {
         let line = OpponentStatusLine.line(for: input(isThinking: true, ply: 4, lastUserSAN: "Nf3"))
-        #expect(line.text == "Still book, I think.")
+        #expect(line.text == "Still the opening, I think.")
     }
 
     @Test("Material shapes the line, from the opponent's side of it")
@@ -297,5 +384,64 @@ struct OpponentStatusLineTests {
     func capturePrecedence() {
         let line = OpponentStatusLine.line(for: input(isThinking: true, ply: 6, lastUserSAN: "exd5"))
         #expect(line.text == "So we're trading, then.")
+    }
+
+    /// A capture is only a trade if it can be answered, and the SAN cannot tell
+    /// you: `Bxf7` is the same three characters whether the bishop is walking
+    /// into a recapture or collecting a free piece. Calling a hanging knight a
+    /// trade is the opponent describing a board that is not there — small, but
+    /// it is the one place the app claims to be looking at the position.
+    @Test("A capture nobody can answer is not called a trade")
+    func unansweredCaptureIsNotATrade() {
+        let free = OpponentStatusLine.line(
+            for: input(isThinking: true, lastUserSAN: "Bxf7", canAnswerLastCapture: false)
+        )
+        #expect(free.kind == .speech)
+        #expect(free.text != "So we're trading, then.")
+        #expect(free.text == "You took that one.")
+
+        let trade = OpponentStatusLine.line(
+            for: input(isThinking: true, lastUserSAN: "Bxf7", canAnswerLastCapture: true)
+        )
+        #expect(trade.text == "So we're trading, then.")
+    }
+
+    /// The traits describe search horizon and error rate, because that is all
+    /// `Humanizer` implements. The old ones described playing styles — material
+    /// greed, early trades, endgame squeezes — that no profile has, so a user
+    /// preparing against them was preparing against a player who did not exist.
+    @Test("Every roster trait describes something the opponent actually does")
+    func traitsAreAboutHorizonAndErrors() {
+        let styleWords = ["trades", "positional", "sharp openings", "grabs material", "solid"]
+        for rating in [850, 1050, 1250, 1450, 1650, 1900, 2150] {
+            let trait = OpponentRoster.opponent(forRating: rating).trait
+            #expect(!trait.isEmpty)
+            for word in styleWords {
+                #expect(!trait.contains(word), "\(rating) claims a style the humanizer has no lever for: \(trait)")
+            }
+        }
+    }
+
+    @Test("A guided verdict takes the slot, in the coach's voice and not the opponent's")
+    func guidedVerdict() {
+        // The pause asks a question and the next move is the answer; a game
+        // that never says whether it landed has asked for nothing. It outranks
+        // the thinking line because that line is small talk and this is not.
+        let hit = OpponentStatusLine.line(for: input(isThinking: true, guidedVerdict: true))
+        #expect(hit.kind == .coach)
+        #expect(hit.text.hasPrefix("Found it"))
+
+        let miss = OpponentStatusLine.line(for: input(isThinking: false, guidedVerdict: false))
+        #expect(miss.kind == .coach)
+        #expect(miss.text.hasPrefix("Missed"))
+        // States the fact and points somewhere. No consolation, and no claim
+        // about what the better move won — the grade does not know that.
+        #expect(miss.text.contains("review"))
+    }
+
+    @Test("With no verdict outstanding the slot goes back to the opponent")
+    func verdictIsTheExceptionNotTheRule() {
+        let line = OpponentStatusLine.line(for: input(isThinking: false))
+        #expect(line.kind == .trait)
     }
 }

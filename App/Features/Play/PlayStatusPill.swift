@@ -1,6 +1,6 @@
 import SwiftUI
 
-/// The status row: one pill, three segments.
+/// The status row: one pill, two or three segments.
 ///
 /// ## Why one container and not three capsules
 ///
@@ -9,6 +9,22 @@ import SwiftUI
 /// object, which is what every shipped app in this shape does. The segments are
 /// ordered position → their clock → your clock, so the number that describes the
 /// game comes first and the clock you are burning sits nearest your thumb.
+///
+/// ## Why the first segment is sometimes not there
+///
+/// It carries the engine's reading, which only guided mode is entitled to show.
+/// In a sparring game the number that describes the position is material, and
+/// `CapturedTray` already prints it beside the pieces that explain it — a
+/// second copy up here made the user wonder whether the two meant different
+/// things, which in guided games they genuinely do. So the segment appears
+/// exactly when it has something of its own to say. The clocks keep their
+/// places either way; nothing shifts mid-game, because the mode cannot change
+/// mid-game.
+///
+/// The reading is a word — `BETTER` / `EVEN` / `WORSE` — rather than a number,
+/// so the two can no longer be mistaken for each other in any mode: a count
+/// beside captured pieces is pawns, a word up here is the engine's estimate.
+/// ``PlayEvalReading`` carries the argument for why it must not be a number.
 ///
 /// ## Why nothing moves when the turn changes
 ///
@@ -31,19 +47,22 @@ struct PlayStatusPill: View {
         var accessibilityName: String
     }
 
-    let eval: PlayEvalReading
+    /// The engine's reading, or nil in the modes that are not shown one.
+    let eval: PlayEvalReading?
     let opponentClock: ClockState
     let userClock: ClockState
     /// True once the game is over: the clocks stop meaning anything and drop
-    /// back, while the eval — the final material count — stays legible.
+    /// back, while the eval — the position's final reading — stays legible.
     var clocksDimmed: Bool = false
 
     var body: some View {
         HStack(spacing: 0) {
-            EvalSegment(reading: eval)
-                .frame(maxHeight: .infinity)
+            if let eval {
+                EvalSegment(reading: eval)
+                    .frame(maxHeight: .infinity)
 
-            rule
+                rule
+            }
 
             ClockSegment(state: opponentClock)
                 .frame(maxHeight: .infinity)
@@ -87,7 +106,13 @@ private struct EvalSegment: View {
         HStack(spacing: 5) {
             Image(systemName: reading.symbolName)
                 .font(.caption2.weight(.bold))
-            Text(reading.text)
+            // The widest word the segment can print is reserved up front, for
+            // the same reason the clock reserves `10:00`: `EVEN` becoming
+            // `BETTER` would otherwise resize the pill and shove both clocks
+            // along, on the screen whose brief is that nothing moves.
+            Text(verbatim: "BETTER")
+                .hidden()
+                .overlay { Text(reading.text) }
                 .typeRole(.caption, monospacedDigits: true, appliesForeground: false)
                 .fontWeight(.heavy)
                 .tracking(0.6)
@@ -189,7 +214,7 @@ private struct ClockSegment: View {
 
     return VStack(spacing: 16) {
         PlayStatusPill(
-            eval: .material(3),
+            eval: .winPercent(62),
             opponentClock: .init(
                 chargedMs: 600_000,
                 startedAt: .now,
@@ -208,7 +233,7 @@ private struct ClockSegment: View {
             )
         )
         PlayStatusPill(
-            eval: .material(0),
+            eval: nil,
             opponentClock: .init(
                 chargedMs: 42_000,
                 startedAt: .now,
@@ -227,7 +252,7 @@ private struct ClockSegment: View {
             )
         )
         PlayStatusPill(
-            eval: .material(-2),
+            eval: .winPercent(30),
             opponentClock: .init(
                 chargedMs: 25_000,
                 startedAt: .now,

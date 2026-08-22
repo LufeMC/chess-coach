@@ -203,21 +203,54 @@ enum AnalysisPipeline {
     /// are always written as a prefix, so a gap would mean corruption — and
     /// resuming *past* a gap would leave a ply permanently unevaluated, which is
     /// worse than re-searching a few positions.
-    static func resumePrefix(from rows: [PlyEvalRow], positionCount: Int) -> [PositionEval] {
+    ///
+    /// It also stops at the first row that was searched too thinly to be
+    /// comparable with the budget this pass is running at. A pass can straddle a
+    /// recalibration — the device measured 250k nodes on the launch that started
+    /// it and 1.2M on the launch that resumes it — and reusing both halves would
+    /// judge the two halves of one game to different standards, silently, with
+    /// the boundary falling wherever the user happened to switch apps. Better to
+    /// re-search the cheap half than to publish a game whose verdicts change
+    /// mid-way for a reason no one can see.
+    ///
+    /// - Parameter minimumNodes: the fewest nodes a stored row may have been
+    ///   searched at and still count. Terminal rows are exempt: they were never
+    ///   searched at all. Zero (the default) accepts anything, which is what a
+    ///   caller with no budget of its own — a test, a reader — wants.
+    static func resumePrefix(
+        from rows: [PlyEvalRow],
+        positionCount: Int,
+        minimumNodes: Int = 0
+    ) -> [PositionEval] {
         let byPly = Dictionary(rows.map { ($0.ply, $0) }, uniquingKeysWith: { first, _ in first })
         var restored: [PositionEval] = []
         for index in 0..<positionCount {
             guard let row = byPly[index + 1] else { break }
-            restored.append(PositionEval(row: row))
+            let eval = PositionEval(row: row)
+            guard eval.terminalScore != nil || eval.nodes >= minimumNodes else { break }
+            restored.append(eval)
         }
         return restored
+    }
+
+    /// The node count below which a stored evaluation is treated as belonging to
+    /// a different pass.
+    ///
+    /// Four fifths rather than the budget itself because the stored count is
+    /// whatever the engine had searched when it printed the line the row was
+    /// built from, not the count it stopped at — so an honest full-budget row
+    /// routinely comes back a little short, and an exact comparison would throw
+    /// away every prefix it was meant to protect.
+    static func resumeNodeFloor(budget: Int) -> Int {
+        budget * 4 / 5
     }
 
     // MARK: - Enrichment
 
     /// The extra searches a flagged position earns.
     struct Enrichment: Sendable {
-        /// Rank 1 from the deeper re-search.
+        /// Rank 1 from the wider re-search. Whether it gets to be *the* best
+        /// move is decided by ``coachingLines(summary:enrichment:)``, on depth.
         var best: UCIInfo?
         /// The best idea that is neither the played move nor (necessarily) the
         /// engine's first choice — "here is what else there was", which is the
@@ -240,6 +273,41 @@ enum AnalysisPipeline {
                 .first { $0.pv.first != playedUCI }
             self.threatProbe = threatProbe
         }
+    }
+
+    /// Which two lines the coaching layer should speak from: the move it names
+    /// as best, and the alternative it offers alongside it.
+    ///
+    /// The rule is *depth first, then width*. An enriched search only replaces
+    /// the base pass's first choice when it looked at least as deep, because the
+    /// two searches are not interchangeable: enrichment asks for a third line
+    /// from a freshly cleared table, so at an equal budget it lands about a ply
+    /// short, and its rank 1 is the noisier of the two exactly on the tactical
+    /// positions where a review card gets shown. That rank 1 decides which move
+    /// the card names, whether the played move counts as best, and whether the
+    /// moment is eligible to become a card — so letting the shallower search win
+    /// meant a user could be told to play a move the deeper search did not
+    /// prefer, and could lose a "you found it" between two runs of the same
+    /// analysis.
+    ///
+    /// The alternative is still taken from the enrichment even when its first
+    /// choice is turned down: three lines is the only reason the re-search
+    /// exists, and the base pass's rank 2 is often the move the user actually
+    /// played. The one thing it may not be is the same move as `best` — showing
+    /// "play this" and "or this" over one move is the card contradicting itself.
+    static func coachingLines(
+        summary: MoveSummary,
+        enrichment: Enrichment?
+    ) -> (best: UCIInfo, alternative: UCIInfo?) {
+        let base = summary.bestLine
+        guard let enrichment else { return (base, summary.secondLine) }
+
+        let enriched = enrichment.best
+        let best = (enriched?.depth ?? 0) >= base.depth ? (enriched ?? base) : base
+        let alternative = [enrichment.alternative, summary.secondLine]
+            .compactMap { $0 }
+            .first { $0.pv.first != best.pv.first }
+        return (best, alternative)
     }
 
     /// What one of the user's moves looks like before any detector runs.
@@ -329,13 +397,14 @@ enum AnalysisPipeline {
     /// ## Which pass is authoritative
     ///
     /// Two searches can have looked at the same position: the base MultiPV-2 walk
-    /// over every ply, and — for the dozen positions that earned it — a deeper
-    /// MultiPV-3 re-search. They disagree, and the rule for who wins is by
-    /// *category*, not by depth:
+    /// over every ply, and — for the dozen positions that earned it — a wider
+    /// MultiPV-3 re-search on a bigger budget. They disagree, and the rule for
+    /// who wins is by *category*:
     ///
-    /// * **Lines** come from the enriched search where it exists. It is deeper and
-    ///   wider, so it has the better opinion about which move is best and what the
-    ///   coaching alternative is — which is the only reason it was run.
+    /// * **Lines** come from the enriched search where it exists and where it
+    ///   actually searched at least as deep — see
+    ///   ``coachingLines(summary:enrichment:)``, which owns that comparison and
+    ///   explains why "wider" is not the same as "better informed".
     /// * **Numbers** — `evalBefore`, and therefore `deltaEP`, the judgment, the
     ///   classification, the win percentages and the accuracy — always come from
     ///   the base pass. Both sides of `deltaEP` are a subtraction across two
@@ -404,16 +473,16 @@ enum AnalysisPipeline {
             }
 
             let enrichment = enrichments[index]
+            let lines = coachingLines(summary: summary, enrichment: enrichment)
             guard
                 let context = MoveContext(
                     ply: row.ply,
                     positionBefore: replay.positions[index],
                     playedUCI: row.uci,
-                    // Lines from the enriched re-search where there was one: it is
-                    // deeper and at wider MultiPV, so it knows better which move
-                    // was best and what else there was.
-                    bestLine: enrichment?.best ?? summary.bestLine,
-                    secondLine: enrichment?.alternative ?? summary.secondLine,
+                    // Lines from the enriched re-search where there was one and
+                    // where it earned the override on depth.
+                    bestLine: lines.best,
+                    secondLine: lines.alternative,
                     refutationLine: summary.refutationLine,
                     // Numbers from the base pass, always — including when an
                     // enriched line was just handed in above. See the note on this

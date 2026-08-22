@@ -1,7 +1,12 @@
+import EngineKit
 import Foundation
 import Observation
 import SwiftUI
 import TrainingCore
+
+#if canImport(UIKit)
+    import UIKit
+#endif
 
 /// Root application state and the single place services are constructed.
 ///
@@ -15,7 +20,18 @@ final class AppModel {
         case idle
         case booting
         case ready
-        case failed(String)
+        case failed(BootFailure)
+    }
+
+    /// A boot that did not finish, in the two registers it has to be said in.
+    ///
+    /// The failure screen used to render `String(describing: error)`, so the
+    /// first thing a user could meet was `missingNetwork("nn-1c000.nnue")` with
+    /// nothing to tap. The plain sentence is what the screen shows; the raw case
+    /// is kept because it is the only thing worth pasting into a bug report.
+    struct BootFailure: Equatable {
+        var message: String
+        var detail: String
     }
 
     private(set) var bootState: BootState = .idle
@@ -68,6 +84,27 @@ final class AppModel {
     /// own `task`.
     var pendingPlayRequest: Bool = false
 
+    /// A guided game the Play tab should start on arrival, rather than sparring.
+    ///
+    /// Set beside ``pendingPlayRequest`` because a guided game *is* the play
+    /// request, only coached. Carried separately so the flag stays a plain
+    /// "start a game" everywhere else.
+    ///
+    /// This is the only route the app has to `guided.scanThreats.hitRate`, which
+    /// gates a required rung-2 skill: prompts are only ever logged inside a
+    /// guided game, so a user who follows the daily CTA into sparring every day
+    /// can never clear the rung however well they play.
+    var pendingGuidedHabit: Habit?
+
+    /// A set the Train tab should start on arrival, consumed by
+    /// ``TrainHomeScreen``.
+    ///
+    /// The mirror of ``pendingPlayRequest``, and it exists for the same reason:
+    /// Today's CTA names the set and its price ("10 puzzles · ~4 min"), so
+    /// landing on a hub with a length selector and a second Start button asks
+    /// for a decision the CTA already took.
+    var pendingTrainRequest: Bool = false
+
     /// A habit the Train tab should build its next session around, set when the
     /// user taps a rating leak.
     ///
@@ -98,7 +135,9 @@ final class AppModel {
         guard let database = AppDatabase.sharedIfAvailable else {
             // With no database there is nowhere to record a result, so putting
             // the user through a five-game diagnostic every launch would be
-            // worse than skipping it.
+            // worse than skipping it. Skipping it silently would be worse
+            // still, which is what ``databaseError`` and the notice the root
+            // view draws from it are for.
             needsCalibration = false
             return
         }
@@ -156,11 +195,42 @@ final class AppModel {
         } catch {
             // A missing network is the expected first-run failure; surface it
             // rather than silently running without an engine.
-            bootState = .failed(String(describing: error))
+            bootState = .failed(
+                BootFailure(message: Self.explain(error), detail: String(describing: error))
+            )
             return
         }
 
+        observeThermalRecovery()
         drainPendingAnalysis()
+    }
+
+    /// Runs the boot again after a failure.
+    ///
+    /// `boot()` guards on `.idle` so nothing can re-enter it while it is
+    /// running. A failure is the one state where starting over is exactly what
+    /// was asked for, so the gate is reopened here rather than loosened there.
+    func retryBoot() async {
+        guard case .failed = bootState else { return }
+        bootState = .idle
+        await boot()
+    }
+
+    /// What a boot failure means, in a sentence naming what fixes it.
+    ///
+    /// Every case here is about a file or a process the user cannot see, so the
+    /// sentence has to carry the only action available to them. Reinstalling is
+    /// a real fix for a missing network — the nets ship in the bundle — and
+    /// reopening is a real fix for a handshake the engine slept through.
+    static func explain(_ error: any Error) -> String {
+        switch error as? EngineError {
+        case .missingNetwork:
+            return "Part of the chess engine is missing from this install. Deleting the app and installing it again fixes it."
+        case .handshakeTimeout, .searchTimeout:
+            return "The chess engine did not start in time. This is usually a busy phone rather than a broken app."
+        case .notStarted, .searchAlreadyRunning, .engineRejected, .none:
+            return "The chess engine could not start, so there is nothing to play against yet."
+        }
     }
 
     /// Resumes any analysis pass left pending by a preemption or a crash.
@@ -178,8 +248,89 @@ final class AppModel {
         }
     }
 
-    func handleBackgrounding() async {
-        await engineService.suspendForBackground()
+    // MARK: - Scene phase
+
+    /// The engine drain, while the app is on its way out.
+    ///
+    /// Kept so the way back in can wait for it. A foreground resume that
+    /// overtakes an unfinished drain starts an analysis pass into an engine that
+    /// is a microsecond from being stopped, and the pass pauses itself on the
+    /// stop — which from the Review screen looks exactly like analysis that
+    /// silently refuses to finish.
+    private var engineDrain: Task<Void, Never>?
+
+    /// Drains the engine before the process is suspended.
+    ///
+    /// Synchronous on purpose, and holding a background-execution assertion for
+    /// the same reason ``GameSession`` refuses to hop to a `Task` for its clock:
+    /// this is the one moment the work has to actually happen. The drain is
+    /// three round trips to a thread that is mid-search, and it only starts
+    /// after two actor hops — long enough for iOS to suspend the process first,
+    /// leaving behind exactly what the drain exists to prevent: a `go` frozen
+    /// in flight and a UCI loop that the next launch finds waiting for a
+    /// `bestmove` nobody will ever send.
+    func handleBackgrounding() {
+        let assertion = BackgroundAssertion(name: "Engine drain")
+        let engineService = self.engineService
+        let previous = engineDrain
+        engineDrain = Task {
+            await previous?.value
+            await engineService.suspendForBackground()
+            assertion.end()
+        }
+    }
+
+    /// Picks the analysis backlog back up when the user comes back.
+    ///
+    /// The drain above returns a half-finished pass to `pending`, and until this
+    /// existed nothing asked for it again: the queue was only pumped at boot and
+    /// when a game finished. "Finish a game, switch apps while it analyses, come
+    /// back to read the review" is an ordinary evening, and it used to end on a
+    /// Review screen promising an analysis that would not arrive until the user
+    /// happened to play again.
+    ///
+    /// Safe to call on every activation. `analyzePending` is guarded by its own
+    /// `isDraining` flag and resumes from the evaluations already on disk, so an
+    /// activation during a live pass is a no-op rather than a second pass.
+    func handleForegrounding() {
+        // SwiftUI reports `.active` on the way in as well as on the way back, so
+        // this can land before — or instead of — the boot that owns the engine.
+        // Draining then would run every queued game against an engine that has
+        // not started, and each one would be marked failed for it.
+        guard bootState == .ready else { return }
+
+        let engineService = self.engineService
+        let drain = engineDrain
+        Task {
+            // Deliberately *waiting on* the drain rather than queueing behind
+            // it: a pass takes tens of seconds, and putting it in the same chain
+            // would make the next backgrounding hold its assertion until the
+            // whole backlog had been analysed.
+            await drain?.value
+            guard let service = AnalysisService.shared(engineService: engineService) else { return }
+            await service.analyzePending()
+        }
+    }
+
+    /// Re-drains the analysis queue once the device has cooled off.
+    ///
+    /// Thermal pressure pauses a pass mid-game (`AnalysisService.shouldPause`),
+    /// and a phone that got hot enough to trigger it is usually a phone the user
+    /// is still holding — so waiting for the *next* launch to notice is waiting
+    /// for the one event that may not come. `.serious` and above is what pauses,
+    /// so anything below it is the signal to try again.
+    private func observeThermalRecovery() {
+        // `queue: .main` so the handler lands on the actor this model already
+        // lives on; the work it starts is a detached Task either way.
+        NotificationCenter.default.addObserver(
+            forName: ProcessInfo.thermalStateDidChangeNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            let state = ProcessInfo.processInfo.thermalState
+            guard state == .nominal || state == .fair else { return }
+            MainActor.assumeIsolated { self?.drainPendingAnalysis() }
+        }
     }
 
     /// Resolves a route into the tab selection and push stack that show it.
@@ -194,6 +345,7 @@ final class AppModel {
             pendingPlayRequest = true
         case .train:
             selectedTab = .train
+            pendingTrainRequest = true
         case .profile:
             selectedTab = .profile
         case .review, .moment:
@@ -207,11 +359,47 @@ final class AppModel {
         }
     }
 
+    /// Finishes whatever is pushed on Today, then goes on to the next step.
+    ///
+    /// The review lives in the Today stack, so a screen that says "done here,
+    /// now do your puzzles" has to clear the stack as well as change the tab —
+    /// otherwise the game the user has just finished reviewing is still sitting
+    /// on Today when they come back to it.
+    func advance(to route: Route) {
+        todayPath.removeAll()
+        navigate(to: route)
+    }
+
+    /// Opens Play on a coached game aimed at one habit.
+    ///
+    /// Separate from ``navigate(to:)`` rather than a fifth `Route` case, because
+    /// the route enum is also the Today stack's push type and a guided game is
+    /// not a push — it is the Play tab, started differently.
+    func navigate(toGuidedGame habit: Habit) {
+        selectedTab = .play
+        pendingGuidedHabit = habit
+        pendingPlayRequest = true
+    }
+
     /// Marks the pending play request consumed so returning to the tab later
     /// does not start a second game.
     func consumePlayRequest() -> Bool {
         defer { pendingPlayRequest = false }
         return pendingPlayRequest
+    }
+
+    /// The habit the pending game should be coached on, taken so a later visit
+    /// to the tab starts an ordinary sparring game.
+    func consumeGuidedRequest() -> Habit? {
+        defer { pendingGuidedHabit = nil }
+        return pendingGuidedHabit
+    }
+
+    /// Marks the pending Train request consumed, so coming back to the tab later
+    /// lands on the hub rather than dropping straight into another set.
+    func consumeTrainRequest() -> Bool {
+        defer { pendingTrainRequest = false }
+        return pendingTrainRequest
     }
 
     /// Opens Train with its next session aimed at one habit.
@@ -225,5 +413,43 @@ final class AppModel {
     func consumeTrainingHabit() -> Habit? {
         defer { pendingTrainingHabit = nil }
         return pendingTrainingHabit
+    }
+}
+
+/// Permission to keep running for a moment after the app leaves the screen.
+///
+/// iOS suspends a backgrounded process at the first opportunity and does not
+/// warn the code it is about to freeze. Work that has already been *scheduled*
+/// is not work that has been *done*, which is the whole hazard: the engine drain
+/// is a handful of awaits, and without an assertion the process can stop between
+/// any two of them, mid-`stop`, mid-`isready`.
+///
+/// A no-op where there is no UIKit — the Mac does not suspend apps this way.
+@MainActor
+final class BackgroundAssertion {
+
+    #if canImport(UIKit)
+        private var task: UIBackgroundTaskIdentifier = .invalid
+    #endif
+
+    init(name: String) {
+        #if canImport(UIKit)
+            // The expiration handler is not optional in practice: an assertion
+            // still held when the time runs out gets the app killed, and a kill
+            // here is precisely the "engine frozen mid-search" state the drain
+            // was protecting against.
+            task = UIApplication.shared.beginBackgroundTask(withName: name) { [weak self] in
+                self?.end()
+            }
+        #endif
+    }
+
+    /// Hands the time back. Safe to call twice; the second call does nothing.
+    func end() {
+        #if canImport(UIKit)
+            guard task != .invalid else { return }
+            UIApplication.shared.endBackgroundTask(task)
+            task = .invalid
+        #endif
     }
 }

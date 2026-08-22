@@ -36,6 +36,11 @@ struct ProfileSnapshot: Sendable, Hashable {
     /// Occurrences keyed by ``CauseTag`` raw value, for the drill-in.
     var occurrences: [String: [LeakOccurrence]]
 
+    /// How far back ``occurrences`` were read from, so the sparklines can span
+    /// the window the app actually looked at rather than a nominal one. See
+    /// ``LeakTrend/make(from:now:observedSince:maximumDays:bucketCount:)``.
+    var occurrenceWindowStart: Date?
+
     var generatedAt: Date
 
     func points(for metric: ProfileChartMetric) -> [ProfileSeriesPoint] {
@@ -59,8 +64,10 @@ struct ProfileSnapshot: Sendable, Hashable {
         leaks: [Leak],
         series: [ProfileChartMetric: [ProfileSeriesPoint]],
         occurrences: [String: [LeakOccurrence]],
+        occurrenceWindowStart: Date? = nil,
         leakWindowGames: Int,
         gamesAvailable: Int,
+        historyUnreadable: Bool = false,
         ladder: [Rung] = Curriculum.default,
         tuning: DomainTuning.Focus = DomainTuning.default.focus,
         now: Date = Date()
@@ -78,9 +85,18 @@ struct ProfileSnapshot: Sendable, Hashable {
             leakWindowGames: leakWindowGames,
             // Below the analyser's minimum the per-cause numbers are noise, so
             // the section says how many more games it needs instead of ranking
-            // three data points as if they were a diagnosis.
-            leakState: .forSamples(have: gamesAvailable, need: tuning.leakMinimumGames),
+            // three data points as if they were a diagnosis. A failed read gets
+            // its own state: "no games recorded yet" on an account with forty
+            // of them is the screen asserting an absence that is not true.
+            leakState: historyUnreadable
+                ? .unreadable
+                : .forSamples(
+                    have: gamesAvailable,
+                    need: tuning.leakMinimumGames,
+                    noun: "analysed games"
+                ),
             occurrences: occurrences,
+            occurrenceWindowStart: occurrenceWindowStart,
             generatedAt: now
         )
     }
@@ -103,8 +119,9 @@ struct ProfileSnapshot: Sendable, Hashable {
             ),
             leaks: [],
             leakWindowGames: 0,
-            leakState: .nothingYet(noun: "games"),
+            leakState: .nothingYet(noun: "analysed games"),
             occurrences: [:],
+            occurrenceWindowStart: nil,
             generatedAt: now
         )
     }

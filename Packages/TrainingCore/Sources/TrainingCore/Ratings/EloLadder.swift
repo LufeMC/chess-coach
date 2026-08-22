@@ -36,16 +36,32 @@ public struct LadderGame: Sendable, Hashable {
     /// rating that counts them measures the coach, not the user.
     public var containedLevel2AssistedRetry: Bool
 
+    /// How many moves the user took back during the game, at any hint level.
+    ///
+    /// ``containedLevel2AssistedRetry`` is the loud case — the coach drew the
+    /// refutation — and it is also the rarest. The quiet ones matter more:
+    /// every blunder over the threshold is offered back for free, so a win
+    /// after two retracted blunders moved the rating exactly as far as a clean
+    /// win did. The number then climbed faster than the player, and the ladder
+    /// served opponents they could not beat unaided.
+    ///
+    /// Discounted rather than refused. The game was still played — refusing it
+    /// would freeze the rating of anyone who leans on the take-back, which is
+    /// the player who most needs the number to be right.
+    public var retractionCount: Int
+
     public init(
         opponentRating: Double,
         outcome: GameOutcome,
         mode: LadderGameMode = .sparring,
-        containedLevel2AssistedRetry: Bool = false
+        containedLevel2AssistedRetry: Bool = false,
+        retractionCount: Int = 0
     ) {
         self.opponentRating = opponentRating
         self.outcome = outcome
         self.mode = mode
         self.containedLevel2AssistedRetry = containedLevel2AssistedRetry
+        self.retractionCount = retractionCount
     }
 }
 
@@ -128,9 +144,27 @@ public enum EloLadder {
         return mode == .guided ? base * tuning.guidedKMultiplier : base
     }
 
+    /// How far a K-factor is cut by the take-backs a game contained.
+    ///
+    /// Halved per retraction, to a floor of a quarter. One take-back is a slip
+    /// or a single caught blunder and the game is still mostly the player's;
+    /// past two the result says more about how many attempts they had than
+    /// about how they play, and cutting further would only be noise on a number
+    /// that has already stopped meaning much.
+    ///
+    /// The constant lives here rather than in `DomainTuning` because it is not
+    /// a dial: it is the arithmetic of the discount itself, and there is no
+    /// value of it a caller should be choosing.
+    public static func retractionMultiplier(retractionCount: Int) -> Double {
+        pow(0.5, Double(min(max(retractionCount, 0), 2)))
+    }
+
     /// Applies one game.
     ///
     /// `R += K(S − E)`.
+    ///
+    /// A game with take-backs in it counts for less — see
+    /// ``retractionMultiplier(retractionCount:)``.
     ///
     /// An unrated game returns the state completely untouched — including the
     /// game counter and the drift boost. Advancing the K schedule on a game
@@ -144,6 +178,7 @@ public enum EloLadder {
         guard !game.containedLevel2AssistedRetry else { return state }
 
         let k = kFactor(state: state, mode: game.mode, tuning: tuning)
+            * retractionMultiplier(retractionCount: game.retractionCount)
         let expected = expectedScore(userRating: state.rating, opponentRating: game.opponentRating)
 
         var next = state

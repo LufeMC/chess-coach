@@ -101,7 +101,7 @@ private struct RungSection: View {
 
                 Spacer(minLength: 8)
 
-                Text(rung.completionFraction)
+                Text(rung.completionSummary)
                     .typeRole(.caption, monospacedDigits: true)
 
                 Image(systemName: "chevron.right")
@@ -127,16 +127,38 @@ private struct RungSection: View {
                 SkillRow(skill: skill)
             }
 
-            if !rung.blockerMessages.isEmpty {
+            if let summary = rung.blockerSummary {
                 // One wrapped line, not one row per blocker with an arrow
                 // glyph in front of it. Three stacked arrows read as three
                 // separate instructions to act on; they are three facts about
-                // the same wait, and they belong in one sentence.
-                Text(rung.blockerMessages.joined(separator: " · "))
+                // the same wait, and they belong in one sentence — one that
+                // says what the wait is *for*.
+                //
+                // The one exception to this screen's "the accent belongs to the
+                // leak" rule: when the line says a promotion is waiting it is
+                // the only thing on the ladder that is an action, and a
+                // secondary-grey sentence is how the user misses it.
+                Text(summary)
                     .typeRole(.caption, monospacedDigits: true, appliesForeground: false)
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(rung.isReadyToAdvance ? Palette.accent.dynamic : Color.secondary)
                     .fixedSize(horizontal: false, vertical: true)
                     .padding(.top, 2)
+            }
+
+            if rung.skills.contains(where: { !$0.isRequired }) {
+                // Once per open rung, not once per optional row. Without it
+                // "Optional" is a chip the reader has to guess the meaning of,
+                // and the obvious guess — that it is optional *for now* — is
+                // the one that makes an unmet row look like a blocker.
+                //
+                // The second clause is what makes the header fraction legible:
+                // it counts every row in the rung, so a user who has met all
+                // four required skills still reads "4/6" and has no way to tell
+                // that the two outstanding ones were never gates.
+                Text("Optional skills are tracked but don't hold you back. The count beside the rung includes them.")
+                    .typeRole(.label, appliesForeground: false)
+                    .foregroundStyle(.tertiary)
+                    .fixedSize(horizontal: false, vertical: true)
             }
         }
     }
@@ -187,15 +209,15 @@ private struct SkillRow: View {
 
     @ViewBuilder
     private var detail: some View {
-        if let samplesNeeded = skill.samplesNeeded {
+        if let pending = skill.pending {
             // Honest empty state, not a zero. A zero blunder rate and an
             // unmeasured blunder rate look identical, and one of them is a lie.
             //
-            // Said in four words rather than eleven: the long form wrapped to
-            // two lines under every unmeasured skill, which on a fresh account
-            // is most of them, and repeating a sentence that long down a list
-            // turns an honest disclosure into clutter.
-            Text(samplesNeeded == 1 ? "Needs 1 more game" : "Needs \(samplesNeeded) more games")
+            // The noun comes from the metric rather than being assumed to be
+            // "games": most of this ladder is not gated on games, and an
+            // instruction that does not work is worse than no instruction —
+            // the user follows it, nothing moves, and the ladder reads broken.
+            Text(pending.note)
                 .typeRole(.label, monospacedDigits: true, appliesForeground: false)
                 .foregroundStyle(.tertiary)
                 .fixedSize(horizontal: false, vertical: true)

@@ -81,6 +81,94 @@ public enum MomentExplainer {
         DiagnosisTable.row(for: Finding(detector: evidence.detector, subtype: evidence.subtype))
     }
 
+    // MARK: - Units the reader already has
+
+    /// Material in the words a club player counts in.
+    ///
+    /// "310cp" is engine vocabulary. The rest of the app converts — the move
+    /// list prints "+1.2" — and the one place that explains a mistake from the
+    /// user's own game should be the last to make them learn a unit.
+    ///
+    /// A piece is named only where the figure is close enough to that piece's
+    /// own value to *be* it. A 400-point swing is a queen for a rook, not "a
+    /// piece", and printing the nearest name regardless would be inventing a
+    /// material fact nothing checked — the one thing this file exists to avoid.
+    /// Everything between the named values counts pawns instead, which stays
+    /// true of a centipawn figure whatever produced it.
+    static func material(_ centipawns: Double) -> String {
+        let value = abs(centipawns).rounded()
+        if value >= 950 { return "a queen and more" }
+        if isNear(value, PieceValues.queen) { return "a queen" }
+        if isNear(value, PieceValues.rook) { return "a rook" }
+        // One band for both minors: an exchange count knows what a square was
+        // worth, not which of the two pieces was standing on it.
+        if value >= 280, value <= 380 { return "a piece" }
+        // Rook for a minor is 170 or 180, and every player calls that the exchange.
+        if value >= 155, value <= 195 { return "the exchange" }
+        if value < 50 { return "a fraction of a pawn" }
+        let whole = max(1, Int((value / 100).rounded()))
+        return whole == 1 ? "about a pawn" : "about \(spelled(whole)) pawns"
+    }
+
+    /// Within half a pawn of a named piece.
+    static func isNear(_ value: Double, _ piece: Int) -> Bool {
+        abs(value - Double(piece)) < Double(PieceValues.pawn) / 2
+    }
+
+    /// Where the position stood, in the words the graph above the note is
+    /// already drawn in.
+    ///
+    /// A player reads a game as winning, better, level, worse or lost, and that
+    /// vocabulary needs no key — where "0.32 in expected points" is
+    /// results-theory that also collides with the rating points on the next
+    /// screen. The bands are wide because the search behind them is a dozen or
+    /// so plies deep: the difference between 0.30 and 0.45 does not reliably
+    /// survive a re-analysis on another device, so printing either figure would
+    /// promise a precision the number does not have.
+    static func standing(_ score: UCIScore) -> String {
+        if case .mate(let count) = score {
+            return count > 0 ? "a forced mate" : "a forced mate against you"
+        }
+        let centipawns = score.centipawnValue()
+        if centipawns >= 500 { return "winning" }
+        if centipawns >= 200 { return "clearly better" }
+        if centipawns >= 80 { return "slightly better" }
+        if centipawns > -80 { return "level" }
+        if centipawns > -200 { return "slightly worse" }
+        if centipawns > -500 { return "clearly worse" }
+        return "losing"
+    }
+
+    /// How far the move moved the game, as two readings rather than a number.
+    ///
+    /// `nil` when both sides of the move land in the same band: "from level to
+    /// level" proves nothing, and the clause is better left out than filled. The
+    /// size of the drop is on the screen either way — the judgment chip and the
+    /// graph both carry it — so the note loses nothing by refusing to guess.
+    static func swing(_ facts: MomentFacts) -> String? {
+        let before = standing(facts.context.evalBefore)
+        let after = standing(facts.context.evalAfter)
+        guard before != after else { return nil }
+        return "from \(before) to \(after)"
+    }
+
+    /// Plies as moves. A player counts their own moves, not half-moves.
+    static func moves(_ plies: Int) -> String {
+        let whole = max(1, (plies + 1) / 2)
+        return whole == 1 ? "one move" : "\(spelled(whole)) moves"
+    }
+
+    static func spelled(_ n: Int) -> String {
+        switch n {
+        case 1: "one"
+        case 2: "two"
+        case 3: "three"
+        case 4: "four"
+        case 5: "five"
+        default: "\(n)"
+        }
+    }
+
     // MARK: - Clause 2: the proof
 
     /// The clause that names what the app actually computed.
@@ -108,18 +196,50 @@ public enum MomentExplainer {
         let attackers = facts.occupancyAfter.attackers(of: square, by: facts.opponent).count
         let defenders = facts.occupancyAfter.attackers(of: square, by: facts.mover).count
         let balance = "\(facts.plural(attackers, "attacker")) to \(facts.plural(defenders, "defender"))"
-        let worth = "\(Int(evidence.magnitude))cp"
 
-        if facts.hasRefutation, evidence.flags.contains(.refutationCapturesTarget) {
-            return "\(facts.refutationSAN) takes it — \(balance) on \(square.notation), \(worth)."
+        // Only an engine-confirmed capture is allowed to price the piece. The
+        // detector will also fire on the static exchange count alone whenever
+        // the move cost an inaccuracy's worth of ground, and that count cannot
+        // see a pin, a check or a desperado — so on a move the engine answered
+        // some other way, "the exchange there wins a piece" is a material claim
+        // nothing verified. The count itself is a fact about the board and
+        // stays; naming their real answer is the more useful sentence anyway,
+        // because that answer is the move that was actually missed.
+        guard facts.engineTakesTarget else {
+            let count = "On \(square.notation) the count is \(balance)"
+            guard facts.hasRefutation else { return count + "." }
+            return count + ", though their strongest answer was \(facts.refutationSAN) rather than the capture."
         }
-        return "On \(square.notation) it is \(balance), and the exchange there wins \(worth)."
+
+        let worth = material(evidence.magnitude)
+        if evidence.flags.contains(.refutationCapturesTarget) {
+            return "\(facts.refutationSAN) takes it — \(balance) on \(square.notation), which is \(worth)."
+        }
+        // The capture is further down their line than the first move, so the
+        // move to name is the one that starts it: that is the move the player
+        // had to see coming.
+        return "\(facts.refutationSAN) comes first, and your \(facts.targetPiece) on \(square.notation) "
+            + "goes with it — \(balance) there, which is \(worth)."
     }
 
     private static func threatProof(_ facts: MomentFacts, evidence: MomentEvidence) -> String? {
         guard facts.hasRefutation else { return nil }
-        return "They played \(facts.refutationSAN), the move the position was already threatening, "
-            + "and it was worth \(facts.points(evidence.magnitude)) in expected points."
+        // The detector knows the square the threat was aimed at, and naming it
+        // is the difference between a note that says a punishment landed and one
+        // that says where to have been looking.
+        guard let square = evidence.squares.first else {
+            // No magnitude here on purpose: the detector measures the threat as
+            // a half-budget probe score minus a full-budget search score, which
+            // is fine for ranking findings against each other and not fine to
+            // print as a number the reader takes at face value.
+            return "They played \(facts.refutationSAN), the move the position was already threatening."
+        }
+        // Clause one has already said the move ignored the threat, so repeating
+        // that here would be the same sentence twice. What it has not said is
+        // the thing the detector actually proved: the opponent's move was on the
+        // board before this one, so the square was there to be looked at.
+        return "They played \(facts.refutationSAN), and it was available before \(facts.playedSAN) too — "
+            + "\(square.notation) was the square to be looking at."
     }
 
     private static func allowedTacticProof(_ facts: MomentFacts, evidence: MomentEvidence) -> String? {
@@ -130,12 +250,24 @@ public enum MomentExplainer {
 
         // Clause one has already named the refuting move; repeating it here just
         // to hang a motif off it reads as a stutter, so the proof picks up where
-        // that sentence left off.
-        var sentence = motif.map { "The point is \($0)" }
-            ?? "It costs \(facts.points(facts.context.deltaEP)) in expected points"
+        // that sentence left off. With no motif to name, the honest magnitude is
+        // where the game went — the same reading the graph above is showing.
+        var sentence: String
+        if let motif {
+            sentence = "The point is \(motif)"
+        } else if let reading = swing(facts) {
+            sentence = "It takes the position \(reading)"
+        } else if let resolution {
+            // No motif and no change of standing to report, but the line does
+            // win material, and how fast it lands is something to check.
+            return "The material comes off within \(moves(resolution))."
+        } else {
+            // Nothing left to prove: clause one has already named the refuting
+            // move, and a sentence that only restates that it was bad is filler.
+            return nil
+        }
         if let resolution {
-            sentence += ", and the material is off within "
-                + "\(facts.count(resolution)) \(resolution == 1 ? "ply" : "plies")"
+            sentence += ", and the material is off within \(moves(resolution))"
         }
         return sentence + "."
     }
@@ -143,13 +275,20 @@ public enum MomentExplainer {
     private static func missedTacticProof(_ facts: MomentFacts, evidence: MomentEvidence) -> String? {
         let steps = Array(facts.context.bestLineSteps.prefix(MissedTacticDetector.horizon))
         guard !steps.isEmpty else { return nil }
-        let motif = themePhrase(facts, evidence: evidence)
         let resolution = LineReplay.resolutionPly(steps, for: facts.mover)
 
-        var sentence = motif.map { "\(facts.bestSAN) is \($0)" } ?? "\(facts.bestSAN) is the move"
-        sentence += ", worth \(Int(evidence.magnitude))cp"
+        // Without a motif there is no mechanism to state, and "Re8 is the move,
+        // worth 180cp" is the "wins a knight" announcement in another costume.
+        // Setting the task is the honest move: the reader can do it, and the
+        // note has not claimed to have taught anything it did not.
+        guard let motif = themePhrase(facts, evidence: evidence) else {
+            return "The engine preferred \(facts.bestSAN) here. Set the position up and find what "
+                + "it hits that \(facts.playedSAN) did not."
+        }
+
+        var sentence = "\(facts.bestSAN) is \(motif), worth \(material(evidence.magnitude))"
         if let resolution {
-            sentence += " by ply \(resolution)"
+            sentence += " within \(moves(resolution))"
         }
         return sentence + "."
     }
@@ -160,7 +299,10 @@ public enum MomentExplainer {
             let applied = LineReplay.apply(uci: threat, to: facts.context.positionBefore) {
             sentence += " and answers their idea of \(applied.move.san)"
         }
-        return sentence + "; \(facts.playedSAN) cost \(facts.points(facts.context.deltaEP)) in expected points."
+        if let reading = swing(facts) {
+            sentence += "; \(facts.playedSAN) took the position \(reading)"
+        }
+        return sentence + "."
     }
 
     private static func tradeProof(_ facts: MomentFacts, evidence: MomentEvidence) -> String? {
@@ -173,11 +315,13 @@ public enum MomentExplainer {
         if evidence.subtype == .losesMaterial {
             return "Count the order on \(square.notation): \(facts.plural(recapturers, "recapture")) "
                 + "against \(facts.plural(support, "piece")) of yours behind it, "
-                + "and the exchange comes out \(Int(evidence.magnitude))cp short."
+                + "and the exchange comes out \(material(evidence.magnitude)) short."
         }
-        let standing = EvalMath.expectedPoints(score: facts.context.evalBefore)
-        return "You were on \(facts.points(standing)) expected points before it, and every trade from there "
-            + "suits the side with more to hold on to."
+        // One voice, and a mechanism. The old branch switched to "You were on
+        // 0.62 expected points before it" — a second address to the reader in
+        // the same template, and an outcome with nothing to do about it.
+        return "Count what is left on the board after the trade: with material to hold on to, "
+            + "fewer pieces suits whoever is ahead, so it is the side behind that wants them on."
     }
 
     private static func kingProof(_ facts: MomentFacts, evidence: MomentEvidence) -> String? {
@@ -210,8 +354,8 @@ public enum MomentExplainer {
             // same question as "was this good for you" whenever the defender is
             // the one to move.
             let verdict = before == after
-                ? "The bitbase says this is \(bitbaseWord(before)) either way"
-                : "The bitbase is exact here: \(bitbaseWord(before)) before \(facts.playedSAN), "
+                ? "This ending is known: it is \(bitbaseWord(before)) either way"
+                : "This ending is known exactly: \(bitbaseWord(before)) before \(facts.playedSAN), "
                     + "\(bitbaseWord(after)) after it"
             return verdict + ", and \(facts.bestSAN) held the other result."
         }
@@ -227,8 +371,12 @@ public enum MomentExplainer {
         if evidence.flags.contains(.resultClassFlip) {
             return "The result changed with this move — \(facts.bestSAN) was the way to keep it."
         }
-        return "\(facts.bestSAN) was the move, and \(facts.playedSAN) "
-            + "cost \(facts.points(facts.context.deltaEP)) in expected points."
+        // No named position and no exact answer, so there is no method to hand
+        // over. Naming the cost and stopping would be an outcome with nothing
+        // behind it; the task is at least something to do at the board.
+        return "The engine wanted \(facts.bestSAN). Play both moves out from here — an ending like "
+            + "this turns on technique rather than calculation, and naming the rule that separates "
+            + "them is the work."
     }
 
     private static func openingProof(_ facts: MomentFacts, evidence: MomentEvidence) -> String? {
@@ -248,7 +396,12 @@ public enum MomentExplainer {
         case .disconnectedRooks:
             return "Development is not finished until the rooks can see each other along the back rank."
         default:
-            return nil
+            // The wildcard row's own sentence is "broke an opening principle",
+            // which names no principle. Rather than leave the note as an
+            // assertion with no proof under it, count the thing the principle is
+            // actually about.
+            return "Count what is still on its starting square, then compare that with what "
+                + "\(facts.bestSAN) would have brought out."
         }
     }
 
@@ -344,31 +497,38 @@ public enum MomentExplainer {
         return prefix + facts.choose(stepPhrasings(facts.diagnosis.stepTag), salt: "step")
     }
 
+    /// The step, named rather than numbered.
+    ///
+    /// The numbers pointed at a routine the app never teaches: no lesson,
+    /// onboarding card or Train concept presents the five steps as a sequence,
+    /// so "Step 5" on a first-time reviewer's first note raised a question about
+    /// steps 1 to 4 that nothing on the device answers. The instructions stand
+    /// on their own; the numbering comes back with the lesson.
     static func stepPhrasings(_ step: StepTag) -> [String] {
         switch step {
         case .s1WhatChanged:
             [
-                "Step 1 is the one to rebuild: say what their last move changed before you pick yours.",
+                "Rebuild the first habit: say what their last move changed before you pick yours.",
                 "Start the next move by naming what their move just did."
             ]
         case .s2ChecksCapturesThreats:
             [
-                "Step 2: list every check, capture and threat — theirs as well as yours.",
+                "List every check, capture and threat — theirs as well as yours.",
                 "Walk their checks and captures before you settle on a move."
             ]
         case .s3Candidates:
             [
-                "Step 3: find a second and a third candidate before committing to one.",
+                "Find a second and a third candidate before committing to one.",
                 "Widen the candidate list; the first move that comes to mind was not the move."
             ]
         case .s4Calculate:
             [
-                "Step 4: calculate to the end of the line and look at the position you land in.",
+                "Calculate to the end of the line and look at the position you land in.",
                 "Take the calculation one move further than felt necessary."
             ]
         case .s5BlunderCheck:
             [
-                "Step 5, the blunder check, is what would have caught this.",
+                "A blunder check is what would have caught this: what attacks the square you chose?",
                 "One blunder check before releasing the piece is all this needed."
             ]
         case .kKnowledge:
@@ -391,8 +551,11 @@ public enum MomentExplainer {
         let opening = clock
             ? "With the clock nearly gone you still found \(facts.playedSAN), the engine's first choice"
             : "\(facts.playedSAN) was the engine's first choice"
-        let gap = "the position genuinely branched here — the next-best line was "
-            + "\(facts.points(facts.context.criticalityGap)) of a point worse"
+        // No figure on the gap. Praise is the one note with nothing to fix, so
+        // a number here would be decoration — and the fact worth stating is the
+        // one criticality is defined by: there was a real distance between the
+        // best move and the next one, which is why finding it counted.
+        let gap = "the position genuinely branched here — the second-best move was a clear step down"
         let ask = facts.choose(
             [
                 "Say out loud what you checked before you played it; that is the routine to keep.",
@@ -411,15 +574,25 @@ public enum MomentExplainer {
     /// inventing it — so the note sets a task the player can actually do on a
     /// board instead.
     static func unexplained(_ facts: MomentFacts) -> String {
-        let cost = facts.points(facts.context.deltaEP)
+        let slide = swing(facts).map { "let the position slide \($0)" } ?? "simply let the position get worse"
         switch facts.diagnosis.causeTag {
         case .positionalDrift:
-            return "Nothing hung and nothing was threatened: \(facts.playedSAN) simply let the position "
-                + "get \(cost) of a point worse, and the engine wanted \(facts.bestSAN). "
+            // "Nothing was threatened" is only true when the threat probe
+            // actually ran. It is skipped whenever the side to move was in
+            // check, and there is none at all for a ply outside the enrichment
+            // window or one whose probe search was cut short — so on those
+            // moments the app never looked, and a note that reports the negative
+            // anyway is inventing the one fact it is least entitled to. A king
+            // move out of check is exactly the case: something *was* threatening
+            // the king, and nothing here checked what else.
+            let opening = facts.context.threatProbe == nil
+                ? "Nothing hung here"
+                : "Nothing hung and nothing was threatened"
+            return "\(opening): \(facts.playedSAN) \(slide), and the engine wanted \(facts.bestSAN). "
                 + "Set the two positions side by side and name what changed — which squares you gave up, "
                 + "which piece got worse. No engine line will hand you that answer."
         default:
-            return "\(facts.playedSAN) cost \(cost) of a point and no single pattern explains it. "
+            return "\(facts.playedSAN) \(slide), and no single pattern explains it. "
                 + "Put the position before the move next to the position after it and name the difference "
                 + "before you look at \(facts.bestSAN)."
         }

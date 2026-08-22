@@ -41,12 +41,32 @@ struct ChessCoachApp: App {
                 }
         }
         .onChange(of: scenePhase) { _, phase in
-            // The engine must be drained before suspension: iOS terminates
-            // processes holding CPU in the background, and a search interrupted
-            // that way leaves the UCI loop waiting for a `bestmove` that never
-            // arrives, deadlocking the next launch.
-            if phase == .background {
-                Task { await model.handleBackgrounding() }
+            switch phase {
+            case .background:
+                // The engine must be drained before suspension: iOS terminates
+                // processes holding CPU in the background, and a search
+                // interrupted that way leaves the UCI loop waiting for a
+                // `bestmove` that never arrives, deadlocking the next launch.
+                //
+                // Called straight through rather than from a `Task`: the model
+                // takes a background-execution assertion synchronously here, and
+                // an assertion taken after a hop can be taken after the process
+                // has already been frozen.
+                model.handleBackgrounding()
+            case .active:
+                // The other half of the same story, and the half that was
+                // missing: backgrounding pauses whatever pass was running, and
+                // nothing used to ask for it again until the next launch or the
+                // next finished game.
+                model.handleForegrounding()
+            case .inactive:
+                // The doorway between the two — a notification shade, the app
+                // switcher, an incoming call — and not a state either side of
+                // this should act on. Draining here would fire on every
+                // half-swipe.
+                break
+            @unknown default:
+                break
             }
         }
         #if os(macOS)

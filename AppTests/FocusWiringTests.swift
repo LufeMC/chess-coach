@@ -196,8 +196,11 @@ private final class FocusRecordingDriver: PuzzleSessionDriver {
     var isSessionFinished: Bool { true }
     var loadFailure: String? { nil }
     var puzzleRating: Double { 1000 }
+    var puzzleRatingDeviation: Double { 0 }
 
     func startSession(focus: WeeklyFocus?) async { startedWith = focus }
+    func startCalculationSet() async {}
+    func markItemShown() {}
     func offer(uci: String) async -> PuzzleSolveMachine.MoveResult { .illegal }
     func revealHint() -> String? { nil }
     func skipCurrent() async {}

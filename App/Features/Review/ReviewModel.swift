@@ -37,8 +37,9 @@ final class ReviewModel {
     private(set) var moveRows: [ReviewMoveRow] = []
     private(set) var momentCards: [ReviewMomentCard] = []
     private(set) var phaseSegments: [ReviewPhaseSegment] = []
-    /// Mean accuracy over the user's other recent games. `nil` on the first one.
-    private(set) var accuracyAverage: Double?
+    /// What this game's accuracy is worth comparing against. `nil` when there is
+    /// no comparable set — see ``ReviewAccuracyReference``.
+    private(set) var accuracyReference: ReviewAccuracyReference?
 
     // MARK: Navigation
 
@@ -46,6 +47,13 @@ final class ReviewModel {
     /// the board, the scrubber marker and the move-list highlight.
     private(set) var selectedIndex = 0
     private(set) var orientation: Piece.Color = .white
+    /// The colour the reader actually played.
+    ///
+    /// Distinct from ``orientation``, which the flip control moves. Anything
+    /// phrased as "you" — the axis label, the eval reading under the board —
+    /// has to follow this one, or turning the board around would change who the
+    /// screen thinks the reader is.
+    private(set) var playedSide: Piece.Color = .white
     /// Moment whose card is stroked in the filmstrip, if the board is standing on
     /// one. Cleared as soon as the user scrubs elsewhere.
     private(set) var activeMomentID: UUID?
@@ -113,22 +121,65 @@ final class ReviewModel {
 
     /// Gives up on the questions and uncovers the review.
     ///
-    /// Skipping still writes a score — of whatever was answered before the
-    /// user stopped. A game whose questions were skipped is reviewed as far as
-    /// this screen is concerned; re-asking them on the next open would make the
-    /// screen feel like it was arguing.
+    /// Skipping writes a score only when at least one question was answered. A
+    /// score written for nothing is what made this control unforgiving: the
+    /// stored score is the flag that stops the questions being built again, so
+    /// one stray tap used to discard the exercise for that game permanently.
+    /// Having answered and then stopped is a real judgement and is kept —
+    /// re-asking those would make the screen feel like it was arguing.
     func skipSelfCheck() { finishSelfCheck() }
 
     private func finishSelfCheck() {
         guard !selfCheckFinished else { return }
         selfCheckFinished = true
+        selfCheckResult = Self.resultLine(
+            questions: selfCheckQuestions,
+            answers: selfCheckAnswers
+        )
 
-        guard let database else { return }
+        // The reveal has to land on something. The questions moved the board to
+        // whichever move the user named, which is almost never a moment, so
+        // without this the filmstrip uncovers with no ring, the counter reads
+        // "—/3" and the coach card — the most valuable thing on the screen — is
+        // simply absent until the user guesses to tap a thumbnail.
+        if let first = momentCards.first { select(momentID: first.id) }
+
+        guard let database, !selfCheckAnswers.isEmpty else { return }
         let id = gameID
         let score = selfCheckScore
         Task.detached(priority: .utility) {
             try? database.games.setSelfCheckScore(score, forGame: id)
         }
+    }
+
+    /// What the questions came to, shown once they are done.
+    ///
+    /// The point of asking before the engine speaks is to find out which of your
+    /// own judgements to trust; a score that is recorded and never shown cannot
+    /// do that. Names the move that was missed when there is one, because "2 of
+    /// 3" alone does not tell anyone what to look at.
+    private(set) var selfCheckResult: String?
+
+    nonisolated static func resultLine(
+        questions: [ReviewSelfCheck.Question],
+        answers: [String: Int]
+    ) -> String? {
+        guard !questions.isEmpty, !answers.isEmpty else { return nil }
+
+        let score = ReviewSelfCheck.score(questions: questions, answers: answers)
+        var line = "Before the engine: \(score) of \(questions.count)"
+
+        let missed = questions.first { question in
+            guard let answer = answers[question.id] else { return false }
+            return answer != question.correct
+        }
+        if let missed, missed.answer.ply != nil {
+            line += " · you missed \(missed.answer.label)"
+        }
+
+        let unanswered = questions.filter { answers[$0.id] == nil }.count
+        if unanswered > 0 { line += " · \(unanswered) skipped" }
+        return line
     }
 
     /// Moments this screen has not counted as read yet.
@@ -149,6 +200,38 @@ final class ReviewModel {
     func load() async {
         guard case .loading = loadState else { return }
         await reload()
+    }
+
+    /// How often the row is re-read while a pass is still outstanding.
+    static let analysisPollInterval = Duration.seconds(2)
+
+    /// Re-reads the game once the post-game pass settles.
+    ///
+    /// Without this the screen loaded exactly once. Opening the review a few
+    /// seconds after a game — the most common path there is — landed on a notice
+    /// promising the curve would fill in, and it never did: no moments, no
+    /// self-check, no verdict, until the user backed out and came in again.
+    ///
+    /// Only a *settled* pass is worth redrawing for. Reloading on every tick
+    /// would rebuild the timeline and the questions under a user who is
+    /// scrubbing, which is a worse screen than a stale one.
+    func followAnalysis(interval: Duration = analysisPollInterval) async {
+        guard let database else { return }
+        let id = gameID
+
+        while !Task.isCancelled {
+            guard analysisState == .pending || analysisState == .running else { return }
+            try? await Task.sleep(for: interval)
+            guard !Task.isCancelled else { return }
+
+            let state = await Task.detached(priority: .utility) { () -> AnalysisState? in
+                ((try? database.games.game(id: id)) ?? nil)?.analysis
+            }.value
+
+            guard let state, state != analysisState else { continue }
+            await reload()
+            return
+        }
     }
 
     func reload() async {
@@ -176,7 +259,11 @@ final class ReviewModel {
 
         switch outcome {
         case .failed(let message):
-            loadState = .failed(message)
+            // The GRDB description is the only useful thing anyone debugging
+            // this will have, so it goes to the log; the screen gets a sentence
+            // a player can act on instead of "SQLite error 13".
+            AppLog.persistence.error("Could not read game \(id.uuidString, privacy: .public): \(message, privacy: .public)")
+            loadState = .failed(StorageFailureText.reading(message))
         case .missing:
             loadState = .missing
         case .loaded(let snapshot):
@@ -206,19 +293,30 @@ final class ReviewModel {
                     ply: row.ply,
                     label: row.label,
                     byUser: row.isWhite == userIsWhite,
-                    thinkTimeMs: thinkTimes[row.ply] ?? 0
+                    thinkTimeMs: thinkTimes[row.ply] ?? 0,
+                    // The row's own chip, which is the classification analysis
+                    // wrote for *every* ply. The slate is capped at three, so
+                    // this is the only thing that knows about the mistakes that
+                    // did not make it — and the check needs it to keep them out
+                    // of the decoys rather than mark them wrong.
+                    isJudgedMistake: row.chip == .mistake || row.chip == .blunder
                 )
             },
-            moments: snapshot.moments.map {
-                ReviewSelfCheck.Input.Moment(ply: $0.ply, causeTag: $0.causeTag)
+            moments: snapshot.moments.map { moment in
+                ReviewSelfCheck.Input.Moment(
+                    ply: moment.ply,
+                    causeTag: moment.causeTag,
+                    refutationSAN: ReviewSuggestedQuestions.refutationSAN(for: moment)
+                )
             }
         )
     }
 
     private func apply(_ snapshot: ReviewSnapshot) {
         game = snapshot.game
-        orientation = snapshot.game.color == .black ? .black : .white
-        accuracyAverage = snapshot.accuracyAverage
+        playedSide = snapshot.game.color == .black ? .black : .white
+        orientation = playedSide
+        accuracyReference = snapshot.accuracyReference
 
         timeline = ReviewTimeline(moveRows: snapshot.moves)
         track = ReviewEvalTrack.build(
@@ -231,10 +329,15 @@ final class ReviewModel {
             orientation: orientation,
             moveRows: snapshot.moves
         )
+        // Grades rather than plies, so a row and the filmstrip card above it
+        // cannot disagree about what the same move was: both take the badge from
+        // ``ReviewMomentCards/classification(for:)``.
         moveRows = ReviewMoveRows.rows(
             moveRows: snapshot.moves,
             track: track,
-            momentPlies: Set(snapshot.moments.map(\.ply))
+            momentGrades: snapshot.moments.reduce(into: [:]) { grades, moment in
+                grades[moment.ply] = ReviewMomentCards.classification(for: moment)
+            }
         )
         phaseSegments = ReviewPhases.segments(timeline: timeline)
 
@@ -268,7 +371,8 @@ final class ReviewModel {
         )
 
         // Open on the first moment when there is one: the reason to reopen a game
-        // is almost never move 1.
+        // is almost never move 1. Seeding the selection is not reviewing it —
+        // see ``markReviewed(momentID:)`` for what counts.
         if let first = momentCards.first {
             select(momentID: first.id)
         } else {
@@ -287,6 +391,16 @@ final class ReviewModel {
     /// White-relative win percentage at the current position, for the eval bar.
     var whiteWinPercent: Double? { track.whiteWinPercent[selectedIndex] }
     var whiteMate: Int? { track.whiteMate[selectedIndex] }
+
+    /// "Am I winning here?" for the position on screen, in the reader's terms.
+    /// `nil` where nothing has been evaluated yet.
+    var evalReading: String? {
+        ReviewEvalReading.phrase(
+            whiteWinPercent: whiteWinPercent,
+            whiteMate: whiteMate,
+            playedSide: playedSide
+        )
+    }
 
     /// Ply of the move that produced the current position, if any.
     var currentPly: Int? { selectedIndex > 0 ? selectedIndex : nil }
@@ -330,7 +444,6 @@ final class ReviewModel {
         guard let card = card(withID: momentID) else { return }
         selectedIndex = timeline.clamp(card.positionIndex)
         activeMomentID = card.id
-        markReviewed(momentID: card.id)
     }
 
     /// Keeps the filmstrip's stroke honest: it marks where the board is standing,
@@ -350,6 +463,41 @@ final class ReviewModel {
         suggestedQuestions[id] ?? []
     }
 
+    /// Answers the reader has uncovered, by suggestion id.
+    ///
+    /// Held here rather than inside the card because one of these answers is
+    /// drawn on the *board*, which the card does not own. Keyed by suggestion id
+    /// — which carries the moment's id — so scrubbing away and back finds the
+    /// same chip open, and a different moment's chips closed.
+    private(set) var revealedSuggestionIDs: Set<String> = []
+
+    func toggleSuggestion(id: String) {
+        if revealedSuggestionIDs.remove(id) == nil { revealedSuggestionIDs.insert(id) }
+    }
+
+    /// The engine's move, drawn on the board while its answer is uncovered.
+    ///
+    /// Only for the moment the board is actually standing on: an arrow pointing
+    /// at a move that was available eleven plies ago is worse than no arrow. The
+    /// answer names the move in SAN and the board shows it on the squares, which
+    /// is the difference between being told "Re8" and seeing what Re8 does.
+    var boardArrows: [BoardArrow] {
+        guard let card = focusedCard else { return [] }
+        return suggestedQuestions(forMoment: card.id).compactMap { suggestion in
+            guard
+                revealedSuggestionIDs.contains(suggestion.id),
+                let uci = suggestion.arrowUCI,
+                uci.count >= 4
+            else { return nil }
+            let characters = Array(uci)
+            return BoardArrow(
+                from: Square(String(characters[0...1])),
+                to: Square(String(characters[2...3])),
+                style: .best
+            )
+        }
+    }
+
     /// Records that the student has now worked through a moment.
     ///
     /// The bump lives here rather than with the analysis pass that writes the
@@ -357,13 +505,20 @@ final class ReviewModel {
     /// game the user may never open, and ticking the day's "3 moments" off for
     /// that would make the streak a count of analysis runs.
     ///
+    /// For the same reason it is not called by ``select(momentID:)``. Selecting
+    /// is what opening the screen does on its own, and what a thumbnail tap
+    /// does; counting either turned "Review 3 moments" into two taps on a
+    /// filmstrip that was not even on screen yet. The caller is the coach card,
+    /// on the tap that uncovers the answer — the one act on this screen that
+    /// requires the reader to have looked at the position first.
+    ///
     /// `MomentStatus` already names the event — `reviewed` means "shown to the
     /// user and worked through" — so the new → reviewed transition is both the
     /// trigger and the guard against double counting: the id leaves
     /// ``unreviewedMomentIDs`` before the write is dispatched, so re-selecting
     /// the card, reopening the game or syncing the row from another device
     /// counts nothing further.
-    private func markReviewed(momentID: UUID) {
+    func markReviewed(momentID: UUID) {
         guard unreviewedMomentIDs.remove(momentID) != nil, let database else { return }
         let day = DailyLoop.dayKey(for: Date())
 
@@ -390,6 +545,16 @@ enum ReviewLoadOutcome: Sendable {
     case failed(String)
 }
 
+/// What this game's accuracy is compared against, and how big that set is.
+///
+/// The count travels with the average because a chip that says only "your avg
+/// 66%" is a number with no sample size, and a caret drawn off three games is
+/// noise wearing a trend's clothes. The screen names both.
+struct ReviewAccuracyReference: Sendable, Equatable {
+    var average: Double
+    var count: Int
+}
+
 /// One read of everything the screen needs, so the load is a single hop.
 struct ReviewSnapshot: Sendable {
     var game: Database.Game
@@ -400,13 +565,26 @@ struct ReviewSnapshot: Sendable {
     /// to — the same tag is a blunder-check problem at rung 1 and a move-choice
     /// problem above it.
     var rung: Int
-    /// Mean accuracy over the user's recent games, for the comparison chip.
-    /// `nil` until there is more than this game to compare against.
-    var accuracyAverage: Double?
+    /// The comparison the chip is entitled to draw, or `nil` when there is not
+    /// enough comparable history to draw one.
+    var accuracyReference: ReviewAccuracyReference?
 
-    /// How many finished games the comparison averages over. Small enough that
+    /// How many finished games the comparison looks back over. Small enough that
     /// it still describes how the user is playing *now*.
     static let comparisonWindow = 20
+
+    /// How far apart two opponents' ratings can be and still be the same test.
+    ///
+    /// Accuracy against a 900 and accuracy against a 1500 are not the same
+    /// measurement: the weaker opponent leaves far more positions with one
+    /// obvious move in them, and tracking the engine there is easier. Averaging
+    /// across the whole history made the chip partly a record of who the app had
+    /// been pairing the user with, which is not a thing they can practise.
+    static let comparableRatingBand = 150
+
+    /// Below this the average is one bad evening rather than a baseline, and the
+    /// honest chip is no chip.
+    static let minimumComparableGames = 5
 
     static func load(gameID: UUID, database: AppDatabase) throws -> ReviewSnapshot? {
         guard let game = try database.games.game(id: gameID) else { return nil }
@@ -415,7 +593,12 @@ struct ReviewSnapshot: Sendable {
         // missing evaluation table must not stop a game from opening, and a
         // comparison the app cannot compute is simply not shown.
         let recent = (try? database.games.recent(limit: comparisonWindow)) ?? []
-        let others = recent.filter { $0.id != gameID }.compactMap(\.userAccuracy)
+        let comparable = recent
+            .filter {
+                $0.id != gameID
+                    && abs($0.opponentRating - game.opponentRating) <= comparableRatingBand
+            }
+            .compactMap(\.userAccuracy)
 
         return ReviewSnapshot(
             game: game,
@@ -423,7 +606,12 @@ struct ReviewSnapshot: Sendable {
             moments: try database.moments.moments(forGame: gameID),
             evals: (try? database.games.evals(forGame: gameID)) ?? [],
             rung: (try? database.settings.current())?.currentRung ?? 1,
-            accuracyAverage: others.isEmpty ? nil : others.reduce(0, +) / Double(others.count)
+            accuracyReference: comparable.count >= minimumComparableGames
+                ? ReviewAccuracyReference(
+                    average: comparable.reduce(0, +) / Double(comparable.count),
+                    count: comparable.count
+                )
+                : nil
         )
     }
 }

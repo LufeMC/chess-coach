@@ -52,6 +52,10 @@ struct ReviewSelfCheckCard: View {
                     Text(verdictLine)
                         .typeRole(.caption, appliesForeground: false)
                         .foregroundStyle(isCorrect ? Palette.accent.dynamic : Palette.caution.dynamic)
+                        // The marking is the point of the exercise, and it
+                        // appears in place rather than as a new screen, so it
+                        // has to be announced instead of waiting to be found.
+                        .accessibilityAddTraits(.updatesFrequently)
 
                     Text(question.explanation)
                         .typeRole(.caption)
@@ -61,6 +65,19 @@ struct ReviewSelfCheckCard: View {
                         .buttonStyle(.primaryAction)
                 }
                 .transition(.opacity)
+            }
+
+            if !isRevealed {
+                // A caption-sized, tertiary "Skip" next to the counter is a
+                // control you hit by accident while reading the counter — and it
+                // ends the exercise for the whole game. Full width, its own row,
+                // and it says what it gives up.
+                Button("Skip the questions · go straight to the review") { onSkip() }
+                    .typeRole(.caption, appliesForeground: false)
+                    .foregroundStyle(.secondary)
+                    .frame(maxWidth: .infinity, alignment: .center)
+                    .padding(.vertical, 6)
+                    .buttonStyle(.pressable)
             }
         }
         .padding(16)
@@ -76,12 +93,6 @@ struct ReviewSelfCheckCard: View {
             Text("\(index + 1) of \(total)")
                 .typeRole(.caption, monospacedDigits: true, appliesForeground: false)
                 .foregroundStyle(.tertiary)
-            if !isRevealed {
-                Button("Skip") { onSkip() }
-                    .typeRole(.caption, appliesForeground: false)
-                    .foregroundStyle(.tertiary)
-                    .buttonStyle(.plain)
-            }
         }
     }
 
@@ -130,7 +141,21 @@ struct ReviewSelfCheckCard: View {
         }
         .buttonStyle(.plain)
         .disabled(isRevealed)
-        .accessibilityLabel(option.label)
+        // Colour is the only thing that separates "the right move" from "the one
+        // you picked" on screen, and a VoiceOver user was hearing the correct
+        // option announced as selected while their own answer read as a plain
+        // button — the exact opposite of what happened.
+        .accessibilityLabel(accessibilityLabel(isAnswer: isAnswer, isChoice: isChoice, label: option.label))
         .accessibilityAddTraits(isRevealed && isAnswer ? [.isSelected] : [])
+    }
+
+    private func accessibilityLabel(isAnswer: Bool, isChoice: Bool, label: String) -> String {
+        guard isRevealed else { return label }
+        switch (isAnswer, isChoice) {
+        case (true, true): return "\(label), correct answer, your answer"
+        case (true, false): return "\(label), correct answer"
+        case (false, true): return "\(label), your answer, not correct"
+        case (false, false): return label
+        }
     }
 }

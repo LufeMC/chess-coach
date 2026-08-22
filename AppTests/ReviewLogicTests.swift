@@ -168,10 +168,13 @@ struct EvalFormatTests {
         #expect(ReviewEvalFormat.pawns(2) == "0.0")
     }
 
-    @Test("Mate beats centipawns in the eval column")
+    /// The column already mixes a White-relative eval with a mover-relative
+    /// cost; "M4" against "−M3" was a third notation to decode, and its sign was
+    /// the part a player of Black reads backwards.
+    @Test("Mate beats centipawns in the eval column, and names the side")
     func evalLabel() {
-        #expect(ReviewEvalFormat.evalLabel(winPercent: 60, mate: 4) == "M4")
-        #expect(ReviewEvalFormat.evalLabel(winPercent: 60, mate: -2) == "\u{2212}M2")
+        #expect(ReviewEvalFormat.evalLabel(winPercent: 60, mate: 4) == "#4 W")
+        #expect(ReviewEvalFormat.evalLabel(winPercent: 60, mate: -2) == "#2 B")
         #expect(ReviewEvalFormat.evalLabel(winPercent: nil, mate: nil) == nil)
     }
 
@@ -195,6 +198,95 @@ struct EvalFormatTests {
         #expect(ReviewEvalFormat.equalBandWinPercent == expected)
         #expect(ReviewEvalFormat.equalBandWinPercent > 0)
     }
+
+    /// A mate is stored as 0/100, and inverting the sigmoid there returns the
+    /// clamp — about fourteen pawns. The cost column printed "−14.4" on exactly
+    /// the most dramatic move of the game, which reads as a bug rather than as
+    /// "this allowed mate".
+    @Test("A move that changes a forced mate is named, not priced")
+    func mateCost() {
+        #expect(ReviewEvalFormat.cost(winPctBefore: 62, winPctAfter: 0) == .allowedMate)
+        #expect(ReviewEvalFormat.cost(winPctBefore: 100, winPctAfter: 55) == .missedMate)
+        // Ordinary moves are unaffected.
+        #expect(ReviewEvalFormat.cost(winPctBefore: 62, winPctAfter: 20) == .pawns("\u{2212}5.1"))
+        #expect(ReviewEvalFormat.cost(winPctBefore: 40, winPctAfter: 60) == nil)
+        #expect(ReviewEvalFormat.cost(winPctBefore: nil, winPctAfter: 20) == nil)
+    }
+
+    /// Only a *change* counts. Keeping a mate you already had, or staying mated,
+    /// cost nothing new and must not print "mate" every ply to the end.
+    @Test("A mate that was already there is not charged again")
+    func standingMateIsNotACost() {
+        #expect(ReviewEvalFormat.cost(winPctBefore: 100, winPctAfter: 100) == nil)
+        #expect(ReviewEvalFormat.cost(winPctBefore: 0, winPctAfter: 0) == nil)
+    }
+
+    @Test("The cost is short in the column and a phrase in the caption")
+    func costPhrasing() {
+        #expect(ReviewMoveCost.allowedMate.label == "mate")
+        #expect(ReviewMoveCost.allowedMate.phrase(playedSAN: "Kf6") == "Kf6 allowed mate")
+        #expect(ReviewMoveCost.missedMate.phrase(playedSAN: "Kf6") == "Kf6 gave up a forced mate")
+        #expect(ReviewMoveCost.pawns("\u{2212}2.4").phrase(playedSAN: "Nxe5") == "\u{2212}2.4 after Nxe5")
+    }
+}
+
+// MARK: - Reading the curve
+
+/// The curve is drawn White-at-top and never flipped, so the words under the
+/// board are the only thing that answers "am I winning?" for a player of Black.
+@Suite("Eval reading")
+struct EvalReadingTests {
+
+    private func reading(cp: Int, side: Piece.Color) -> String? {
+        ReviewEvalReading.phrase(
+            whiteWinPercent: EvalMath.winPercent(cp: cp),
+            whiteMate: nil,
+            playedSide: side
+        )
+    }
+
+    @Test("The same position reads opposite ways to the two players")
+    func perspective() {
+        #expect(reading(cp: 400, side: .white) == "You are winning")
+        #expect(reading(cp: 400, side: .black) == "You are losing")
+        #expect(reading(cp: -400, side: .black) == "You are winning")
+    }
+
+    /// Four bands, not three. "You are winning" at six-tenths of a pawn is an
+    /// overclaim, and a reader who checks it against the position and finds it
+    /// wrong stops believing the ones that are right.
+    @Test("The words are graded, so a small edge is not called a win")
+    func bands() {
+        #expect(reading(cp: 20, side: .white) == "Level")
+        #expect(reading(cp: -20, side: .white) == "Level")
+        #expect(reading(cp: 90, side: .white) == "You are slightly better")
+        #expect(reading(cp: 90, side: .black) == "You are slightly worse")
+        #expect(reading(cp: 220, side: .white) == "You are better")
+        #expect(reading(cp: 900, side: .white) == "You are winning")
+    }
+
+    @Test("Mate is named in moves and given a side")
+    func mate() {
+        #expect(
+            ReviewEvalReading.phrase(whiteWinPercent: 100, whiteMate: 4, playedSide: .white)
+                == "Mate in 4 for you"
+        )
+        #expect(
+            ReviewEvalReading.phrase(whiteWinPercent: 100, whiteMate: 4, playedSide: .black)
+                == "Mate in 4 for them"
+        )
+        #expect(
+            ReviewEvalReading.phrase(whiteWinPercent: 0, whiteMate: -2, playedSide: .black)
+                == "Mate in 2 for you"
+        )
+    }
+
+    /// Nothing evaluated yet is an empty slot, never "Level" — a flat claim
+    /// about a position nobody has looked at.
+    @Test("An unevaluated position says nothing at all")
+    func silence() {
+        #expect(ReviewEvalReading.phrase(whiteWinPercent: nil, whiteMate: nil, playedSide: .white) == nil)
+    }
 }
 
 // MARK: - Move rows
@@ -204,19 +296,32 @@ struct MoveRowTests {
 
     @Test("Only judged moves earn a chip")
     func chips() {
-        #expect(ReviewMoveRows.chip(for: "blunder", isMoment: false) == .blunder)
-        #expect(ReviewMoveRows.chip(for: "mistake", isMoment: false) == .mistake)
-        #expect(ReviewMoveRows.chip(for: "inaccuracy", isMoment: false) == .inaccuracy)
+        #expect(ReviewMoveRows.chip(for: "blunder", momentGrade: nil) == .blunder)
+        #expect(ReviewMoveRows.chip(for: "mistake", momentGrade: nil) == .mistake)
+        #expect(ReviewMoveRows.chip(for: "inaccuracy", momentGrade: nil) == .inaccuracy)
         // The majority of a real game: no chip at all.
-        #expect(ReviewMoveRows.chip(for: "good", isMoment: false) == nil)
-        #expect(ReviewMoveRows.chip(for: nil, isMoment: false) == nil)
-        #expect(ReviewMoveRows.chip(for: "sensational", isMoment: false) == nil)
+        #expect(ReviewMoveRows.chip(for: "good", momentGrade: nil) == nil)
+        #expect(ReviewMoveRows.chip(for: nil, momentGrade: nil) == nil)
+        #expect(ReviewMoveRows.chip(for: "sensational", momentGrade: nil) == nil)
     }
 
     @Test("A best move is badged only where analysis also called it a moment")
     func bestNeedsAMoment() {
-        #expect(ReviewMoveRows.chip(for: "best", isMoment: false) == nil)
-        #expect(ReviewMoveRows.chip(for: "best", isMoment: true) == .great)
+        #expect(ReviewMoveRows.chip(for: "best", momentGrade: nil) == nil)
+        #expect(ReviewMoveRows.chip(for: "best", momentGrade: .great) == .great)
+    }
+
+    /// A proven result flip — a won ending that became a draw — is written
+    /// `"good"` on the move row because its expected-points loss is tiny, while
+    /// the slate grades it a mistake. The table used to show nothing at all on
+    /// the one move the filmstrip was shouting about.
+    @Test("A moment the row calls unremarkable still takes the slate's grade")
+    func momentGradeWinsOverAnUnremarkableRow() {
+        #expect(ReviewMoveRows.chip(for: "good", momentGrade: .mistake) == .mistake)
+        #expect(ReviewMoveRows.chip(for: nil, momentGrade: .mistake) == .mistake)
+        // The row's own verdict still wins where it made one: the two agree
+        // there anyway, and the row is the per-ply source.
+        #expect(ReviewMoveRows.chip(for: "blunder", momentGrade: .mistake) == .blunder)
     }
 
     @Test("Labels use move numbers, with the ellipsis for Black")
@@ -230,7 +335,7 @@ struct MoveRowTests {
                 move(ply: 46, san: "Nxe5", classification: "blunder", before: 40, after: 8),
             ],
             track: track,
-            momentPlies: [46]
+            momentGrades: [46: .blunder]
         )
 
         #expect(rows[0].label == "23. Nf3")
@@ -249,7 +354,7 @@ struct MoveRowTests {
         let rows = ReviewMoveRows.rows(
             moveRows: [move(ply: 46, san: "Nxe5", classification: "blunder", before: 47, after: 12)],
             track: track,
-            momentPlies: [46]
+            momentGrades: [46: .blunder]
         )
 
         #expect(rows[0].evalAfter == "+2.8")
@@ -265,7 +370,7 @@ struct MoveRowTests {
         let rows = ReviewMoveRows.rows(
             moveRows: [move(ply: 1, san: "e4")],
             track: ReviewEvalTrack(),
-            momentPlies: []
+            momentGrades: [:]
         )
 
         #expect(rows.count == 1)
@@ -279,7 +384,7 @@ struct MoveRowTests {
         let rows = ReviewMoveRows.rows(
             moveRows: [move(ply: 3), move(ply: 1), move(ply: 2)],
             track: ReviewEvalTrack(),
-            momentPlies: []
+            momentGrades: [:]
         )
         #expect(rows.map(\.ply) == [1, 2, 3])
     }
@@ -376,7 +481,24 @@ struct MomentCardTests {
         #expect(ReviewMomentCards.classification(for: moment(ply: 1, score: 1, deltaEP: 0.35)) == .blunder)
         #expect(ReviewMomentCards.classification(for: moment(ply: 1, score: 1, deltaEP: 0.22)) == .mistake)
         #expect(ReviewMomentCards.classification(for: moment(ply: 1, score: 1, deltaEP: 0.12)) == .inaccuracy)
-        #expect(ReviewMomentCards.classification(for: moment(ply: 1, score: 1, deltaEP: 0.01)) == .best)
+    }
+
+    /// The only way a moment is stored as a mistake with a loss this small is
+    /// `AnalysisPipeline.provesResultChange`: a detector proved the result class
+    /// flipped — a won king-and-pawn ending that became a draw — while the
+    /// centipawn score barely moved. Grading it off the loss alone badged the one
+    /// endgame error the pipeline goes out of its way to surface as "Best", in
+    /// the accent colour, above a note saying the win had been thrown away.
+    @Test("A mistake is never graded as praise, however small its loss")
+    func provenResultFlipIsNotPraise() {
+        let flip = moment(ply: 1, score: 1, deltaEP: 0.01)
+        #expect(ReviewMomentCards.classification(for: flip) == .mistake)
+        #expect(ReviewMomentCards.classification(for: flip) != .best)
+
+        // The praise path is untouched: it is the *kind*, not the delta, that
+        // earns it.
+        let praised = moment(ply: 1, score: 1, kind: "reinforcement", deltaEP: 0.01)
+        #expect(ReviewMomentCards.classification(for: praised) == .great)
     }
 
     @Test("The played move is marked on the thumbnail")
@@ -537,6 +659,21 @@ struct GameSummaryRowTests {
     func accuracy() {
         #expect(GameSummaryRow.make(game: game(result: "1-0", color: .white, accuracy: 82.4), opponentName: "O").accuracyText == "82%")
         #expect(GameSummaryRow.make(game: game(result: "1-0", color: .white), opponentName: "O").accuracyText == "—")
+    }
+
+    /// Thirty near-identical rows is what a month of play looks like, and the
+    /// one thing the reader is hunting for — the game they never finished
+    /// reviewing — was the one thing the row did not say.
+    @Test("A row says how much of the game is still unreviewed, and stays quiet otherwise")
+    func toReviewCaption() {
+        #expect(
+            GameSummaryRow.make(game: game(result: "1-0", color: .white), opponentName: "O")
+                .toReviewText == nil
+        )
+        #expect(
+            GameSummaryRow.make(game: game(result: "1-0", color: .white), opponentName: "O", toReviewCount: 2)
+                .toReviewText == "2 to review"
+        )
     }
 
     @Test("The analysis indicator shows only while something is outstanding")

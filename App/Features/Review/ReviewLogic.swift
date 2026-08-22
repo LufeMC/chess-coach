@@ -252,8 +252,12 @@ enum ReviewEvalFormat {
     /// count otherwise. White-relative in both cases.
     static func evalLabel(winPercent: Double?, mate: Int?) -> String? {
         if let mate {
-            // `M4` reads as "mate in 4 for White"; the minus marks Black's mate.
-            return mate >= 0 ? "M\(mate)" : "\(minus)M\(abs(mate))"
+            // Spelled out rather than `M4`. The column already mixes two frames
+            // of reference — White-relative evals beside mover-relative costs —
+            // and "M4"/"−M3" is a third thing to decode, unexplained anywhere on
+            // the screen. The side is named because the sign alone is what a
+            // Black player reads backwards.
+            return "#\(abs(mate)) \(mate >= 0 ? "W" : "B")"
         }
         guard let winPercent else { return nil }
         return pawns(centipawns(fromWhiteWinPercent: winPercent))
@@ -281,6 +285,48 @@ enum ReviewEvalFormat {
         return "\(minus)\(oneDecimal(abs(pawns)))"
     }
 
+    /// The win percentage at which the stored curve has saturated.
+    ///
+    /// The same bound ``centipawns(fromWhiteWinPercent:)`` clamps to, and for the
+    /// same reason: 0% and 100% are written by *mate* scores, which carry no
+    /// centipawn meaning at all, so inverting the sigmoid there returns the
+    /// clamp's own value rather than anything about the position.
+    static let saturatedWinPercent = 99.5
+
+    /// Which end of the curve a stored win percentage has saturated at.
+    enum MateEnd: Equatable, Sendable {
+        /// The side this percentage belongs to is mating.
+        case mating
+        /// The side this percentage belongs to is being mated.
+        case mated
+    }
+
+    static func mateEnd(_ winPercent: Double) -> MateEnd? {
+        if winPercent >= saturatedWinPercent { return .mating }
+        if winPercent <= 100 - saturatedWinPercent { return .mated }
+        return nil
+    }
+
+    /// What a move cost its mover.
+    ///
+    /// Mate is answered before the pawn arithmetic, because the arithmetic is
+    /// meaningless across a saturated end. A move that allows mate stores 0% for
+    /// its mover afterwards, and 0% inverts to the clamp — about fourteen pawns —
+    /// so the cost column used to print `−14.4` on precisely the most dramatic
+    /// move of the game. "−14.4" is not a smaller version of "you allowed mate";
+    /// it is a number a 1200 player reads as a bug.
+    ///
+    /// Only losses are named, which is why each mate case is gated both ways: a
+    /// move that keeps a mate it already had, or stays mated, cost nothing new
+    /// and falls through to the pawn figure (zero, and therefore nothing).
+    static func cost(winPctBefore: Double?, winPctAfter: Double?) -> ReviewMoveCost? {
+        guard let winPctBefore, let winPctAfter else { return nil }
+        if mateEnd(winPctAfter) == .mated, mateEnd(winPctBefore) != .mated { return .allowedMate }
+        if mateEnd(winPctBefore) == .mating, mateEnd(winPctAfter) != .mating { return .missedMate }
+        return lossLabel(moverLoss(winPctBefore: winPctBefore, winPctAfter: winPctAfter))
+            .map(ReviewMoveCost.pawns)
+    }
+
     /// U+2212, not a hyphen: hyphens are too short to read as a sign next to
     /// monospaced digits.
     static let minus = "\u{2212}"
@@ -290,7 +336,103 @@ enum ReviewEvalFormat {
     }
 }
 
+// MARK: - Reading the curve
+
+/// "Am I winning here?", answered in words for the position the board is
+/// standing on.
+///
+/// The scrubber is drawn White-at-top and never flipped, for a good reason —
+/// two games with the same shape have to look like the same object — but that
+/// leaves a player of Black watching the curve *rise* as they lose, and on the
+/// phone there was no number, no word and no eval bar to check it against. The
+/// axis names their end; this says which way it is going in the reader's own
+/// terms, so the graph can stay a shape rather than a puzzle.
+///
+/// The bands are deliberately not three. "You are winning" at six-tenths of a
+/// pawn is an overclaim, and a reader who checks it against the position and
+/// finds it wrong stops believing the ones that are right.
+enum ReviewEvalReading {
+
+    /// Half a pawn, the same band the graph greys out as effectively equal.
+    static let levelCentipawns = Double(ReviewEvalFormat.equalBandCentipawns)
+    /// A pawn and a half: an edge worth playing for, not a won game.
+    static let slightCentipawns = 150.0
+    /// Three pawns — a piece — past which "winning" is a fair word.
+    static let winningCentipawns = 300.0
+
+    /// - parameter whiteWinPercent: White-relative win percentage at the
+    ///   position, from ``ReviewEvalTrack``.
+    /// - parameter whiteMate: Mate distance, positive when White is mating.
+    /// - parameter playedSide: The colour the reader played, *not* the board
+    ///   orientation — flipping the board must not change who "you" is.
+    /// - returns: `nil` when nothing has been evaluated there yet, which reads
+    ///   as an empty slot rather than as "Level".
+    static func phrase(
+        whiteWinPercent: Double?,
+        whiteMate: Int?,
+        playedSide: Piece.Color
+    ) -> String? {
+        let sign: Double = playedSide == .white ? 1 : -1
+
+        if let whiteMate {
+            let moves = abs(whiteMate)
+            // A mate distance of zero is mate already on the board; there is no
+            // "in 0 moves" to print.
+            let distance = moves == 0 ? "Mate" : "Mate in \(moves)"
+            return Double(whiteMate) * sign >= 0 ? "\(distance) for you" : "\(distance) for them"
+        }
+
+        guard let whiteWinPercent else { return nil }
+        let centipawns = ReviewEvalFormat.centipawns(fromWhiteWinPercent: whiteWinPercent) * sign
+
+        switch abs(centipawns) {
+        case ..<levelCentipawns: return "Level"
+        case ..<slightCentipawns: return centipawns > 0 ? "You are slightly better" : "You are slightly worse"
+        case ..<winningCentipawns: return centipawns > 0 ? "You are better" : "You are worse"
+        default: return centipawns > 0 ? "You are winning" : "You are losing"
+        }
+    }
+}
+
 // MARK: - Move rows
+
+/// What one move cost the player who made it.
+///
+/// A value rather than a formatted string because the same cost is phrased three
+/// different ways on this screen — a 44pt table cell, a filmstrip caption, and a
+/// line under a thumbnail — and only the first of those has room for the short
+/// form. Handing every call site a pre-formatted `"mate"` produced the caption
+/// `"mate after Nxe5"`, which reads as gibberish.
+enum ReviewMoveCost: Equatable, Sendable {
+
+    /// A pawn figure, e.g. `"−2.4"`. Always a loss; see ``ReviewEvalFormat/lossLabel(_:)``.
+    case pawns(String)
+    /// The move let a forced mate happen.
+    case allowedMate
+    /// The move gave up a forced mate the mover already had.
+    case missedMate
+
+    /// The move table's Cost cell, which is a narrow monospaced column.
+    var label: String {
+        switch self {
+        case .pawns(let text): text
+        case .allowedMate, .missedMate: "mate"
+        }
+    }
+
+    /// The same cost written out, for the one caption with room for a phrase.
+    ///
+    /// Both mate cases are claims the engine actually made — the stored win
+    /// percentage for the mover is a mate score at one end of this move and not
+    /// at the other — so naming them is reporting, not inference.
+    func phrase(playedSAN: String) -> String {
+        switch self {
+        case .pawns(let text): "\(text) after \(playedSAN)"
+        case .allowedMate: "\(playedSAN) allowed mate"
+        case .missedMate: "\(playedSAN) gave up a forced mate"
+        }
+    }
+}
 
 /// One row of the move table.
 struct ReviewMoveRow: Identifiable, Sendable, Equatable {
@@ -323,27 +465,39 @@ enum ReviewMoveRows {
     /// Three of the five never do. `nil` and `"good"` are the unremarkable
     /// majority of any game, and `"best"` is unremarkable *too* — a club player
     /// finds the engine move constantly, and badging all of those turns the table
-    /// into a heat map, which the design conventions call out by name. `"best"`
-    /// earns a chip only where analysis also picked the position as a
-    /// reinforcement moment: found the right move somewhere it was genuinely
-    /// hard, which is the one case worth pointing at.
-    static func chip(for classification: String?, isMoment: Bool) -> BoardUI.MoveClassification? {
+    /// into a heat map, which the design conventions call out by name.
+    ///
+    /// What earns a badge on top of the stored string is the *slate*: a ply the
+    /// analysis picked out as a moment, badged with the grade the slate gave it.
+    /// That covers the reinforcement case ("best" somewhere it was genuinely
+    /// hard) which is the one kind of good move worth pointing at, and it also
+    /// settles a disagreement the two views used to have. A proven result flip —
+    /// a win that became a draw, admitted by `AnalysisPipeline.provesResultChange`
+    /// — is written `"good"` on the move row while the card grades it a mistake,
+    /// so the table showed nothing at all on the one move the filmstrip was
+    /// shouting about.
+    static func chip(
+        for classification: String?,
+        momentGrade: BoardUI.MoveClassification?
+    ) -> BoardUI.MoveClassification? {
         switch classification {
         case "blunder": .blunder
         case "mistake": .mistake
         case "inaccuracy": .inaccuracy
-        case "best": isMoment ? .great : nil
-        default: nil
+        default: momentGrade
         }
     }
 
+    /// - parameter momentGrades: Grade by ply for the plies the analysis kept as
+    ///   moments, from ``ReviewMomentCards/classification(for:)``. A ply absent
+    ///   from it is not a moment.
     static func rows(
         moveRows: [GameMove],
         track: ReviewEvalTrack,
-        momentPlies: Set<Int>
+        momentGrades: [Int: BoardUI.MoveClassification]
     ) -> [ReviewMoveRow] {
         moveRows.sorted { $0.ply < $1.ply }.map { row in
-            let isMoment = momentPlies.contains(row.ply)
+            let momentGrade = momentGrades[row.ply]
             let isWhite = moverColor(forPly: row.ply) == .white
             let moveNumber = (row.ply + 1) / 2
 
@@ -356,18 +510,16 @@ enum ReviewMoveRows {
                 // number was already spent on White's move".
                 label: isWhite ? "\(moveNumber). \(row.san)" : "\(moveNumber)… \(row.san)",
                 san: row.san,
-                chip: chip(for: row.classification, isMoment: isMoment),
+                chip: chip(for: row.classification, momentGrade: momentGrade),
                 evalAfter: ReviewEvalFormat.evalLabel(
                     winPercent: track.whiteWinPercent[row.ply],
                     mate: track.whiteMate[row.ply]
                 ),
-                loss: ReviewEvalFormat.lossLabel(
-                    ReviewEvalFormat.moverLoss(
-                        winPctBefore: row.winPctBefore,
-                        winPctAfter: row.winPctAfter
-                    )
-                ),
-                isMoment: isMoment
+                loss: ReviewEvalFormat.cost(
+                    winPctBefore: row.winPctBefore,
+                    winPctAfter: row.winPctAfter
+                )?.label,
+                isMoment: momentGrade != nil
             )
         }
     }
@@ -454,19 +606,21 @@ enum ReviewDiagnoses {
         return CoachingQuestions.question(forCauseTag: cause)
     }
 
-    /// The step of the move routine, numbered.
+    /// The step of the move routine, by name.
     ///
-    /// The number is carried because the app teaches the routine as a numbered
-    /// sequence and the user's word for the blunder check is "step 5" — a name
-    /// without the number is a synonym rather than a pointer back to the drill.
-    /// `K` has no number because it is not part of the routine at all.
+    /// Named rather than numbered. A number is a pointer, and there is nothing
+    /// for it to point at: no lesson, onboarding card or Train concept presents
+    /// the five steps as a sequence, so "Step 5 · Blunder check" on a first-time
+    /// reviewer's first card promises a curriculum the product does not have and
+    /// leaves them wondering what steps 1 to 4 were. The names carry the meaning
+    /// on their own; the numbers come back the day the routine is taught.
     static func stepTitle(_ step: AnalysisKit.StepTag) -> String {
         switch step {
-        case .s1WhatChanged: "Step 1 · What changed"
-        case .s2ChecksCapturesThreats: "Step 2 · Checks and threats"
-        case .s3Candidates: "Step 3 · Candidates"
-        case .s4Calculate: "Step 4 · Calculation"
-        case .s5BlunderCheck: "Step 5 · Blunder check"
+        case .s1WhatChanged: "What changed"
+        case .s2ChecksCapturesThreats: "Checks and threats"
+        case .s3Candidates: "Candidates"
+        case .s4Calculate: "Calculation"
+        case .s5BlunderCheck: "Blunder check"
         case .kKnowledge: "Knowledge, not process"
         }
     }
@@ -490,8 +644,8 @@ enum ReviewMomentCards {
         moveRows: [GameMove],
         limit: Int = limit
     ) -> [ReviewMomentCard] {
-        let lossByPly: [Int: Double] = moveRows.reduce(into: [:]) { result, row in
-            result[row.ply] = ReviewEvalFormat.moverLoss(
+        let costByPly: [Int: ReviewMoveCost] = moveRows.reduce(into: [:]) { result, row in
+            result[row.ply] = ReviewEvalFormat.cost(
                 winPctBefore: row.winPctBefore,
                 winPctAfter: row.winPctAfter
             )
@@ -509,10 +663,10 @@ enum ReviewMomentCards {
 
                 let classification = classification(for: moment)
                 let moveNumber = (moment.ply + 1) / 2
-                let loss = ReviewEvalFormat.lossLabel(lossByPly[moment.ply])
+                let cost = costByPly[moment.ply]
 
                 var caption = "Move \(moveNumber) · \(classification.title)"
-                if let loss { caption += " · \(loss)" }
+                if let cost { caption += " · \(cost.label)" }
 
                 return ReviewMomentCard(
                     id: moment.id,
@@ -530,7 +684,7 @@ enum ReviewMomentCards {
                         // The filmstrip's own caption slot carries the line the
                         // brief specifies; the card already shows the move number
                         // on the thumbnail and the grade in its badge.
-                        stake: loss.map { "\($0) after \(moment.playedSAN)" },
+                        stake: cost?.phrase(playedSAN: moment.playedSAN),
                         highlights: highlights(forUCI: moment.playedUCI)
                     ),
                     coachText: moment.coachText,
@@ -547,13 +701,25 @@ enum ReviewMomentCards {
     /// Reinforcement moments are `.great` rather than `.best`: they were picked
     /// *because* the position could have gone wrong, which is a different claim
     /// from "this matched the engine".
+    ///
+    /// A moment stored as a *mistake* is never graded as praise, even when its
+    /// expected-points loss is below the inaccuracy threshold. There is exactly
+    /// one way for that combination to reach the database:
+    /// `MomentBuilder.isMistakeCandidate` gates on the loss, so anything under
+    /// the threshold got in through `AnalysisPipeline.provesResultChange` — a
+    /// detector proved the *result class* changed (a won king-and-pawn ending
+    /// that became a draw) while the centipawn score barely moved, which is the
+    /// whole reason the bitbase exists. Grading off the loss alone returned
+    /// `.best`, so the one endgame error the pipeline goes out of its way to
+    /// surface arrived wearing an accent-coloured "Best" badge directly above a
+    /// note explaining that the win had been thrown away.
     static func classification(for moment: Database.Moment) -> BoardUI.MoveClassification {
         if MomentKind(rawValue: moment.kind) == .reinforcement { return .great }
         switch EvalMath.judgment(deltaEP: moment.deltaEP) {
         case .blunder: return .blunder
         case .mistake: return .mistake
         case .inaccuracy: return .inaccuracy
-        case .ok: return .best
+        case .ok: return .mistake
         }
     }
 
@@ -582,6 +748,20 @@ struct ReviewSuggestedQuestion: Identifiable, Equatable, Sendable {
     var id: String
     var question: String
     var answer: String
+    /// The habit this answer belongs to, when there is one. Carried so the card
+    /// can offer the drill rather than just naming it: the review → train step
+    /// of the loop otherwise exists only as Today's generic puzzle CTA, which
+    /// does not know which habit the user just watched themselves break.
+    var habit: Habit? = nil
+    /// A move to draw on the board while this answer is uncovered, in UCI.
+    ///
+    /// The board is already showing the position the answer is about, one tap
+    /// away from the chip, so an answer that names a move in prose and leaves the
+    /// reader to find e1 and e8 for themselves is doing half the job. Carried as
+    /// UCI because that is what the row stores; the arrow layer wants squares and
+    /// the sentence wants SAN, and converting once at the edge keeps the two
+    /// from disagreeing about which move is being discussed.
+    var arrowUCI: String? = nil
 }
 
 enum ReviewSuggestedQuestions {
@@ -610,12 +790,13 @@ enum ReviewSuggestedQuestions {
 
             var questions: [ReviewSuggestedQuestion] = []
 
-            if !card.bestSAN.isEmpty {
+            if let answer = bestMoveAnswer(for: stored) {
                 questions.append(
                     ReviewSuggestedQuestion(
                         id: "\(card.id)-best",
                         question: "What should I have played?",
-                        answer: "\(card.bestSAN) — the engine's move in this position."
+                        answer: answer,
+                        arrowUCI: stored.bestUCI.isEmpty ? nil : stored.bestUCI
                     )
                 )
             }
@@ -625,7 +806,8 @@ enum ReviewSuggestedQuestions {
                     ReviewSuggestedQuestion(
                         id: "\(card.id)-habit",
                         question: "How do I catch this next time?",
-                        answer: habit.microGoalTitle
+                        answer: habitInstruction(habit),
+                        habit: habit
                     )
                 )
             }
@@ -633,11 +815,115 @@ enum ReviewSuggestedQuestions {
             result[card.id] = questions
         }
     }
+
+    /// The engine's move, with enough of its line to be reproducible on a board.
+    ///
+    /// A bare `"Re8 — the engine's move in this position."` is the "wins a
+    /// knight" announcement in a different costume: it names the outcome and
+    /// teaches nothing about how the move was found. The stored lines are what
+    /// make it checkable — the variation the engine is counting on, and the
+    /// reply that punishes what was actually played.
+    ///
+    /// `nil` when neither line survived the round trip. Silence is better than a
+    /// move with no reason behind it, and the chip is simply not offered.
+    static func bestMoveAnswer(for moment: Database.Moment) -> String? {
+        guard
+            let decoded = AnalysisPipeline.moment(from: moment),
+            let best = decoded.bestSAN,
+            let before = Position(fen: decoded.fenBefore)
+        else { return nil }
+
+        let bestLine = LineReplay.replay(uci: decoded.pvBest, from: before, maxPlies: 4)
+            .map(\.move.san)
+
+        var refutation: [String] = []
+        if let played = LineReplay.apply(uci: decoded.playedUCI, to: before) {
+            refutation = LineReplay.replay(uci: decoded.pvRefutation, from: played.position, maxPlies: 3)
+                .map(\.move.san)
+        }
+
+        guard bestLine.count >= 2 || !refutation.isEmpty else { return nil }
+
+        var clauses: [String] = []
+        if bestLine.count >= 2 {
+            clauses.append("\(best) — the line runs \(bestLine.joined(separator: " ")).")
+        } else {
+            clauses.append("\(best) was the move here.")
+        }
+        if !refutation.isEmpty {
+            clauses.append(
+                "Set the position up and play \(decoded.playedSAN) instead: "
+                    + "the answer is \(refutation.joined(separator: " "))."
+            )
+        }
+        return clauses.joined(separator: " ")
+    }
+
+    /// The move that punished what was actually played, in SAN.
+    ///
+    /// The first ply of the stored refutation line, replayed from the position
+    /// *after* the played move. Shared with ``ReviewSelfCheck`` rather than
+    /// re-derived there: the check's threat question and this card's answer are
+    /// two views of the same stored line, and two decoders would eventually name
+    /// two different moves.
+    ///
+    /// `nil` for a row written before the payload column existed, or one whose
+    /// line does not replay — silence rather than a guess at what the reply was.
+    static func refutationSAN(for moment: Database.Moment) -> String? {
+        guard
+            let decoded = AnalysisPipeline.moment(from: moment),
+            let before = Position(fen: decoded.fenBefore),
+            let played = LineReplay.apply(uci: decoded.playedUCI, to: before)
+        else { return nil }
+        return LineReplay.replay(uci: decoded.pvRefutation, from: played.position, maxPlies: 1)
+            .first?
+            .move
+            .san
+    }
+
+    /// What a habit asks for at the board, in one sentence.
+    ///
+    /// ``Habit/microGoalTitle`` is a chip label — "Use the known technique" —
+    /// which names the habit without saying what to do with it. A user reading
+    /// this after watching themselves break the habit needs the instruction, not
+    /// the slogan; the slogan stays where it belongs, on the Focus chip.
+    static func habitInstruction(_ habit: Habit) -> String {
+        switch habit {
+        case .whatChanged:
+            "Before you pick a move, say what their last move changed: what it attacks now, what it stopped defending, where that piece goes next."
+        case .scanThreats:
+            "Every move, list their checks, captures and threats before you look at any idea of your own."
+        case .candidatesFirst:
+            "Name a second and a third candidate before you calculate any of them. The first move you see is rarely the move."
+        case .calcToQuiet:
+            "Calculate until the position is quiet — no captures, no checks left — and judge the position you land in rather than the move that got you there."
+        case .blunderCheck:
+            "With the move chosen and the piece not yet released, ask what attacks the square you are putting it on, and what it stops defending behind it."
+        case .kingSafety:
+            "Castle before the centre opens, and count what still guards the squares in front of your king before you push one of those pawns."
+        case .endgameTechnique:
+            "Stop and name the position — Lucena, Philidor, opposition — then follow the method instead of calculating it out from scratch."
+        case .convertCleanly:
+            "Ahead on material, trade pieces rather than pawns and leave them nothing to play for."
+        case .clockDiscipline:
+            "Spend the time where the position genuinely branches, and move quickly where only one move makes sense."
+        }
+    }
 }
 
 // MARK: - Verdict
 
 enum ReviewVerdicts {
+
+    /// The shortest game the summariser is allowed an opinion about, in
+    /// half-moves.
+    ///
+    /// A game resigned on move one is marked complete with no evaluations at
+    /// all, and the verdict then reads "A loss with no single moment behind it
+    /// … The game ran 0 moves. Nothing in this game crossed the threshold for
+    /// review." — a considered assessment of a game that never happened. Three
+    /// moves each is the floor at which there is anything to be wrong about.
+    static let minimumPlies = 6
 
     /// The game's one-line verdict and the paragraph under it.
     ///
@@ -654,6 +940,7 @@ enum ReviewVerdicts {
     ) -> GameSummary? {
         guard
             game.analysis == .complete,
+            moves.count >= minimumPlies,
             let result = game.result.flatMap(GameResult.init(rawValue:)),
             let color = game.color
         else { return nil }

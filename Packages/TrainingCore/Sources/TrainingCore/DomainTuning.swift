@@ -21,6 +21,7 @@ public struct DomainTuning: Sendable, Hashable {
     public var srs: SRS
     public var grading: Grading
     public var cards: Cards
+    public var calculation: Calculation
     public var puzzleRating: PuzzleRating
     public var ladder: Ladder
     public var calibration: Calibration
@@ -31,6 +32,7 @@ public struct DomainTuning: Sendable, Hashable {
         srs: SRS = SRS(),
         grading: Grading = Grading(),
         cards: Cards = Cards(),
+        calculation: Calculation = Calculation(),
         puzzleRating: PuzzleRating = PuzzleRating(),
         ladder: Ladder = Ladder(),
         calibration: Calibration = Calibration(),
@@ -40,6 +42,7 @@ public struct DomainTuning: Sendable, Hashable {
         self.srs = srs
         self.grading = grading
         self.cards = cards
+        self.calculation = calculation
         self.puzzleRating = puzzleRating
         self.ladder = ladder
         self.calibration = calibration
@@ -192,6 +195,73 @@ public struct DomainTuning: Sendable, Hashable {
         public init() {}
     }
 
+    // MARK: - Calculation set
+
+    /// The short set of deliberately-too-hard puzzles, served apart from the
+    /// daily queue.
+    ///
+    /// The daily set trains *recognition*: ``Cards/freshServingBand`` keeps every
+    /// fresh puzzle inside 150 points of the user, the grader reads anything
+    /// under ten seconds as `.easy`, and an attempt ends the moment the first
+    /// move is right. All of that is correct for building a pattern library and
+    /// none of it exercises the thing that separates 1500 from 2000, which is
+    /// sitting on one position for minutes and calculating a line to the end.
+    /// So the calculation work is a separate set with its own band, its own
+    /// size and its own time budget, rather than a knob on the daily one — the
+    /// two are trying to produce different memories and cannot share a band.
+    public struct Calculation: Sendable, Hashable {
+
+        /// Puzzles in one calculation set.
+        ///
+        /// Three, because the budget is per *puzzle* and not per set. At four
+        /// minutes each this is already twelve minutes of unbroken
+        /// concentration on top of the daily set, which is about as much as an
+        /// adult with a job will actually do on a weekday. A longer set gets
+        /// abandoned halfway, and an abandoned calculation puzzle teaches the
+        /// habit this set exists to break: stopping when the line gets hard.
+        public var setSize: Int = 3
+
+        /// Distance above the user's puzzle rating that the band starts.
+        ///
+        /// Load-bearing, and deliberately larger than ``Cards/freshServingBand``
+        /// so the two bands cannot overlap. At +150 — the top of the daily band
+        /// — a good day's recognition already solves most of them, and a set the
+        /// user can see at a glance is the daily set with a different label,
+        /// which is the silent substitution this whole mode exists to avoid.
+        /// At +200 the expected score is low enough that the answer has to be
+        /// worked out.
+        public var bandOffset: Int = 200
+
+        /// Width of the band above ``bandOffset``, so puzzles come from
+        /// `rating + 200 ... rating + 300`.
+        ///
+        /// A hundred points wide rather than a point: the corpus has to have
+        /// something in it, and the query orders by `random()` inside the band,
+        /// so a narrow band repeats the same handful of positions.
+        public var bandWidth: Int = 100
+
+        /// Minutes budgeted per puzzle, used to price the entry point.
+        ///
+        /// Four is the number the whole mode is built around: it is long enough
+        /// that recognition has already failed and calculation is the only route
+        /// left. It is a *budget*, never a countdown — nothing in the session
+        /// measures it against the clock, because a timer would reintroduce
+        /// exactly the speed pressure this set removes.
+        public var minutesPerPuzzle: Double = 4
+
+        /// How many candidates are fetched per slot before the longest lines are
+        /// picked out.
+        ///
+        /// The corpus query cannot filter on solution length — the moves are one
+        /// space-separated column — so length is chosen from an over-fetch
+        /// instead. Four candidates a slot is enough that a multi-move line is
+        /// almost always among them and small enough that the `IN` list and the
+        /// `ORDER BY random()` stay cheap.
+        public var candidateMultiple: Int = 4
+
+        public init() {}
+    }
+
     // MARK: - Puzzle rating (Glicko-1)
 
     public struct PuzzleRating: Sendable, Hashable {
@@ -291,7 +361,17 @@ public struct DomainTuning: Sendable, Hashable {
 
         /// A 5-game estimate outside this range is not credible — the ladder
         /// simply has not shown the user anything that far from the middle.
-        public var gameRatingRange: ClosedRange<Double> = 700...1900
+        ///
+        /// The ceiling is the top of rung 4's band, not a number of its own.
+        /// It used to be 1900, which made the diagnostic unable to express the
+        /// one result the whole app is aimed at: a user seeded as *competitive*
+        /// climbs the calibration ladder to 1900 and a 4-1 record against it
+        /// scores out at 1940, which was then shaved back to 1900 — while the
+        /// clean-sweep branch below happily reports 2100 by a different route.
+        /// Clamping to where the curriculum ends removes that contradiction and
+        /// still refuses the estimates the clamp exists for, which are the ones
+        /// the five opponents never probed.
+        public var gameRatingRange: ClosedRange<Double> = 700...2000
 
         /// Applied to the last opponent's rating on a clean sweep.
         public var sweepBonus: Double = 200
@@ -367,6 +447,19 @@ public struct DomainTuning: Sendable, Hashable {
 
         /// Critical moments needed before the hit rate is trusted.
         public var criticalMomentMinimumSamples: Int = 25
+
+        /// Guided prompts on one habit needed before its hit rate is trusted.
+        ///
+        /// Guided mode spends at most three pauses on a game and only some of
+        /// them ask about threats, so eight prompts is three or four guided
+        /// games: enough that one lucky answer cannot certify a required
+        /// rung-2 skill, few enough that the gate is still reachable inside a
+        /// week of ordinary play. Deliberately well below
+        /// ``themeMinimumAttempts`` — a puzzle attempt costs a minute, a
+        /// guided prompt costs an interruption in a real game, and a bar the
+        /// user can only clear by playing guided mode exclusively would be a
+        /// bar on the mode rather than on the skill.
+        public var guidedPromptMinimumSamples: Int = 8
 
         /// Themes rung 2 gates on.
         public var rung2Themes: [ThemeTag] = [

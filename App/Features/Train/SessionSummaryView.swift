@@ -27,9 +27,27 @@ import SwiftUI
 /// encoding with colour alone, applied honestly rather than in reverse.
 struct SessionSummaryView: View {
 
+    /// What the filled button actually does next.
+    ///
+    /// The button used to say `Continue`, which named neither destination. In
+    /// the endgame case it was worse than vague: dismissing the set handed a
+    /// twenty-move drill to the Train screen, which opened it as a second
+    /// full-screen board the user had not been told about.
+    enum NextStep: Equatable {
+        case backToTrain
+        case drill(title: String, positions: Int, moveBudget: Int)
+    }
+
     let progress: SessionProgress
     let missed: [MissedItem]
+    var nextStep: NextStep = .backToTrain
+    /// Whether this was the calculation set. Only ``ratingNote`` cares, and it
+    /// cares a great deal: the reason a daily set's rating can end flat is not
+    /// the reason a calculation set's can.
+    var isCalculationSet = false
     let onContinue: () -> Void
+    /// Leaves without the drill. Nil when there is nothing to defer.
+    var onDefer: (() -> Void)? = nil
 
     var body: some View {
         ScrollView {
@@ -37,17 +55,47 @@ struct SessionSummaryView: View {
                 VStack(spacing: 0) {
                     SummaryRow(symbol: "checkmark.circle", label: "Solved", value: progress.solvedLabel)
                     Divider().padding(.leading, 34)
+                    // Only when something actually came back. A permanent
+                    // `0/0 clean` row would be four-fifths of a scoreboard
+                    // about nothing.
+                    if let retries = progress.retriesLabel {
+                        SummaryRow(symbol: "arrow.counterclockwise", label: "Second looks", value: retries)
+                        Divider().padding(.leading, 34)
+                    }
                     SummaryRow(symbol: "lightbulb", label: "Hints", value: progress.hintsLabel)
                     Divider().padding(.leading, 34)
                     SummaryRow(symbol: "clock", label: "Time", value: progress.timeLabel)
                     Divider().padding(.leading, 34)
-                    SummaryRow(symbol: ratingSymbol, label: "Rating", value: progress.ratingLabel)
+                    SummaryRow(
+                        symbol: ratingSymbol,
+                        label: "Puzzle rating",
+                        value: isRatingSettled ? progress.ratingLabel : "settling"
+                    )
                 }
                 .padding(.horizontal, 16)
                 .elevation(.raised, cornerRadius: CornerRadius.card)
 
-                Button("Continue", action: onContinue)
-                    .buttonStyle(.primaryAction)
+                // Not the game rating the user is chasing, and the two are easy
+                // to confuse when the row says only "Rating". A zero is worth a
+                // sentence too: a set of reviews counts half and a position
+                // mined from the user's own game carries no rating at all, so
+                // "0" after ten honest puzzles otherwise reads as "none of that
+                // counted".
+                if let note = ratingNote {
+                    Text(note)
+                        .typeRole(.caption)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+
+                VStack(spacing: 10) {
+                    Button(continueTitle, action: onContinue)
+                        .buttonStyle(.primaryAction)
+
+                    if let onDefer {
+                        Button("Not now", action: onDefer)
+                            .buttonStyle(.secondaryAction)
+                    }
+                }
 
                 if !missed.isEmpty {
                     missedSection
@@ -58,16 +106,60 @@ struct SessionSummaryView: View {
             .padding(.bottom, 24)
         }
         .background(Palette.surfaceGround.dynamic.ignoresSafeArea())
-        .navigationTitle("Session")
+        .navigationTitle("Set done")
         #if os(iOS)
             .navigationBarTitleDisplayMode(.inline)
         #endif
     }
 
+    private var continueTitle: String {
+        switch nextStep {
+        case .backToTrain:
+            return "Back to Train"
+        case let .drill(title, positions, budget):
+            let count = positions == 1 ? "1 position" : "\(positions) positions"
+            return "Play the \(title) drill · \(count), up to \(budget) moves"
+        }
+    }
+
+    /// Below this the rating is settled enough for a session's change to mean
+    /// something.
+    ///
+    /// Glicko's deviation is the app's own uncertainty about the number, in the
+    /// same units. A new user starts at 350, where a single set can move the
+    /// rating a hundred points in either direction for reasons that have
+    /// nothing to do with how they played — so a signed `+12` there is noise
+    /// dressed as progress, and reading it as progress is exactly the habit a
+    /// rating row teaches. Around 150 the swings are small enough that the sign
+    /// is evidence.
+    static let settledDeviation = 150.0
+
+    private var isRatingSettled: Bool { progress.ratingDeviation < Self.settledDeviation }
+
     private var ratingSymbol: String {
+        guard isRatingSettled else { return "hourglass" }
         if progress.ratingDelta > 0 { return "arrow.up.right" }
         if progress.ratingDelta < 0 { return "arrow.down.right" }
         return "equal"
+    }
+
+    /// The sentence under the rows, when the number needs one.
+    private var ratingNote: String? {
+        if !isRatingSettled {
+            return "Your puzzle rating is still finding its level. A few more sets and a session's change will mean something."
+        }
+        guard progress.ratingDelta == 0 else { return nil }
+        // The daily set's explanation is the half-weight one, and it is simply
+        // untrue of a calculation set: every item in it is a full-weight fresh
+        // corpus puzzle. What flattens the number there is the expected score —
+        // Glicko already knows a puzzle 200 points above you is one you will
+        // usually miss, so missing it costs almost nothing. That is worth saying
+        // outright, because it is the reason attempting them is safe.
+        if isCalculationSet {
+            return "Puzzle rating unchanged — missing a puzzle rated above you costs almost nothing, "
+                + "which is what makes these safe to attempt."
+        }
+        return "Puzzle rating unchanged — reviews and positions from your own games count less."
     }
 
     private var missedSection: some View {
@@ -78,7 +170,34 @@ struct SessionSummaryView: View {
                 .foregroundStyle(Palette.caution.dynamic)
 
             FlowChips(items: missed)
+
+            // A list of pattern names is a list of things to look up. The one
+            // that came up most is worth defining here, in the same
+            // name-and-define breath the result banner uses, so the summary
+            // leaves the reader with an idea rather than a scoreboard.
+            if let lesson = recurringLesson {
+                Text(lesson)
+                    .typeRole(.caption)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
         }
+    }
+
+    /// The most-missed concept, defined.
+    ///
+    /// Only when it came up more than once — one miss is a puzzle, two is a
+    /// pattern — and only where the concept has a definition worth giving:
+    /// `rook endgame` is a kind of position rather than an idea, and glossing
+    /// it would be filler. No advice is invented on top of the definition;
+    /// how to *find* a pin and how to find a back-rank mate are different
+    /// instructions, and one sentence that covers both covers neither.
+    private var recurringLesson: String? {
+        let counts = missed.reduce(into: [String: Int]()) { $0[$1.concept, default: 0] += 1 }
+        guard let worst = counts.max(by: { ($0.value, $1.key) < ($1.value, $0.key) }), worst.value > 1,
+            let definition = PuzzleConcept.definition(for: worst.key)
+        else { return nil }
+        let name = worst.key.prefix(1).uppercased() + worst.key.dropFirst()
+        return "\(name) came up \(worst.value) times — \(definition)."
     }
 }
 

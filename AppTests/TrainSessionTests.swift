@@ -5,6 +5,7 @@
 
 import BoardUI
 import ChessKit
+import Database
 import Foundation
 import Testing
 import TrainingCore
@@ -46,14 +47,22 @@ private final class FakeDriver: PuzzleSessionDriver {
 
     var plans: [SessionItemPlan]
     var puzzleRating: Double = 1000
+    var puzzleRatingDeviation: Double = 0
     var loadFailure: String?
     /// Rating change applied on every graded item, so the summary's delta has
     /// something to report.
     var ratingStepPerItem: Double = 0
+    /// A stand-in for the clock `TrainingService` restarts on `markItemShown()`.
+    /// Recorded rather than measured so the latency test stays deterministic.
+    private(set) var itemShownCount = 0
 
     private(set) var currentIndex = 0
     private(set) var solveMachine: PuzzleSolveMachine?
     private(set) var hintsRequested = 0
+    /// Which entry point the model actually called. Recorded because the two
+    /// build different queues, and a model that asked for the wrong one would
+    /// otherwise pass every assertion about the queue it was handed.
+    private(set) var startedCalculationSet = false
 
     init(plans: [SessionItemPlan]) {
         self.plans = plans
@@ -68,6 +77,12 @@ private final class FakeDriver: PuzzleSessionDriver {
         begin()
     }
 
+    func startCalculationSet() async {
+        startedCalculationSet = true
+        currentIndex = 0
+        begin()
+    }
+
     private func begin() {
         guard let plan = itemOnScreen else {
             solveMachine = nil
@@ -77,6 +92,8 @@ private final class FakeDriver: PuzzleSessionDriver {
         machine?.start()
         solveMachine = machine
     }
+
+    func markItemShown() { itemShownCount += 1 }
 
     func offer(uci: String) async -> PuzzleSolveMachine.MoveResult {
         guard var machine = solveMachine else { return .illegal }
@@ -103,6 +120,13 @@ private final class FakeDriver: PuzzleSessionDriver {
     func skipCurrent() async {
         puzzleRating += ratingStepPerItem
         advance()
+    }
+
+    /// Cards whose same-day retry the model asked to have withdrawn.
+    private(set) var equivalentCredits: [SRSCard.ID] = []
+
+    func creditEquivalentAnswer(cardID: SRSCard.ID) {
+        equivalentCredits.append(cardID)
     }
 
     private func advance() {
@@ -296,10 +320,12 @@ struct PuzzleSessionModelTests {
 
         let verdict = model.stage.verdict
         #expect(verdict?.solved == false)
+        // Two sentences, not `move: theme`. The tag belongs to the puzzle; the
+        // move being named is whichever one the user was standing in front of.
         #expect(
             verdict?.message
-                == "Missed — the pawn to e5: a pin — the piece cannot move without "
-                    + "exposing the one behind it."
+                == "Missed — the pawn to e5. This puzzle was about a pin — the piece cannot move "
+                    + "without exposing the one behind it."
         )
         // The ring marks where the user actually went.
         #expect(verdict?.ring == BoardRing(square: .d5, tone: .wrong))
@@ -355,6 +381,11 @@ struct PuzzleSessionModelTests {
         let model = PuzzleSessionModel(driver: driver, database: nil)
         await model.start()
 
+        // First rung: a description of the move, not the move.
+        model.revealHint()
+        #expect(model.hintLevel == .nudge)
+        #expect(model.hintMove == nil, "the nudge must not draw the arrow")
+        // Second rung: the arrow.
         model.revealHint()
         #expect(model.hintMove == "e7e5")
         #expect(driver.hintsRequested == 1)
@@ -368,7 +399,10 @@ struct PuzzleSessionModelTests {
         #expect(model.missed.map(\.concept) == ["skewer"])
     }
 
-    @Test("A second hint on the same item does not double-count")
+    /// Both rungs of the ladder cost one hint, not two. The answer is fetched
+    /// from the driver on the first tap and held back until the second, so the
+    /// attempt is spent once however far the user climbs.
+    @Test("Climbing the hint ladder does not double-count the hint")
     func hintIsIdempotentPerItem() async {
         let driver = FakeDriver(plans: [singleMovePlan()])
         let model = PuzzleSessionModel(driver: driver, database: nil)
@@ -376,7 +410,13 @@ struct PuzzleSessionModelTests {
 
         model.revealHint()
         model.revealHint()
+        model.revealHint()
         #expect(driver.hintsRequested == 1)
+        #expect(model.hintLevel == .answer)
+
+        _ = model.attemptMove(from: .e7, to: .e5)
+        await model.waitForGrading()
+        #expect(model.progress.hinted == 1)
     }
 
     @Test("Skipping is graded as a failure")
@@ -468,11 +508,237 @@ struct PuzzleSessionModelTests {
         #expect(model.progress.solvedLabel == "1/1")
     }
 
-    @Test("A session that assembles nothing goes straight to the summary")
+    /// `Time` is the summary's only reading of effort, and it used to be wall
+    /// clock: a set interrupted by a phone call reported the length of the call.
+    @Test("Time spent out of the app is not counted as solving time")
+    func backgroundedTimeIsNotCounted() async {
+        // In the order the model asks: the start, the pause a minute later, the
+        // resume four minutes after that, and the summary a minute later again.
+        let clock = SteppedClock(seconds: [0, 60, 300, 360])
+        let model = PuzzleSessionModel(
+            driver: FakeDriver(plans: [singleMovePlan()]), database: nil, clock: clock.next)
+        await model.start()
+
+        model.pauseClock()
+        model.resumeClock()
+
+        _ = model.attemptMove(from: .e7, to: .e5)
+        await model.waitForGrading()
+        model.continueAfterVerdict()
+
+        #expect(model.progress.timeLabel == "02:00", "the four minutes in the background are not solving time")
+    }
+
+    /// The summary is the wrong screen for a set that served nothing:
+    /// `displayTotal` floors the denominator at one, so an empty queue was
+    /// reported as `Solved 0/1` — a puzzle the user was shown and missed.
+    @Test("A session that assembles nothing says so instead of claiming a miss")
     func emptySession() async {
         let model = PuzzleSessionModel(driver: FakeDriver(plans: []), database: nil)
         await model.start()
+
+        guard case let .unavailable(message) = model.stage else {
+            Issue.record("expected an explanation, got \(model.stage)")
+            return
+        }
+        #expect(message.contains("rating band"))
+        #expect(model.progress.completed == 0)
+    }
+
+    @Test("A refused move on a second-chance item says another try is left")
+    func retrySaysAnotherTryIsLeft() async {
+        let plan = makePlan(line: ["e2e4", "e7e5"], kind: .relearn(cardID: UUID()))
+        let model = PuzzleSessionModel(driver: FakeDriver(plans: [plan]), database: nil)
+        await model.start()
+
+        let acceptance = model.attemptMove(from: .b8, to: .a6)
+        await model.waitForGrading()
+
+        guard case let .rejected(reason) = acceptance else {
+            Issue.record("a retry has to refuse the move")
+            return
+        }
+        #expect(reason == "Not that one — one more try.")
+    }
+
+    /// The same-day retries are appended when the planned queue runs out, so a
+    /// set promised as ten finishes at twelve. Naming them is what stops the
+    /// counter growing for no visible reason.
+    @Test("A same-day retry says why the position is on screen again")
+    func relearnItemIsLabelled() async {
+        let plan = makePlan(line: ["e2e4", "e7e5"], kind: .relearn(cardID: UUID()))
+        let model = PuzzleSessionModel(driver: FakeDriver(plans: [plan]), database: nil)
+        await model.start()
+
+        #expect(model.taskLine == "Second look — you missed this one earlier. Black to play.")
+    }
+
+    @Test("A first look is not labelled as a second one")
+    func freshItemKeepsTheNeutralTaskLine() async {
+        let model = PuzzleSessionModel(driver: FakeDriver(plans: [singleMovePlan()]), database: nil)
+        await model.start()
+
+        #expect(model.taskLine == "Black to play — find the best move.")
+    }
+
+    /// A reveal used to leave the ladder at `.answer` for the whole item, and
+    /// the hint button is disabled on exactly that — so a user who needed help
+    /// with move one was refused it for the rest of a line they had never seen.
+    @Test("A hint on the first move does not disable the hint for the rest of the line")
+    func hintReArmsForEachMoveOfALine() async {
+        let driver = FakeDriver(plans: [makePlan(line: ["e2e4", "e7e5", "g1f3", "b8c6"])])
+        let model = PuzzleSessionModel(driver: driver, database: nil)
+        await model.start()
+
+        model.revealHint()
+        model.revealHint()
+        #expect(model.hintLevel == .answer)
+
+        _ = model.attemptMove(from: .e7, to: .e5)
+        await model.waitForGrading()
+
+        #expect(model.stage == .solving, "the same item, one move further on")
+        #expect(model.hintLevel == .none)
+        #expect(model.hintMove == nil)
+
+        model.revealHint()
+        model.revealHint()
+        #expect(model.hintMove == "b8c6")
+
+        _ = model.attemptMove(from: .b8, to: .c6)
+        await model.waitForGrading()
+
+        // Charged once however many moves the line took: the attempt was lost
+        // on the first rung and cannot be lost twice.
+        #expect(model.progress.hinted == 1)
+        #expect(model.progress.solved == 0, "the answer was on screen")
+    }
+
+    /// A revisit is a one-item session, so the concept *is* the queue. Left
+    /// uncounted, the banner offered "Next" when the next tap was the summary,
+    /// and that summary reported `Solved 0/1` for an exercise just played.
+    @Test("Revisiting a concept counts the exercise it just played")
+    func revisitCountsItsOwnExercise() async {
+        let concept = TrainingConcept(
+            id: "test.revisit",
+            family: .opening,
+            title: "A short line",
+            teaching: TrainingConcept.Teaching(
+                idea: "Play e5.",
+                why: "It claims the centre.",
+                lookFor: "The centre. Take a share of it."
+            ),
+            fromRating: 0,
+            exercise: .line(fen: startFEN, moves: ["e2e4", "e7e5"], opponentMovesFirst: true)
+        )
+        let model = PuzzleSessionModel(
+            driver: FakeDriver(plans: []), database: nil, soloConcept: concept)
+        await model.start()
+        #expect(model.teachingConcept?.id == concept.id)
+
+        model.beginConceptExercise()
+        _ = model.attemptMove(from: .e7, to: .e5)
+        await model.waitForGrading()
+
+        #expect(model.progress.completed == 1, "so the banner reads Finish, not Next")
+        model.continueAfterVerdict()
         #expect(model.stage == .summary)
+        #expect(model.progress.solvedLabel == "1/1")
+    }
+
+    /// Tapping a rating leak names the subject on the way in. The concept slot
+    /// is filled by rotation and knows nothing about that request, so a lesson
+    /// on, say, an opening line was the first thing between "Train
+    /// blunder-checking" and any blunder-checking.
+    @Test("A set opened from a leak goes straight to the puzzles")
+    func aRequestedFocusSkipsTheLesson() async {
+        let concept = TrainingConcept(
+            id: "test.unrelatedConcept",
+            family: .opening,
+            title: "A short line",
+            teaching: TrainingConcept.Teaching(
+                idea: "Play e5.",
+                why: "It claims the centre.",
+                lookFor: "The centre. Take a share of it."
+            ),
+            fromRating: 0,
+            exercise: .line(fen: startFEN, moves: ["e2e4", "e7e5"], opponentMovesFirst: true)
+        )
+        let model = PuzzleSessionModel(
+            driver: FakeDriver(plans: [singleMovePlan()]),
+            database: nil,
+            concept: ConceptScheduler.Selection(concept: concept, teachFirst: true),
+            teachesConcept: false
+        )
+        await model.start()
+
+        #expect(model.stage == .solving, "the lesson must not stand in front of the request")
+        #expect(model.isConceptItem == false)
+    }
+
+    /// A full set counts nothing for the concept: it sits outside
+    /// `driver.queueCount`, so counting it would push `completed` one ahead of
+    /// the queue and label the ninth puzzle as the tenth.
+    @Test("A set's concept does not move the puzzle counter")
+    func setConceptLeavesTheCounterAlone() async {
+        let concept = TrainingConcept(
+            id: "test.setConcept",
+            family: .opening,
+            title: "A short line",
+            teaching: TrainingConcept.Teaching(
+                idea: "Play e5.",
+                why: "It claims the centre.",
+                lookFor: "The centre. Take a share of it."
+            ),
+            fromRating: 0,
+            exercise: .line(fen: startFEN, moves: ["e2e4", "e7e5"], opponentMovesFirst: true)
+        )
+        let model = PuzzleSessionModel(
+            driver: FakeDriver(plans: [singleMovePlan()]),
+            database: nil,
+            concept: ConceptScheduler.Selection(concept: concept, teachFirst: false)
+        )
+        await model.start()
+
+        _ = model.attemptMove(from: .e7, to: .e5)
+        await model.waitForGrading()
+
+        #expect(model.progress.completed == 0)
+    }
+
+    /// The band can be empty behind a concept that ran perfectly well. Telling
+    /// that user "training could not start" and nothing else would deny the
+    /// exercise they just played.
+    @Test("An empty queue behind a finished exercise still credits the exercise")
+    func emptyQueueAfterAConceptCreditsIt() async {
+        let concept = TrainingConcept(
+            id: "test.emptyQueue",
+            family: .opening,
+            title: "A short line",
+            teaching: TrainingConcept.Teaching(
+                idea: "Play e5.",
+                why: "It claims the centre.",
+                lookFor: "The centre. Take a share of it."
+            ),
+            fromRating: 0,
+            exercise: .line(fen: startFEN, moves: ["e2e4", "e7e5"], opponentMovesFirst: true)
+        )
+        let model = PuzzleSessionModel(
+            driver: FakeDriver(plans: []),
+            database: nil,
+            concept: ConceptScheduler.Selection(concept: concept, teachFirst: false)
+        )
+        await model.start()
+
+        _ = model.attemptMove(from: .e7, to: .e5)
+        await model.waitForGrading()
+        model.continueAfterVerdict()
+
+        guard case let .unavailable(message) = model.stage else {
+            Issue.record("expected an explanation, got \(model.stage)")
+            return
+        }
+        #expect(message.contains("still counts"))
     }
 
     @Test("A session that failed to load says so instead of showing an empty board")
@@ -482,6 +748,29 @@ struct PuzzleSessionModelTests {
         let model = PuzzleSessionModel(driver: driver, database: nil)
         await model.start()
         #expect(model.stage == .unavailable("no database"))
+    }
+}
+
+/// A scripted clock: one reading per call, holding the last one once the script
+/// runs out, so a test can name exactly when each of the model's readings falls.
+private final class SteppedClock: @unchecked Sendable {
+
+    private let readings: [Date]
+    private var callCount = 0
+    private let lock = NSLock()
+
+    init(seconds: [TimeInterval]) {
+        let base = Date(timeIntervalSince1970: 0)
+        readings = seconds.map { base.addingTimeInterval($0) }
+    }
+
+    var next: @Sendable () -> Date {
+        { [self] in
+            lock.withLock {
+                defer { callCount += 1 }
+                return readings[min(callCount, readings.count - 1)]
+            }
+        }
     }
 }
 
@@ -526,6 +815,62 @@ struct DrillMasteryTests {
         #expect(mastery.label == "2 of 2 clean")
         #expect(mastery.fraction == 1)
         #expect(mastery.isMastered)
+    }
+
+    /// King and pawn is scored as a *set* of six positions, and the curriculum
+    /// counts clean sets. Labelling its streak the same way as a single-run
+    /// family told the user six clean sets were needed for a gate that asks for
+    /// two.
+    @Test("A set-scored family says so")
+    func setScoredLabel() {
+        #expect(DrillMastery(cleanStreak: 1, required: 2, countsSets: true).label == "1 of 2 clean sets")
+    }
+}
+
+// MARK: - What a drill says about itself
+
+/// The drill screen used to show a family name, a bare `7 / 25` and "Give up".
+/// A user dropped into "Philidor" with Black to move could not tell they were
+/// defending, and `24 / 25` means "about to fail" in the rook mate and "about to
+/// pass" in Philidor.
+@Suite("Drill task line")
+@MainActor
+struct EndgameDrillPresentationTests {
+
+    private func model(_ kind: EndgameDrillKind) -> EndgameDrillModel {
+        EndgameDrillModel(kind: kind, opponent: NullDrillOpponent())
+    }
+
+    @Test("The counter says which way it counts")
+    func theCounterNamesItsUnit() {
+        #expect(model(.krk).budgetLabel.hasPrefix("Move 0 of "))
+        #expect(model(.philidor).budgetLabel.hasPrefix("Held 0 of "))
+    }
+
+    @Test("Every drill states its goal")
+    func theGoalIsOnScreen() {
+        #expect(model(.krk).taskLine.contains("Mate in"))
+        #expect(model(.philidor).taskLine.contains("Hold the draw"))
+        #expect(model(.lucena).taskLine.contains("Win it"))
+        // A theoretical-result drill has to say that holding *or* winning is
+        // the task, because which one it is changes from position to position.
+        #expect(model(.kpk).taskLine.contains("without changing the result"))
+    }
+
+    @Test("A multi-position family says where you are in it")
+    func theSetSaysHowLongItIs() {
+        #expect(model(.kpk).positionLabel == "Position 1 of 6")
+        #expect(model(.lucena).positionLabel == "Position 1 of 3")
+        // Two bishops is the one family that is still a single position, and a
+        // counter reading "Position 1 of 1" would be chrome stating nothing.
+        #expect(model(.kbbk).positionLabel == nil, "one position needs no counter")
+    }
+
+    /// Each position's own title is the lesson in three words — "Outside the
+    /// square" *is* the hint — and it was in the catalogue and on no screen.
+    @Test("The position's own title is shown")
+    func thePositionIsNamed() {
+        #expect(model(.kpk).taskLine.hasPrefix(EndgameDrill.kpkSet[0].title))
     }
 }
 
@@ -690,12 +1035,22 @@ struct PuzzleReasonTests {
                 in: position("3q4/8/8/7k/8/8/8/3R2K1 w - - 0 1")
             ) == false
         )
-        // A quiet move has no recapture to answer for, so a line adds nothing.
+        // A check says something true without help.
+        #expect(
+            PuzzleReason.needsTheLine(
+                answer: "a1a5",
+                in: position("8/8/k7/8/8/8/8/R3K3 w - - 0 1")
+            ) == false
+        )
+        // A quiet move the board cannot explain is the case the engine exists
+        // for. It captures nothing and points at nothing, so every clause
+        // declines and the banner falls through to naming the square — which is
+        // exactly the shape every position mined from the user's own game has.
         #expect(
             PuzzleReason.needsTheLine(
                 answer: "e2e3",
                 in: position("4k3/8/8/8/8/8/4P3/4K3 w - - 0 1")
-            ) == false
+            )
         )
         // A rook taking a defended knight: nothing on the board justifies it,
         // and the line is the only thing that can.
@@ -705,6 +1060,37 @@ struct PuzzleReasonTests {
                 in: position("2k5/ppp2p1p/2r1qn2/3r2p1/1QN1p3/P3P2P/2P1NPP1/R3KR2 b - - 0 1")
             )
         )
+    }
+
+    /// The fork clause used to be emitted before any safety check ran, so a
+    /// knight dropped on a defended square attacking two pieces was announced
+    /// as a winning fork. It is a knight for a pawn, and the sentence taught
+    /// the pattern with the half that makes it work left out.
+    @Test("A fork whose piece can simply be taken is not called a fork")
+    func aHangingForkIsNotAFork() {
+        // Nb5-c7 hits the king on e8 and the rook on a8, and the d8 bishop
+        // covers c7.
+        let clause = PuzzleReason.clause(
+            forAnswer: "b5c7",
+            in: position("r2bk3/8/8/1N6/8/8/8/4K3 w - - 0 1")
+        )
+        #expect(clause?.contains("forks") != true, "nothing about this wins material")
+        #expect(clause == "it attacks the king and the rook, with check")
+    }
+
+    /// `Line.won` is a list of the solver's captures, which is not an outcome.
+    /// A line that takes a rook and gives back a queen used to print "you win
+    /// the rook".
+    @Test("A gain that the line pays for is not announced as a win")
+    func aGainIsNetOfWhatItCosts() {
+        // Rh8+ Ke7 Rxd8 Kxd8: the rook is won and given straight back, so the
+        // line is an even trade and nothing is won at all.
+        let clause = PuzzleReason.clause(
+            forAnswer: "h1h8",
+            in: position("3rk3/8/8/8/8/8/8/3QK2R w - - 0 1"),
+            continuation: ["e8e7", "h8d8", "e7d8"]
+        )
+        #expect(clause?.contains("you win the rook") != true)
     }
 
     /// `CalibrationScoring` scores the king 0 so that material counting ignores
@@ -921,7 +1307,9 @@ private struct ScriptedEvaluator: PuzzleMoveEvaluator {
 /// analysis pass picked — and its second and third choices are often within a
 /// few centipawns. The banner says `Missed`; the engine's opinion that the move
 /// played was just as good used to be expressed by saying nothing, which reads
-/// as agreement with the verdict.
+/// as agreement with the verdict — and then by saying "yours was just as good"
+/// under a heading reading `Missed`, which is the app contradicting itself. The
+/// clause now says why the verdict stands: the card holds one answer.
 @Suite("Near-equal moves")
 struct PuzzleEquivalenceTests {
 
@@ -931,7 +1319,7 @@ struct PuzzleEquivalenceTests {
             answer: PuzzleEvaluation(centipawns: -147),
             played: PuzzleEvaluation(centipawns: -130)
         )
-        #expect(clause == "yours was just as good")
+        #expect(clause == "the engine rates yours the same — only one answer is stored here")
     }
 
     @Test("A move that is genuinely worse still gets named as worse")
@@ -953,6 +1341,30 @@ struct PuzzleEquivalenceTests {
                 answer: PuzzleEvaluation(centipawns: 300),
                 played: PuzzleEvaluation(centipawns: 220)
             ) == nil
+        )
+    }
+
+    /// The credit exists for cards mined from the user's own game, which store
+    /// one arbitrary answer. A corpus puzzle's answer is the only move that
+    /// holds the result, and a 40k-node glance rating a second move equal is a
+    /// weaker signal contradicting a stronger one.
+    @Test("A forced answer is never told it had an equal")
+    func forcedAnswersAreNotSecondGuessed() {
+        #expect(
+            PuzzleMoveComparison.clause(
+                answer: PuzzleEvaluation(centipawns: 300),
+                played: PuzzleEvaluation(centipawns: 260),
+                answerIsForced: true
+            ) == nil
+        )
+        // The criticism is unaffected: a move that really is worse is still
+        // named as worse whichever kind of card it came from.
+        #expect(
+            PuzzleMoveComparison.clause(
+                answer: PuzzleEvaluation(centipawns: 600),
+                played: PuzzleEvaluation(centipawns: 0),
+                answerIsForced: true
+            ) == "yours only keeps things level"
         )
     }
 }
@@ -1007,7 +1419,7 @@ struct PuzzleEvaluationTests {
             answer: PuzzleEvaluation(centipawns: 300),
             played: PuzzleEvaluation(centipawns: 260)
         )
-        #expect(clause == "yours was just as good")
+        #expect(clause == "the engine rates yours the same — only one answer is stored here")
         #expect(clause != PuzzleEvaluation.Band.level.playedPhrase)
     }
 
@@ -1115,5 +1527,1085 @@ struct PuzzleExplanationUpgradeTests {
         await model.waitForExplanation()
 
         #expect(model.stage.verdict?.message.contains("But") == false)
+    }
+}
+
+// MARK: - Explaining a miss
+
+/// The position after 1.e4, which is the position every single-move fixture in
+/// this file hands to the solver.
+private let afterKingPawn = Position(
+    fen: "rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq e3 0 1"
+) ?? .standard
+
+/// A card mined from the user's own game: no setup move, no corpus rating, and
+/// — the property these tests turn on — no guarantee that the stored answer is
+/// the only move that works.
+private func makeMomentPlan(
+    line: [String] = ["e7e5"],
+    fen: String = "rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq e3 0 1",
+    kind: SessionItemPlan.Kind = .fresh
+) -> SessionItemPlan {
+    let item = SolvableItem(
+        backing: .momentPosition(momentID: nil),
+        fen: fen,
+        line: line,
+        opponentMovesFirst: false,
+        rating: 0,
+        primaryTheme: ThemeTag("middlegame")
+    )
+    return SessionItemPlan(kind: kind, presented: PresentedPuzzle(item: item, preferring: .identity))
+}
+
+@Suite("Miss explanations")
+@MainActor
+struct PuzzleMissExplanationTests {
+
+    /// The stored Lichess continuation is what turns "the rook takes the
+    /// knight" into a reason. The engine's clause used to be pasted onto a
+    /// banner rebuilt *without* it, so the sentence that showed the mechanism
+    /// appeared for a moment and was then crossfaded away by a thinner one —
+    /// on precisely the misses where the app had most to say.
+    @Test("The engine's clause is added to the stored line, not instead of it")
+    func upgradeKeepsTheStoredContinuation() async {
+        let plan = makePlan(
+            line: ["b3b4", "c6c4", "b4c4", "d5d1", "e1d1", "e6c4"],
+            fen: "2k5/ppp2p1p/2r1qn2/3r2p1/2N1p3/PQ2P2P/2P1NPP1/R3KR2 w - - 0 1"
+        )
+        let model = PuzzleSessionModel(
+            driver: FakeDriver(plans: [plan]),
+            evaluator: ScriptedEvaluator(scores: ["c6c4": 600, "c8b8": 0]),
+            database: nil
+        )
+        await model.start()
+
+        // A legal king move that is not the answer and hangs nothing, so the
+        // board can prove no mistake and the engine is asked.
+        _ = model.attemptMove(from: .c8, to: .b8)
+        await model.waitForGrading()
+
+        let mechanism = "if they take back, the rook goes to d1 with check and you win the queen"
+        #expect(model.stage.verdict?.message.contains(mechanism) == true)
+
+        await model.waitForExplanation()
+        let upgraded = model.stage.verdict?.message ?? ""
+        #expect(upgraded.contains(mechanism), "the mechanism must survive the engine's upgrade")
+        #expect(upgraded.contains("But yours only keeps things level"))
+    }
+
+    /// A band is a verdict with the mechanism removed. Naming the reply is the
+    /// check the user did not make.
+    @Test("A move the position says is worse is answered with the opponent's reply")
+    func namesTheRefutation() async {
+        let model = PuzzleSessionModel(
+            driver: FakeDriver(plans: [makePlan(line: ["e2e4", "e7e5"], theme: ThemeTag("middlegame"))]),
+            evaluator: ScriptedEvaluator(
+                scores: ["e7e5": 500, "d7d5": 0],
+                lines: ["d7d5": ["e4d5", "d8d5"]]
+            ),
+            database: nil
+        )
+        await model.start()
+
+        _ = model.attemptMove(from: .d7, to: .d5)
+        await model.waitForGrading()
+        await model.waitForExplanation()
+
+        #expect(
+            model.stage.verdict?.message
+                == "Missed — the pawn to e5. But after your move, their pawn takes the pawn."
+        )
+    }
+
+    /// The banner reserves four lines and cannot truncate, so the answer's
+    /// mechanism and the refutation of the played move share one budget. Where
+    /// the stored line has already spent it, the reader has a mechanism in
+    /// front of them and the band is the honest short form of the rest.
+    @Test("A banner already carrying a mechanism keeps the shorter band phrase")
+    func refutationYieldsToTheAnswersOwnExplanation() async {
+        let plan = makePlan(
+            line: ["b3b4", "c6c4", "b4c4", "d5d1", "e1d1", "e6c4"],
+            fen: "2k5/ppp2p1p/2r1qn2/3r2p1/2N1p3/PQ2P2P/2P1NPP1/R3KR2 w - - 0 1"
+        )
+        let model = PuzzleSessionModel(
+            driver: FakeDriver(plans: [plan]),
+            evaluator: ScriptedEvaluator(
+                scores: ["c6c4": 600, "c8b8": 0],
+                // Qxb7 is legal here and takes a pawn, which is all the
+                // fixture needs: the scripted reply stands in for whatever the
+                // engine would return, and the assertion below is about
+                // length, not about the merits of the move.
+                lines: ["c8b8": ["b4b7"]]
+            ),
+            database: nil
+        )
+        await model.start()
+
+        _ = model.attemptMove(from: .c8, to: .b8)
+        await model.waitForGrading()
+        await model.waitForExplanation()
+
+        let message = model.stage.verdict?.message ?? ""
+        #expect(message.contains("But yours only keeps things level."))
+        #expect(!message.contains("after your move"))
+    }
+
+    /// The refutation is attached to the criticism, never on its own: inventing
+    /// a punishment for a move the engine rates equal would be the app telling
+    /// the user their fine move loses something.
+    @Test("A move rated equal is credited, not refuted")
+    func noRefutationWithoutACriticism() async {
+        let model = PuzzleSessionModel(
+            driver: FakeDriver(plans: [makeMomentPlan()]),
+            evaluator: ScriptedEvaluator(
+                scores: ["e7e5": 100, "d7d5": 90],
+                lines: ["d7d5": ["e4d5", "d8d5"]]
+            ),
+            database: nil
+        )
+        await model.start()
+
+        _ = model.attemptMove(from: .d7, to: .d5)
+        await model.waitForGrading()
+        await model.waitForExplanation()
+
+        let message = model.stage.verdict?.message ?? ""
+        #expect(message.contains("the engine rates yours the same"))
+        #expect(!message.contains("their"), "no refutation belongs on a move that was not criticised")
+    }
+
+    /// The banner says the position cannot tell the two moves apart, and the
+    /// set used to hand the same position back twenty seconds later anyway — so
+    /// the only thing the retry could teach was to produce the stored move
+    /// instead of the one the app had just called its equal.
+    @Test("A move rated equal does not earn a same-day retry")
+    func equivalentAnswerWithdrawsTheRetry() async {
+        let cardID = UUID()
+        let driver = FakeDriver(plans: [makeMomentPlan(kind: .review(cardID: cardID))])
+        let model = PuzzleSessionModel(
+            driver: driver,
+            evaluator: ScriptedEvaluator(scores: ["e7e5": 100, "d7d5": 90]),
+            database: nil
+        )
+        await model.start()
+
+        _ = model.attemptMove(from: .d7, to: .d5)
+        await model.waitForGrading()
+        await model.waitForExplanation()
+
+        #expect(driver.equivalentCredits == [cardID])
+    }
+
+    /// The other half of the same contract: a move the engine rates genuinely
+    /// worse is a miss like any other, and its card comes back today.
+    @Test("A move rated worse keeps its retry")
+    func worseAnswerKeepsTheRetry() async {
+        let cardID = UUID()
+        let driver = FakeDriver(plans: [makeMomentPlan(kind: .review(cardID: cardID))])
+        let model = PuzzleSessionModel(
+            driver: driver,
+            evaluator: ScriptedEvaluator(scores: ["e7e5": 500, "d7d5": 0]),
+            database: nil
+        )
+        await model.start()
+
+        _ = model.attemptMove(from: .d7, to: .d5)
+        await model.waitForGrading()
+        await model.waitForExplanation()
+
+        #expect(driver.equivalentCredits.isEmpty)
+    }
+
+    /// A corpus puzzle's answer is the only move that holds the result, and a
+    /// 40k-node glance is not evidence against that. Saying nothing is the
+    /// honest answer; crediting the user's move overrides a stronger signal
+    /// with a weaker one, on exactly the puzzles whose idea is hardest.
+    @Test("A corpus puzzle is never told its answer had an equal")
+    func corpusAnswersAreNotSecondGuessed() async {
+        let model = PuzzleSessionModel(
+            driver: FakeDriver(plans: [makePlan(line: ["e2e4", "e7e5"], theme: ThemeTag("middlegame"))]),
+            evaluator: ScriptedEvaluator(scores: ["e7e5": 100, "d7d5": 90]),
+            database: nil
+        )
+        await model.start()
+
+        _ = model.attemptMove(from: .d7, to: .d5)
+        await model.waitForGrading()
+        await model.waitForExplanation()
+
+        #expect(model.stage.verdict?.message == "Missed — the pawn to e5.")
+    }
+
+    /// A hint spends the attempt, so the banner says `Missed`. It does not make
+    /// the move wrong — and the miss path used to explain the answer as an
+    /// error, so a hinted Qh5 came back as `But your queen could be taken by
+    /// the pawn`: the app arguing with the move it had just handed over.
+    @Test("A hinted solve is never explained as a mistake")
+    func hintedSolveIsNotCriticised() async {
+        // White's Qd1-h5 lands on a square the g6 pawn attacks, which is
+        // exactly the shape `PuzzleReason.mistake` fires on.
+        let plan = makePlan(
+            line: ["h7h6", "d1h5"],
+            fen: "4k3/pppp3p/6p1/8/8/8/PPPP1PPP/3QK3 b - - 0 1",
+            theme: ThemeTag("middlegame")
+        )
+        let model = PuzzleSessionModel(driver: FakeDriver(plans: [plan]), database: nil)
+        await model.start()
+
+        model.revealHint()
+        model.revealHint()
+        #expect(model.hintMove == "d1h5")
+
+        _ = model.attemptMove(from: .d1, to: .h5)
+        await model.waitForGrading()
+        await model.waitForExplanation()
+
+        let verdict = model.stage.verdict
+        #expect(verdict?.solved == false, "a hint spends the attempt")
+        #expect(verdict?.message == "Missed — the queen to h5.")
+        #expect(verdict?.ring == nil, "there is no missed answer to mark")
+        #expect(verdict?.answer == nil, "the answer is already on the board")
+    }
+}
+
+// MARK: - The hint ladder
+
+@Suite("Hint ladder")
+struct PuzzleHintLadderTests {
+
+    /// The nudge prunes the search without finishing it, so it may describe the
+    /// move and must never identify it.
+    @Test("The nudge names the kind of move and no square")
+    func nudgeNamesTheKind() {
+        let nudge = PuzzleReason.nudge(forAnswer: "d7d5", in: afterKingPawn)
+        #expect(
+            nudge == "No check, no capture — the move makes a threat. Ask what your pieces would hit next."
+        )
+        for identifier in ["d5", "d7", "queen", "knight"] {
+            #expect(nudge?.contains(identifier) != true)
+        }
+    }
+
+    @Test("A capture and a check are described as such")
+    func nudgeSeparatesTheClasses() {
+        let afterD5 = Position(
+            fen: "rnbqkbnr/ppp1pppp/8/3p4/4P3/8/PPPP1PPP/RNBQKBNR w KQkq d6 0 2"
+        ) ?? .standard
+        #expect(
+            PuzzleReason.nudge(forAnswer: "e4d5", in: afterD5)
+                == "The move takes something. Work out what takes back first."
+        )
+        // Ra1-a8 is mate: the king is on g8 with its own pawns in front of it.
+        let backRank = Position(fen: "6k1/5ppp/8/8/8/8/8/R3K3 w - - 0 1") ?? .standard
+        #expect(
+            PuzzleReason.nudge(forAnswer: "a1a8", in: backRank)
+                == "The move ends the game. Go through every check."
+        )
+    }
+}
+
+// MARK: - The reply to the move you played
+
+@Suite("Refuting the played move")
+struct PuzzleRefutationTests {
+
+    @Test("A capturing reply is named")
+    func capturingReplyIsNamed() {
+        #expect(
+            PuzzleReason.punishment(reply: "e4d5", afterPlaying: "d7d5", in: afterKingPawn)
+                == "their pawn takes the pawn"
+        )
+    }
+
+    /// "And now they are simply better" is the judgement the band phrase has
+    /// already made, and the reader cannot check it on the board.
+    @Test("A quiet reply says nothing")
+    func quietReplyStaysSilent() {
+        #expect(PuzzleReason.punishment(reply: "g1f3", afterPlaying: "b8c6", in: afterKingPawn) == nil)
+    }
+}
+
+// MARK: - Material in a line
+
+/// `line.won` is a list of the solver's captures, which is not an outcome. The
+/// rule these two guard is that "you win the rook" is only ever said when the
+/// line's *net* supports it.
+@Suite("Material across a continuation")
+struct PuzzleLineMaterialTests {
+
+    /// Black's rook goes to d8, White takes it, Black takes back. An even trade
+    /// is not a win, and Lichess lines for quiet themes routinely contain one.
+    private let quietRookMove = Position(fen: "r4rk1/8/8/8/8/8/8/3R2K1 b - - 0 1") ?? .standard
+
+    @Test("An exchange inside the line is not reported as winning material")
+    func exchangeIsNotAWin() {
+        let clause = PuzzleReason.clause(
+            forAnswer: "a8d8",
+            in: quietRookMove,
+            continuation: ["d1d8", "f8d8"]
+        )
+        #expect(clause == nil)
+    }
+
+    /// The control: the same move, with the opponent declining to take. Now the
+    /// rook really is won and the clause says so.
+    @Test("A line the opponent does not take back in does win the piece")
+    func unansweredCaptureIsAWin() {
+        let clause = PuzzleReason.clause(
+            forAnswer: "a8d8",
+            in: quietRookMove,
+            continuation: ["g1h1", "d8d1"]
+        )
+        #expect(clause == "after their king goes to h1, you win the rook")
+    }
+}
+
+// MARK: - The SRS latency clock
+
+@Suite("Latency clock")
+@MainActor
+struct PuzzleLatencyClockTests {
+
+    /// `TrainingService` grades, persists and advances in one call, so the
+    /// instant it starts serving the next item is the instant the user
+    /// submitted the last one — with that item's banner still on screen. Every
+    /// reading therefore carried the previous banner's dwell, and the first
+    /// review of a set that opened with a lesson carried the whole lesson.
+    @Test("The clock restarts when the position appears, not when the last was graded")
+    func clockFollowsTheBoard() async {
+        let driver = FakeDriver(plans: [
+            makePlan(line: ["e2e4", "e7e5"]),
+            makePlan(line: ["e2e4", "e7e5"])
+        ])
+        let model = PuzzleSessionModel(driver: driver, database: nil)
+        await model.start()
+        #expect(driver.itemShownCount == 1)
+
+        _ = model.attemptMove(from: .e7, to: .e5)
+        await model.waitForGrading()
+        // The banner is up and the service has already advanced. Nothing has
+        // restarted the clock, so the reading time is not being charged to the
+        // next puzzle.
+        #expect(driver.itemShownCount == 1)
+
+        model.continueAfterVerdict()
+        #expect(driver.itemShownCount == 2)
+
+        // And again once the setup move has finished animating, which is what
+        // the screen calls after its 380ms.
+        model.markPositionInteractive()
+        #expect(driver.itemShownCount == 3)
+    }
+}
+
+// MARK: - Summary accounting
+
+@Suite("Session summary accounting")
+struct SessionSummaryAccountingTests {
+
+    /// `8 / 12` mixed first recall with re-recall of an answer the user had
+    /// been shown minutes earlier.
+    @Test("Retries are counted apart from first attempts")
+    func retriesHaveTheirOwnRow() {
+        let progress = SessionProgress(
+            index: 11,
+            completed: 12,
+            total: 12,
+            solved: 8,
+            hinted: 1,
+            retries: 2,
+            retriesSolved: 1
+        )
+        #expect(progress.firstAttempts == 10)
+        #expect(progress.solvedLabel == "8/10")
+        #expect(progress.retriesLabel == "1/2 clean")
+    }
+
+    @Test("A set with nothing to retry has no retry row")
+    func noRetriesNoRow() {
+        let progress = SessionProgress(completed: 10, total: 10, solved: 9)
+        #expect(progress.retriesLabel == nil)
+        #expect(progress.solvedLabel == "9/10")
+    }
+}
+
+@Suite("Retry accounting through a session")
+@MainActor
+struct SessionRetryAccountingTests {
+
+    @Test("A same-day retry lands on the retry row, not on Solved")
+    func relearnCountsAsASecondLook() async {
+        let card = UUID()
+        let driver = FakeDriver(plans: [
+            makePlan(line: ["e2e4", "e7e5"], kind: .review(cardID: card)),
+            makePlan(line: ["e2e4", "e7e5"], kind: .relearn(cardID: card))
+        ])
+        let model = PuzzleSessionModel(driver: driver, database: nil)
+        await model.start()
+
+        _ = model.attemptMove(from: .e7, to: .e5)
+        await model.waitForGrading()
+        model.continueAfterVerdict()
+
+        _ = model.attemptMove(from: .e7, to: .e5)
+        await model.waitForGrading()
+
+        #expect(model.progress.solved == 1)
+        #expect(model.progress.retries == 1)
+        #expect(model.progress.retriesSolved == 1)
+        #expect(model.progress.solvedLabel == "1/1")
+    }
+}
+
+// MARK: - Opening variations
+
+/// One stored move order is a move order, not an opening: the first thing a
+/// real opponent does is deviate, and that is the position the exercise never
+/// showed. These hold the alternatives to the same standard as the main lines.
+@Suite("Opening variations")
+struct OpeningVariationTests {
+
+    @Test("Every alternative opening line is legal and ends on the solver's move")
+    func alternativesAreLegal() throws {
+        for concept in TrainingConcept.catalogue {
+            guard case let .line(fen, _, opponentMovesFirst) = concept.exercise else {
+                #expect(
+                    concept.alternateLines.isEmpty,
+                    "\(concept.id): alternatives with no stored line to replace"
+                )
+                continue
+            }
+
+            for (variant, moves) in concept.alternateLines.enumerated() {
+                let start = try #require(Position(fen: fen), "\(concept.id): unparseable FEN")
+                var board = Board(position: start)
+
+                for (index, uci) in moves.enumerated() {
+                    #expect(
+                        PuzzleSolveMachine.move(uci: uci, on: &board) != nil,
+                        "\(concept.id) variation \(variant): move \(index) (\(uci)) is not legal"
+                    )
+                }
+
+                // As for the main line: the solver has to have the last word, or
+                // the exercise ends on the opponent's move and the user is left
+                // holding a finished board.
+                let solverPlaysEvenIndices = !opponentMovesFirst
+                let lastIsSolvers = (moves.count - 1) % 2 == (solverPlaysEvenIndices ? 0 : 1)
+                #expect(
+                    lastIsSolvers,
+                    "\(concept.id) variation \(variant): the line ends on the opponent's move"
+                )
+            }
+        }
+    }
+
+    @Test("An opening with alternatives serves a different line each visit")
+    func variationsRotate() throws {
+        let target = try #require(
+            TrainingConcept.catalogue.first { !$0.alternateLines.isEmpty },
+            "the catalogue has no branching opening left"
+        )
+        let variations = target.lineVariations
+
+        var served: [[String]] = []
+        for visit in 0..<variations.count {
+            // Everything else exhausted, so the scheduler has to pick `target`
+            // and the only thing changing between visits is its own count.
+            var states: [String: ConceptScheduler.State] = [:]
+            for concept in TrainingConcept.catalogue {
+                states[concept.id] = ConceptScheduler.State(
+                    id: concept.id,
+                    isIntroduced: true,
+                    timesSeen: concept.id == target.id ? visit : visit + 100,
+                    lastSeenAt: Date(timeIntervalSince1970: 0)
+                )
+            }
+
+            let selection = try #require(ConceptScheduler.next(rating: 3000, states: states))
+            #expect(selection.concept.id == target.id)
+            guard case let .line(_, moves, _) = selection.concept.exercise else {
+                Issue.record("\(target.id): expected a line exercise")
+                return
+            }
+            served.append(moves)
+        }
+
+        #expect(served.first == variations.first, "the first visit plays the line the lesson taught")
+        #expect(
+            Set(served.map { $0.joined(separator: " ") }).count == variations.count,
+            "a visit replayed a line an earlier visit had already served"
+        )
+    }
+}
+
+// MARK: - Concept routing
+
+@Suite("Concept routing")
+struct ConceptRoutingTests {
+
+    /// Every concept taught, the openings worked hardest, so nothing in the
+    /// rotation would come back to an opening on its own.
+    private func exhaustedOpenings() -> [String: ConceptScheduler.State] {
+        var states: [String: ConceptScheduler.State] = [:]
+        for concept in TrainingConcept.catalogue {
+            states[concept.id] = ConceptScheduler.State(
+                id: concept.id,
+                isIntroduced: true,
+                timesSeen: concept.family == .opening ? 50 : 0,
+                lastSeenAt: Date(timeIntervalSince1970: 0)
+            )
+        }
+        return states
+    }
+
+    @Test("Opening mistakes in real games bring the opening slot back")
+    func openingPressurePromotesTheFamily() throws {
+        let states = exhaustedOpenings()
+
+        let calm = try #require(ConceptScheduler.next(rating: 1600, states: states))
+        #expect(calm.concept.family != .opening, "nothing here asks for an opening")
+
+        let pressured = try #require(
+            ConceptScheduler.next(rating: 1600, states: states, openingMistakesPerGame: 1.2)
+        )
+        #expect(pressured.concept.family == .opening)
+    }
+
+    @Test("An opening the games say is fine does not jump the queue")
+    func pressureBelowThresholdChangesNothing() throws {
+        let states = exhaustedOpenings()
+        let selection = try #require(
+            ConceptScheduler.next(rating: 1600, states: states, openingMistakesPerGame: 0.2)
+        )
+        #expect(selection.concept.family != .opening)
+    }
+
+    @Test("The endgame habit puts an endgame in the slot")
+    func endgameHabitSteersTheSlot() throws {
+        var states: [String: ConceptScheduler.State] = [:]
+        for concept in TrainingConcept.catalogue {
+            states[concept.id] = ConceptScheduler.State(
+                id: concept.id,
+                isIntroduced: true,
+                timesSeen: concept.family == .endgame ? 50 : 0,
+                lastSeenAt: Date(timeIntervalSince1970: 0)
+            )
+        }
+
+        let selection = try #require(
+            ConceptScheduler.next(rating: 1600, states: states, focus: .endgameTechnique)
+        )
+        #expect(selection.concept.family == .endgame)
+    }
+
+    /// Blunder-checking is not a subject with a lesson behind it. Pretending it
+    /// is would put an unrelated opening in front of the user and call it the
+    /// answer to their leak.
+    @Test("A habit no lesson teaches leaves the rotation alone")
+    func habitWithoutAFamilyDoesNotSteerTheSlot() throws {
+        let plain = try #require(ConceptScheduler.next(rating: 1600, states: [:]))
+        let steered = try #require(
+            ConceptScheduler.next(rating: 1600, states: [:], focus: .blunderCheck)
+        )
+        #expect(plain.concept.id == steered.concept.id)
+    }
+}
+
+// MARK: - Game-mistake cards
+
+/// `CardPolicy` ranks a game mistake above every corpus puzzle, but only within
+/// one call — and cards are admitted twice a day from two places. A day that
+/// spent its cap on puzzles first used to defer the user's own blunders to a
+/// queue that does not exist.
+@MainActor
+@Suite("Game-mistake cards")
+struct GameMistakeCardTests {
+
+    private static let momentFEN = "rnbqkbnr/pppp1ppp/8/4p3/4P3/8/PPPP1PPP/RNBQKBNR w KQkq - 0 2"
+
+    private func moment(at now: Date) -> Database.Moment {
+        Database.Moment(
+            gameID: UUID(),
+            ply: 4,
+            fen: Self.momentFEN,
+            kind: "blunder",
+            causeTag: "hungMovedPiece",
+            stepTag: "play",
+            playedSAN: "Qh5",
+            playedUCI: "d1h5",
+            bestSAN: "Nf3",
+            bestUCI: "g1f3",
+            deltaEP: 0.4,
+            score: 1,
+            createdAt: now,
+            srsEligible: true
+        )
+    }
+
+    @Test("A game mistake still becomes a card after puzzles spent the day's cap")
+    func gameMistakeKeepsASlot() async throws {
+        let now = Date(timeIntervalSince1970: 1_700_000_000)
+        let cap = DomainTuning.default.cards.newCardsPerDay
+        let srs = InMemorySRSStore()
+        let metrics = InMemoryMetricStore()
+        try metrics.set(
+            TrainingMetricKeys.newCardsAdmitted,
+            window: DailyLoop.dayKey(for: now),
+            value: Double(cap),
+            sampleCount: cap,
+            at: now
+        )
+
+        let service = TrainingService(
+            srs: srs,
+            corpus: InMemoryPuzzleCorpus(puzzles: []),
+            metrics: metrics,
+            dailyLoop: InMemoryDailyLoopStore(),
+            settings: InMemoryAppSettingsStore(),
+            clock: { now }
+        )
+
+        let created = await service.createCards(fromMoments: [moment(at: now)])
+
+        let stored = try srs.card(positionKey: PositionKey.make(fen: Self.momentFEN))
+        #expect(created == 1, "the user's own blunder must not lose its slot to a corpus puzzle")
+        #expect(stored != nil)
+        // The day's tally still reports what was actually created, cap or no cap.
+        #expect(
+            metrics.value(TrainingMetricKeys.newCardsAdmitted, window: DailyLoop.dayKey(for: now))
+                == Double(cap + 1)
+        )
+    }
+
+    @Test("The reserved slot is one card, not an open door")
+    func onlyOneSlotIsReserved() async throws {
+        let now = Date(timeIntervalSince1970: 1_700_000_000)
+        let cap = DomainTuning.default.cards.newCardsPerDay
+        let srs = InMemorySRSStore()
+        let metrics = InMemoryMetricStore()
+        try metrics.set(
+            TrainingMetricKeys.newCardsAdmitted,
+            window: DailyLoop.dayKey(for: now),
+            value: Double(cap),
+            sampleCount: cap,
+            at: now
+        )
+
+        let service = TrainingService(
+            srs: srs,
+            corpus: InMemoryPuzzleCorpus(puzzles: []),
+            metrics: metrics,
+            dailyLoop: InMemoryDailyLoopStore(),
+            settings: InMemoryAppSettingsStore(),
+            clock: { now }
+        )
+
+        let positions = [
+            Self.momentFEN,
+            "rnbqkbnr/pppp1ppp/8/4p3/4P3/5N2/PPPP1PPP/RNBQKB1R b KQkq - 1 2",
+            "r1bqkbnr/pppp1ppp/2n5/4p3/4P3/5N2/PPPP1PPP/RNBQKB1R w KQkq - 2 3"
+        ]
+        let moments = positions.enumerated().map { index, fen -> Database.Moment in
+            var value = moment(at: now)
+            value.ply = 4 + index * 2
+            value.fen = fen
+            return value
+        }
+
+        let created = await service.createCards(fromMoments: moments)
+        #expect(created == 1)
+    }
+}
+
+// MARK: - Calculation set
+
+/// The user's stored puzzle rating for the calculation tests.
+///
+/// Chosen so the daily serving band (`1150...1450`) and the calculation band
+/// (`1500...1600`) are both round numbers and provably disjoint — the tests
+/// below assert on those numbers, so a fixture that let them touch would let a
+/// substituted puzzle pass unnoticed.
+private let calculationUserRating = 1300
+
+private func makeCorpusPuzzle(
+    id: String,
+    rating: Int,
+    moves: String,
+    themes: [PuzzleTheme] = [.fork]
+) -> Puzzle {
+    Puzzle(
+        id: id,
+        fen: startFEN,
+        moves: moves,
+        rating: rating,
+        ratingDev: 50,
+        popularity: 100,
+        nbPlays: 1000,
+        themes: ThemeMask(themes)
+    )
+}
+
+/// Setup move plus a solution of `plies` moves, all legal from the start
+/// position, so the same fixture can be replayed by a real solve machine.
+private func solutionLine(plies: Int) -> String {
+    let all = ["e2e4", "e7e5", "g1f3", "b8c6", "f1b5", "g8f6"]
+    return all.prefix(1 + max(1, min(plies, all.count - 1))).joined(separator: " ")
+}
+
+@Suite("Calculation set assembly")
+struct CalculationAssemblyTests {
+
+    @Test("The longest line in the band leads the set")
+    func longestLinesFirst() {
+        var tuning = DomainTuning.default.calculation
+        tuning.setSize = 2
+
+        let session = SessionAssembler.calculationSet(
+            candidates: [
+                makeCorpusPuzzle(id: "short", rating: 1550, moves: solutionLine(plies: 1)),
+                makeCorpusPuzzle(id: "longest", rating: 1550, moves: solutionLine(plies: 5)),
+                makeCorpusPuzzle(id: "medium", rating: 1550, moves: solutionLine(plies: 3))
+            ],
+            tuning: tuning
+        )
+
+        // Longest first, because a user who stops after one has then spent
+        // their attention on the deepest line the band could offer.
+        #expect(session.items.map(\.presented.item.puzzleID) == ["longest", "medium"])
+    }
+
+    @Test("Every item is a fresh calculation item and no card is retired")
+    func itemsAreMarked() {
+        let session = SessionAssembler.calculationSet(
+            candidates: [makeCorpusPuzzle(id: "a", rating: 1550, moves: solutionLine(plies: 3))]
+        )
+
+        #expect(session.items.count == 1)
+        #expect(session.items.allSatisfy { $0.isCalculation })
+        #expect(session.items.allSatisfy { $0.kind == .fresh })
+        // Retirement is `SessionBuilder`'s verdict on a card that has finished
+        // the anti-memorization ladder. Nothing here has seen a card at all, so
+        // reporting one would retire it on the strength of a session it was
+        // never in.
+        #expect(session.retired.isEmpty)
+    }
+
+    @Test("A short band serves what it has rather than padding the set")
+    func shortBandIsNotPadded() {
+        var tuning = DomainTuning.default.calculation
+        tuning.setSize = 3
+
+        let session = SessionAssembler.calculationSet(
+            candidates: [
+                makeCorpusPuzzle(id: "a", rating: 1550, moves: solutionLine(plies: 3)),
+                makeCorpusPuzzle(id: "b", rating: 1550, moves: solutionLine(plies: 3))
+            ],
+            tuning: tuning
+        )
+        #expect(session.items.count == 2)
+    }
+
+    @Test("An empty band produces an empty set, never a substitute")
+    func emptyBandProducesNothing() {
+        #expect(SessionAssembler.calculationSet(candidates: []).items.isEmpty)
+    }
+
+    @Test("The calculation band sits entirely above the daily serving band")
+    func bandsDoNotOverlap() {
+        let daily = TrainingVocabulary.servingBand(userPuzzleRating: calculationUserRating)
+        let raised = TrainingVocabulary.calculationBand(userPuzzleRating: calculationUserRating)
+
+        // The card's promise in one assertion: nothing this set can serve is
+        // something the daily set could have served.
+        #expect(raised.lowerBound > daily.upperBound)
+        #expect(raised.lowerBound == 1500)
+        #expect(raised.upperBound == 1600)
+    }
+}
+
+/// Everything the calculation set writes to, so a test can run one and then read
+/// what it did — and, more to the point, what it left alone.
+@MainActor
+private struct CalculationHarness {
+
+    let srs = InMemorySRSStore()
+    let metrics = InMemoryMetricStore()
+    let dailyLoop = InMemoryDailyLoopStore()
+    let settings: InMemoryAppSettingsStore
+    let corpus: InMemoryPuzzleCorpus
+
+    init(puzzles: [Puzzle], cards: [SRSCard] = []) {
+        corpus = InMemoryPuzzleCorpus(puzzles: puzzles)
+        settings = InMemoryAppSettingsStore(
+            settings: AppSettings(puzzleRating: Double(calculationUserRating), puzzleRD: 40)
+        )
+        for card in cards { try? srs.save(card) }
+    }
+
+    func service() -> TrainingService {
+        TrainingService(
+            srs: srs,
+            corpus: corpus,
+            metrics: metrics,
+            dailyLoop: dailyLoop,
+            settings: settings
+        )
+    }
+
+    /// Answers every item by skipping it, which is graded as a failure and runs
+    /// the whole persistence path.
+    func skipAll(_ service: TrainingService) async {
+        var iterations = 0
+        while service.phase == .solving, iterations < 40 {
+            await service.skip()
+            iterations += 1
+        }
+    }
+}
+
+@MainActor
+@Suite("Calculation set service")
+struct CalculationServiceTests {
+
+    /// One puzzle in the daily band, two in the raised one.
+    private func mixedCorpus() -> [Puzzle] {
+        [
+            makeCorpusPuzzle(id: "daily", rating: calculationUserRating, moves: solutionLine(plies: 1)),
+            makeCorpusPuzzle(id: "raised-long", rating: 1550, moves: solutionLine(plies: 5), themes: [.long]),
+            makeCorpusPuzzle(id: "raised-short", rating: 1520, moves: solutionLine(plies: 1))
+        ]
+    }
+
+    @Test("Only puzzles from above the user's band are served")
+    func servesTheRaisedBandOnly() async {
+        let harness = CalculationHarness(puzzles: mixedCorpus())
+        let service = harness.service()
+
+        await service.startCalculationSet()
+
+        let served = service.session.items.map(\.presented.item.puzzleID)
+        #expect(!served.contains("daily"))
+        #expect(served.contains("raised-long"))
+        // Whatever came back, every one of it is above the daily band's ceiling.
+        let ceiling = TrainingVocabulary.servingBand(userPuzzleRating: calculationUserRating).upperBound
+        #expect(service.session.items.allSatisfy { $0.presented.item.rating > ceiling })
+        #expect(service.session.items.allSatisfy { $0.isCalculation })
+    }
+
+    @Test("A band with nothing in it serves nothing rather than dropping to the daily band")
+    func emptyRaisedBandServesNothing() async {
+        // A corpus that stops below the raised band — the state a user reaches
+        // by outgrowing it. Sliding the band down to fill the set is exactly the
+        // substitution the mode exists to prevent.
+        let harness = CalculationHarness(
+            puzzles: [makeCorpusPuzzle(id: "daily", rating: calculationUserRating, moves: solutionLine(plies: 1))]
+        )
+        let service = harness.service()
+
+        await service.startCalculationSet()
+
+        #expect(service.session.items.isEmpty)
+        #expect(service.phase == .finished)
+    }
+
+    @Test("A missed calculation puzzle does not become a card")
+    func missesDoNotAdmitCards() async {
+        let harness = CalculationHarness(puzzles: mixedCorpus())
+        let service = harness.service()
+
+        await service.startCalculationSet()
+        await harness.skipAll(service)
+
+        // Skipping is graded as a failure, which is what admits a card out of
+        // the daily set. Here it must not: `newCardsPerDay` is three, and a set
+        // the user is *expected* to miss would spend the whole day's cap before
+        // the daily set or a game had a chance at it.
+        #expect(service.summary.newCards == 0)
+        #expect((try? harness.srs.card(puzzleID: "raised-long")) == nil)
+        #expect((try? harness.srs.dueCount(at: Date())) == 0)
+    }
+
+    @Test("A calculation miss does not move the rung-2 theme counters")
+    func missesDoNotMoveTheThemeGate() async {
+        let floor = DomainTuning.default.curriculum.themeRatingFloor
+        let harness = CalculationHarness(
+            puzzles: [makeCorpusPuzzle(id: "raised", rating: 1550, moves: solutionLine(plies: 3), themes: [.fork])]
+        )
+        let service = harness.service()
+
+        await service.startCalculationSet()
+        await harness.skipAll(service)
+
+        // The gate reads a success rate per theme at 1200+, and the fixture is
+        // well above that floor — so without the exclusion the user's fork
+        // number would have gone down for doing the hardest work of their day.
+        #expect(harness.metrics.value(TrainingMetricKeys.themeAttempts(.fork, ratingFloor: floor)) == 0)
+        #expect(harness.metrics.value(TrainingMetricKeys.themeSolves(.fork, ratingFloor: floor)) == 0)
+    }
+
+    @Test("A served calculation puzzle is still recorded, so it is not handed back next week")
+    func servedPuzzlesAreRecorded() async {
+        let harness = CalculationHarness(
+            puzzles: [makeCorpusPuzzle(id: "raised", rating: 1550, moves: solutionLine(plies: 3))]
+        )
+        let service = harness.service()
+
+        await service.startCalculationSet()
+        await harness.skipAll(service)
+
+        #expect(ServedPuzzleHistory.recentlyServed(metrics: harness.metrics).contains("raised"))
+    }
+
+    @Test("A due review card is left untouched by a calculation set")
+    func reviewQueueIsUntouched() async {
+        let now = Date()
+        let due = SRSCard(
+            kind: SRSCardKind.puzzle.rawValue,
+            puzzleID: "daily",
+            fen: startFEN,
+            due: now.addingTimeInterval(-3600)
+        )
+        let harness = CalculationHarness(puzzles: mixedCorpus(), cards: [due])
+        let service = harness.service()
+
+        await service.startCalculationSet()
+        await harness.skipAll(service)
+
+        // Not served, and still due afterwards: the calculation set reads no
+        // cards, so the daily set assembled next sees the queue it would have
+        // seen.
+        #expect(service.session.items.allSatisfy { $0.kind.cardID == nil })
+        #expect((try? harness.srs.dueCount(at: now)) == 1)
+        #expect((try? harness.srs.reviews(forCard: due.id))?.isEmpty == true)
+    }
+}
+
+@MainActor
+@Suite("Calculation set framing")
+struct CalculationFramingTests {
+
+    private func plan() -> SessionItemPlan {
+        makePlan(line: ["e2e4", "e7e5", "g1f3", "b8c6"])
+    }
+
+    @Test("A calculation session asks the driver for the calculation queue")
+    func asksForTheRightQueue() async {
+        let driver = FakeDriver(plans: [plan()])
+        let model = PuzzleSessionModel(driver: driver, database: nil, isCalculationSet: true)
+        await model.start()
+
+        #expect(driver.startedCalculationSet)
+    }
+
+    @Test("An ordinary session does not")
+    func ordinarySessionAsksForTheDailyQueue() async {
+        let driver = FakeDriver(plans: [plan()])
+        let model = PuzzleSessionModel(driver: driver, database: nil)
+        await model.start()
+
+        #expect(!driver.startedCalculationSet)
+    }
+
+    @Test("The task line asks for the whole line rather than the best move")
+    func taskLineNamesTheSlowMode() async {
+        let model = PuzzleSessionModel(
+            driver: FakeDriver(plans: [plan()]),
+            database: nil,
+            isCalculationSet: true
+        )
+        await model.start()
+
+        let line = model.taskLine
+        #expect(line == "Black to play — work the whole line out before you move.")
+        // "Find the best move" is an instruction to end the search quickly,
+        // which is the opposite of what this set is asking for.
+        #expect(!line.contains("find the best move"))
+        // The theme is still never named — a tactic you have been told the name
+        // of is a lookup rather than a search.
+        #expect(!line.lowercased().contains("fork"))
+    }
+
+    @Test("The header names the mode and says nothing is timed")
+    func headerNamesTheMode() async {
+        let calculation = PuzzleSessionModel(
+            driver: FakeDriver(plans: [plan()]),
+            database: nil,
+            isCalculationSet: true
+        )
+        await calculation.start()
+
+        let note = calculation.modeNote
+        #expect(note == "Calculation set — above your rating band, no clock")
+        // Both standing facts have to be on screen somewhere, and the task line
+        // deliberately carries neither: the board would lose a line of height on
+        // every puzzle to two sentences that never change.
+        #expect(note?.contains("above your rating band") == true)
+        #expect(note?.contains("no clock") == true)
+
+        let ordinary = PuzzleSessionModel(driver: FakeDriver(plans: [plan()]), database: nil)
+        await ordinary.start()
+        #expect(ordinary.modeNote == nil)
+    }
+
+    @Test("An empty calculation set explains its own band instead of the daily one")
+    func emptySetExplainsTheRaisedBand() async {
+        let model = PuzzleSessionModel(driver: FakeDriver(plans: []), database: nil, isCalculationSet: true)
+        await model.start()
+
+        guard case let .unavailable(message) = model.stage else {
+            Issue.record("expected an explanation, got \(model.stage)")
+            return
+        }
+        #expect(message.contains("calculation set"))
+        // The daily set's message offers the one thing that refills *its* band.
+        // A mined position is never above the user's rating, so offering it here
+        // would hand a stuck user an action that cannot work.
+        #expect(!message.contains("Playing a game"))
+    }
+}
+
+@Suite("Calculation card copy")
+struct CalculationCopyTests {
+
+    @Test("The button names the step and its cost")
+    func buttonNamesStepAndCost() {
+        let title = CalculationCopy.title(puzzles: 3, minutes: 12)
+        #expect(title == "Calculation · 3 puzzles · ~12 min")
+        // The generic CTA the craft standards rule out by name.
+        #expect(title != "Start")
+        #expect(title != "Continue")
+    }
+
+    @Test("A single puzzle is not called one puzzles")
+    func singularCount() {
+        #expect(CalculationCopy.title(puzzles: 1, minutes: 4) == "Calculation · 1 puzzle · ~4 min")
+    }
+
+    @Test("The offer states the distance above the user and the absence of a clock")
+    func offerNamesTheDifference() {
+        let copy = CalculationCopy.offer(offsetLabel: "200–300", minutesPerPuzzle: 4)
+
+        #expect(copy.contains("200–300 points above you"))
+        #expect(copy.contains("no clock"))
+        #expect(copy.contains("worked out rather than recognised"))
+        #expect(copy.contains("4 minutes"))
+        // Nothing that reads as speed: the daily set has already taught the user
+        // that a fast answer is the good one.
+        #expect(!copy.lowercased().contains("quick"))
+        #expect(!copy.lowercased().contains("fast"))
+    }
+
+    @Test("An unservable band names the band rather than hiding or apologising")
+    func emptyBandNamesItself() {
+        let copy = CalculationCopy.emptyBand(1750...1850)
+
+        #expect(copy.contains("1750–1850"))
+        #expect(copy.contains("Your daily set is unaffected."))
+        // No offer of a set that cannot be served, under any wording.
+        #expect(!copy.contains("Calculation ·"))
+        // Not consolation: it states the cause, and never softens it.
+        #expect(!copy.lowercased().contains("sorry"))
+        #expect(!copy.lowercased().contains("don't worry"))
     }
 }

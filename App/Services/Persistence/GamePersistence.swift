@@ -34,12 +34,21 @@ actor GamePersistence {
 
         // Separate write, deliberately: the daily loop is a streak counter, and
         // failing to bump it must never roll back the game itself.
-        do {
-            try database.dailyLoop.update(day: DailyLoop.dayKey(for: record.endedAt)) { loop in
-                loop.gamePlayed = true
+        //
+        // Calibration is excluded because it is not the loop's game. It is the
+        // measurement the app runs *before* the loop starts, five games deep,
+        // against opponents chosen to bracket a rating rather than to train
+        // anything. Counting the last of them ticks the day's game square
+        // before the user has played a day, and the first real "Play Oscar"
+        // never happens.
+        if record.mode != GameMode.calibration.rawValue {
+            do {
+                try database.dailyLoop.update(day: DailyLoop.dayKey(for: record.endedAt)) { loop in
+                    loop.gamePlayed = true
+                }
+            } catch {
+                AppLog.persistence.error("Daily loop not updated: \(String(describing: error), privacy: .public)")
             }
-        } catch {
-            AppLog.persistence.error("Daily loop not updated: \(String(describing: error), privacy: .public)")
         }
 
         AppLog.persistence.info(

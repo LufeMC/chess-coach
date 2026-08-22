@@ -333,6 +333,23 @@ struct HumanizerSelfPlay {
             let profile = board.position.sideToMove == .white ? white : black
             let humanizer = Humanizer(profile: profile)
 
+            // Deliberately *not* what ships, and the difference is worth stating
+            // because it looks like an oversight. `GameSession` searches at
+            // `device.threads` with `.depthWithin`, a depth cap plus a
+            // millisecond backstop; this searches one thread at a plain
+            // `.depth`.
+            //
+            // Both divergences are conservative. Lazy SMP at a fixed depth
+            // explores more nodes than a single thread does, so the shipped
+            // opponent is if anything marginally stronger than the ladder
+            // measured here — the error is in the safe direction. And the
+            // backstop is the one thing a calibration harness must not have:
+            // a measurement whose result depends on how fast the machine
+            // running it happens to be is not a measurement. What the harness
+            // therefore cannot answer is whether the shipped cap is ever *hit*
+            // on a phone; that question is answered by the depth-shortfall
+            // warning `runOpponentMove` logs when a search stops short of the
+            // profile's horizon.
             await engineService.acquire(
                 .play,
                 configuration: EngineService.Configuration(

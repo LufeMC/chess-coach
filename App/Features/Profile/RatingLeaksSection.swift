@@ -48,7 +48,11 @@ struct RatingLeaksSection: View {
         VStack(alignment: .leading, spacing: 0) {
             SectionHeader(
                 title: "Rating leaks",
-                qualifier: windowGames > 0 ? "Last \(windowGames) games" : nil
+                // Only once the table is real. "Last 5 games" above a body that
+                // says there are not enough games yet is the section
+                // contradicting itself, on a screen whose authority rests on
+                // its numbers agreeing.
+                qualifier: state.isMeasured && windowGames > 0 ? "Last \(windowGames) games" : nil
             )
             .padding(.bottom, 14)
 
@@ -92,16 +96,24 @@ struct RatingLeaksSection: View {
     /// Absent when the top row is noise: a filled CTA proposing a fortnight of
     /// work against 0.04 expected points a game teaches the user that the app's
     /// urgency is decorative.
+    ///
+    /// Also absent when the cause has no habit behind it. The handoff carries
+    /// the habit and nothing else, so a habitless cause switches to the Train
+    /// tab with no session opened — a filled button that silently does nothing
+    /// is worse than no button, and "Train this pattern" was the copy that
+    /// promised it.
     @ViewBuilder
     private var trainAction: some View {
-        if let focus = leaks.first, focus.impact != .low {
+        if let focus = leaks.first, focus.impact != .low,
+           let title = LeakTable.trainActionTitle(for: focus) {
             Button {
                 onTrain(focus)
             } label: {
-                Text(LeakTable.trainActionTitle(for: focus))
+                Text(title)
             }
             .buttonStyle(.primaryAction)
             .padding(.top, 16)
+            .accessibilityHint("Opens a training set built around this habit")
         }
     }
 }
@@ -120,7 +132,10 @@ private struct DiagnosisBlock: View {
                 // one hero number and it is the rating. Two 44pt figures on one
                 // scroll makes the reader choose which one the screen is about.
                 DenominatorText(
-                    Denominator(value: diagnosis.formattedPoints, denominator: "pts / game"),
+                    Denominator(
+                        value: diagnosis.formattedPoints,
+                        denominator: LeakDiagnosis.unitDenominator
+                    ),
                     role: .title
                 )
                 Spacer(minLength: 8)
@@ -222,7 +237,13 @@ private struct LeakRowView: View {
     }
 
     private var spokenLabel: String {
-        "\(leak.title). \(points) expected points per game across \(leak.count) occurrences. \(leak.detail)"
+        // The gloss rides along, because the row is combined into one element:
+        // a VoiceOver user hears this string and never reaches the diagnosis
+        // paragraph that defines the unit for everyone else.
+        """
+        \(leak.title). \(points) points of result a game — \(LeakDiagnosis.unitGloss) — \
+        across \(leak.count) occurrences. \(leak.detail)
+        """
     }
 
     /// Length is magnitude; alpha is rank. One hue all the way down, because a
@@ -277,7 +298,11 @@ private struct SparkBars: View {
             Spacer(minLength: 0)
         }
         .accessibilityElement(children: .ignore)
-        .accessibilityLabel("Last \(trend.spanLabel)")
+        .accessibilityLabel("Trend for this cause")
+        // The shape is the whole message, so a reader who cannot see it needs
+        // the direction stated. The bar heights themselves are not read out:
+        // six expected-point subtotals is a list nobody can hold in their head.
+        .accessibilityValue(trend.directionLabel)
     }
 
     private func height(for value: Double) -> CGFloat {
@@ -297,6 +322,11 @@ struct LeakDetailScreen: View {
     let leak: LeakRow
     let occurrences: [LeakOccurrence]
     var onTrain: () -> Void = {}
+
+    /// Opens the review board at the exact ply. The list's whole argument is
+    /// "Better: Qe2", and an assertion about a move the user cannot look at is
+    /// the same accusation the aggregate above it was.
+    var onOpen: (LeakOccurrence) -> Void = { _ in }
 
     var body: some View {
         ScrollView {
@@ -323,7 +353,10 @@ struct LeakDetailScreen: View {
                                         .fill(Palette.hairline.dynamic)
                                         .frame(height: 1)
                                 }
-                                OccurrenceRow(occurrence: occurrence)
+                                OccurrenceRow(
+                                    occurrence: occurrence,
+                                    onOpen: { onOpen(occurrence) }
+                                )
                             }
                         }
                         .padding(.horizontal, 14)
@@ -347,23 +380,42 @@ struct LeakDetailScreen: View {
             DenominatorText(
                 Denominator(
                     value: String(format: "−%.2f", leak.epLostPerGame),
-                    denominator: "pts / game"
+                    denominator: LeakDiagnosis.unitDenominator
                 ),
                 role: .display
             )
 
+            // This screen is reachable without passing the diagnosis block, so
+            // it cannot borrow that paragraph's definition of the unit. The one
+            // sentence is cheaper than a reader who takes "−0.42" for rating
+            // points and concludes the habit is trivial.
+            Text(LeakDiagnosis.unitSentence)
+                .typeRole(.caption)
+                .fixedSize(horizontal: false, vertical: true)
+
+            // `LeakTable.detail` is two clauses: what happened, then the
+            // question that catches it next time. The second clause is the
+            // reason this screen is allowed to list refutations at all — a
+            // verdict with no method is the accusation the section exists to
+            // avoid — so it must not be trimmed to fit.
             Text(leak.detail)
                 .typeRole(.body, appliesForeground: false)
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
 
-            Button {
-                onTrain()
-            } label: {
-                Text(LeakTable.trainActionTitle(for: leak))
+            // Same rule as the section's own button: the handoff carries the
+            // habit, so a cause with none behind it would switch tabs and open
+            // nothing.
+            if let title = LeakTable.trainActionTitle(for: leak) {
+                Button {
+                    onTrain()
+                } label: {
+                    Text(title)
+                }
+                .buttonStyle(.primaryAction)
+                .padding(.top, 4)
+                .accessibilityHint("Opens a training set built around this habit")
             }
-            .buttonStyle(.primaryAction)
-            .padding(.top, 4)
         }
         .padding(16)
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -371,30 +423,54 @@ struct LeakDetailScreen: View {
     }
 }
 
+/// One position where the leak happened, and the way into it.
+///
+/// The row asserts a refutation — "Better: Qe2" — in four characters of
+/// notation. Read on its own that is the app claiming a move was wrong and
+/// declining to show why, which is the shape of thing this whole screen is
+/// built to avoid. The moment ID is already stored beside the ply, so the board
+/// with its explanation is one tap away and there is no reason not to offer it.
 private struct OccurrenceRow: View {
 
     let occurrence: LeakOccurrence
+    let onOpen: () -> Void
 
     var body: some View {
-        HStack(spacing: 12) {
-            VStack(alignment: .leading, spacing: 3) {
-                Text("Move \(occurrence.moveNumber): \(occurrence.playedSAN)")
-                    .typeRole(.body, monospacedDigits: true)
-                Text("Better: \(occurrence.bestSAN)")
-                    .typeRole(.caption, monospacedDigits: true)
-            }
+        Button(action: onOpen) {
+            HStack(spacing: 12) {
+                VStack(alignment: .leading, spacing: 3) {
+                    Text("Move \(occurrence.moveNumber): \(occurrence.playedSAN)")
+                        .typeRole(.body, monospacedDigits: true)
+                    // Only where there is a move to name. `bestSAN` is written
+                    // by the analysis pass and can be empty — a moment stored
+                    // before the engine returned a line, or by a build that did
+                    // not record one — and "Better:" followed by nothing is the
+                    // app asserting a refutation it does not have.
+                    if !occurrence.bestSAN.isEmpty {
+                        Text("Better: \(occurrence.bestSAN)")
+                            .typeRole(.caption, monospacedDigits: true)
+                    }
+                }
 
-            Spacer(minLength: 8)
+                Spacer(minLength: 8)
 
-            VStack(alignment: .trailing, spacing: 3) {
-                Text(String(format: "−%.2f", occurrence.epLost))
-                    .typeRole(.body, monospacedDigits: true, appliesForeground: false)
-                    .foregroundStyle(.secondary)
-                Text(occurrence.playedAt.formatted(.dateTime.day().month(.abbreviated)))
-                    .typeRole(.label, monospacedDigits: true)
+                VStack(alignment: .trailing, spacing: 3) {
+                    Text(String(format: "−%.2f", occurrence.epLost))
+                        .typeRole(.body, monospacedDigits: true, appliesForeground: false)
+                        .foregroundStyle(.secondary)
+                    Text(occurrence.playedAt.formatted(.dateTime.day().month(.abbreviated)))
+                        .typeRole(.label, monospacedDigits: true)
+                }
+
+                Image(systemName: "chevron.right")
+                    .typeRole(.caption, appliesForeground: false)
+                    .foregroundStyle(.tertiary)
             }
+            .padding(.vertical, 11)
+            .contentShape(Rectangle())
         }
-        .padding(.vertical, 11)
+        .buttonStyle(.pressable)
         .accessibilityElement(children: .combine)
+        .accessibilityHint("Opens the board at this move")
     }
 }

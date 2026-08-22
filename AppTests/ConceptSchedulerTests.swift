@@ -209,6 +209,33 @@ struct SetCompositionTests {
         #expect(model.pendingDrill != nil, "the drill should be handed to the Train tab")
         #expect(model.stage == .solving, "the puzzles have to follow the concept")
     }
+
+    /// Every corpus puzzle animates the opponent's setup move in — dropping the
+    /// user into the position after it is what `PuzzleSessionScreen` calls the
+    /// classic puzzle-app mistake, in its own header. The concept exercise was
+    /// doing exactly that: its machine was started at the call site, so the
+    /// position before the setup move was gone before anything could draw it.
+    @Test("A concept exercise offers its setup move for the animation")
+    func conceptExerciseAnimatesItsSetupMove() async throws {
+        let italian = try #require(TrainingConcept.catalogue.first { $0.id == "opening.italian" })
+        let model = PuzzleSessionModel(
+            driver: SetShapeDriver(),
+            database: nil,
+            concept: .init(concept: italian, teachFirst: false)
+        )
+        await model.start()
+
+        #expect(model.isConceptItem)
+        #expect(model.setupMove?.from == .e2)
+        #expect(model.setupMove?.to == .e4)
+        // The pre-setup position, so the board has something to animate *from*.
+        #expect(model.setupMove?.position.piece(at: .e2)?.kind == .pawn)
+        // And the board is still handed over after the setup move.
+        #expect(model.machineSnapshot?.expectedMove == "e7e5")
+        // The screen keys its animation off this; `planOnScreen` is nil for a
+        // concept, which is why it never fired.
+        #expect(model.itemIdentity == "concept:opening.italian")
+    }
 }
 
 /// A driver with one puzzle queued, which is all these tests need.
@@ -221,6 +248,7 @@ private final class SetShapeDriver: PuzzleSessionDriver {
     var isSessionFinished: Bool { false }
     var loadFailure: String? { nil }
     var puzzleRating: Double { 1200 }
+    var puzzleRatingDeviation: Double { 0 }
 
     private let plan: SessionItemPlan
     private var machine: PuzzleSolveMachine?
@@ -241,6 +269,8 @@ private final class SetShapeDriver: PuzzleSessionDriver {
         machine = plan.presented.machine(retryPolicy: plan.retryPolicy)
         machine?.start()
     }
+    func startCalculationSet() async { await startSession(focus: nil) }
+    func markItemShown() {}
     func offer(uci: String) async -> PuzzleSolveMachine.MoveResult { .illegal }
     func revealHint() -> String? { nil }
     func skipCurrent() async {}

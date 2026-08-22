@@ -43,8 +43,10 @@ struct RatingChartCard: View {
         VStack(alignment: .leading, spacing: 14) {
             header
             plot
+            plotLegend
             metricControl
             rangeRow
+            windowRow
         }
         .padding(16)
         .elevation(.raised, cornerRadius: CornerRadius.card)
@@ -72,10 +74,11 @@ struct RatingChartCard: View {
                 Spacer(minLength: 12)
 
                 if let typical = series.typicalRange {
-                    // Stated, not drawn. "Typical" is descriptive of this
-                    // window's own values — see `ProfileChartSeries.typicalRange`
-                    // for why it is not a population claim.
-                    Text("Typical \(model.metric.formatCompact(typical.lowerBound))–\(model.metric.formatCompact(typical.upperBound))")
+                    // Stated, not drawn — and named as the user's own, because
+                    // it is: the middle 80% of the values on this plot. See
+                    // `ProfileChartSeries.typicalRange` for why it is not, and
+                    // must not read as, a population claim.
+                    Text("Your range \(model.metric.formatCompact(typical.lowerBound))–\(model.metric.formatCompact(typical.upperBound))")
                         .typeRole(.caption, monospacedDigits: true)
                         .multilineTextAlignment(.trailing)
                 }
@@ -92,6 +95,17 @@ struct RatingChartCard: View {
                 // absence and must not read as the finding itself.
                 Text(pending)
                     .typeRole(.caption)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
+            if let scaleNote = model.metric.scaleNote {
+                // Which scale the hero figure is on. The app has no accounts and
+                // imports nothing, so a club player's own rating is the number
+                // they will assume this is; the only sentence that ever said
+                // otherwise is on a calibration screen seen once.
+                Text(scaleNote)
+                    .typeRole(.label, appliesForeground: false)
+                    .foregroundStyle(.tertiary)
                     .fixedSize(horizontal: false, vertical: true)
             }
         }
@@ -135,6 +149,22 @@ struct RatingChartCard: View {
                 symbol: "chart.line.flattrend.xyaxis"
             )
             .frame(height: plotHeight, alignment: .center)
+        }
+    }
+
+    /// What the four horizontal bars are.
+    ///
+    /// Drawn only when they are: the bars carry the whole narrative layer of the
+    /// plot, and unlabelled they are four rules with `+4%` beside them that the
+    /// reader has to reverse-engineer. The interpretive sentence above talks
+    /// about "the latest period", and this is what tells them where to look.
+    @ViewBuilder
+    private var plotLegend: some View {
+        if series.isPlottable, !series.segments.isEmpty {
+            Text("Bars: each period's average, and its change on the one before.")
+                .typeRole(.label, appliesForeground: false)
+                .foregroundStyle(.tertiary)
+                .fixedSize(horizontal: false, vertical: true)
         }
     }
 
@@ -291,6 +321,26 @@ struct RatingChartCard: View {
             stepper(symbol: "chevron.left", delta: 1, enabled: model.canStepBack)
             stepper(symbol: "chevron.right", delta: -1, enabled: model.canStepForward)
         }
+    }
+
+    /// Which window the plot is actually showing.
+    ///
+    /// The steppers are two unlabelled chevrons, and stepping back changes only
+    /// the headline date — or, in a window with no play in it, replaces the
+    /// headline with a dash. Nothing said the user was looking at the past, so
+    /// an empty earlier month was indistinguishable from a broken chart.
+    private var windowRow: some View {
+        Text(windowLabel)
+            .typeRole(.label, monospacedDigits: true, appliesForeground: false)
+            .foregroundStyle(.tertiary)
+            .fixedSize(horizontal: false, vertical: true)
+    }
+
+    private var windowLabel: String {
+        let start = series.interval.start.formatted(.dateTime.day().month(.abbreviated))
+        let end = series.interval.end.formatted(.dateTime.day().month(.abbreviated))
+        guard model.rangeOffset > 0 else { return "\(start) – \(end)" }
+        return "An earlier \(model.range.spokenSpan): \(start) – \(end) · tap › to come back"
     }
 
     private func stepper(symbol: String, delta: Int, enabled: Bool) -> some View {

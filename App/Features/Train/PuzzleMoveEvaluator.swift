@@ -162,6 +162,16 @@ struct EnginePuzzleEvaluator: PuzzleMoveEvaluator {
     /// nothing cheaper is available.
     static let continuationNodes = 150_000
 
+    /// ## Never call two of these concurrently
+    ///
+    /// `EngineService` fronts a single Stockfish process. Acquiring the probe
+    /// lease grants a *new* generation and then stops whatever is running, so
+    /// two probes started with `async let` do not run side by side: the second
+    /// acquire cuts the first one's search off, and the first `search` then
+    /// either throws `LeaseError.expired` — because the lease it was handed is
+    /// no longer the one the service holds — or returns a few milliseconds of
+    /// nodes marked truncated. That is why the miss explanation asks its
+    /// questions one after another; see `PuzzleSessionModel.explainWithEngine`.
     func evaluate(fen: String, playing uci: String) async -> PuzzleEvaluation? {
         let device = await service.deviceProfile
         let lease = await service.acquire(.probe, configuration: .probe(device: device))
@@ -173,6 +183,12 @@ struct EnginePuzzleEvaluator: PuzzleMoveEvaluator {
                 limit: .nodes(Self.nodes),
                 lease: lease
             ),
+            // A search somebody else stopped is not an evaluation of anything.
+            // It carries whatever score the first few milliseconds happened to
+            // find, and a shallow number is indistinguishable from a deep one
+            // by the time it reaches the banner — which is how "yours leaves
+            // you losing" ends up under a move that was perfectly playable.
+            !result.wasTruncated,
             let principal = result.principal
         else { return nil }
 
@@ -190,7 +206,11 @@ struct EnginePuzzleEvaluator: PuzzleMoveEvaluator {
                 .fen(fen, moves: [uci]),
                 limit: .nodes(Self.continuationNodes),
                 lease: lease
-            )
+            ),
+            // Same rule as above, and it bites harder here: a line is quoted
+            // back to the user as a claim about the position, so half a search
+            // is worse than no sentence at all.
+            !result.wasTruncated
         else { return [] }
 
         // The search started after `uci`, so the variation opens with the
@@ -225,25 +245,76 @@ enum PuzzleMoveComparison {
     /// Silence there reads as agreement with the `Missed`.
     static let equivalentGap = 50
 
+    /// What the two evaluations amount to.
+    ///
+    /// A value rather than a string, because the caller needs to act on the
+    /// difference as well as print it: only a move the position says is
+    /// genuinely worse is worth spending a second search on to find out *how*
+    /// the opponent punishes it.
+    enum Verdict: Equatable, Sendable {
+        /// The position cannot tell the two moves apart.
+        case equivalent
+        /// The played move is meaningfully worse, and lands in this band.
+        case worse(PuzzleEvaluation.Band)
+
+        var phrase: String {
+            switch self {
+            case .equivalent: "the engine rates yours the same — only one answer is stored here"
+            case .worse(let band): band.playedPhrase
+            }
+        }
+    }
+
     /// - Parameters:
     ///   - answer: the evaluation after the puzzle's answer.
     ///   - played: the evaluation after the move the user chose.
-    /// - Returns: a clause such as `"only keeps things level"`, or `nil` when
-    ///   the two moves are close enough that there is nothing honest to add.
-    static func clause(answer: PuzzleEvaluation?, played: PuzzleEvaluation?) -> String? {
+    ///   - answerIsForced: whether the stored answer is known to be the only
+    ///     move that holds the result. True for a corpus puzzle — the generator
+    ///     discards a position whose solution has a second move reaching the
+    ///     same outcome, the one exception being an alternative mate on the
+    ///     last move, which ``PuzzleSolveMachine`` already accepts as a solve.
+    ///     False for a position mined from the user's own game, where the
+    ///     stored answer is simply whatever the analysis pass liked best.
+    /// - Returns: `nil` when the two moves are close enough that there is
+    ///   nothing honest to add.
+    static func verdict(
+        answer: PuzzleEvaluation?,
+        played: PuzzleEvaluation?,
+        answerIsForced: Bool = false
+    ) -> Verdict? {
         guard let answer, let played else { return nil }
         let gap = answer.centipawns - played.centipawns
 
         // Not worse in any way the position can tell. Say so rather than let
-        // "Missed" stand as the last word on a move that was fine.
+        // "Missed" stand as the last word on a move that was fine — and say
+        // *why* it was still marked missed, because "Missed … but yours was
+        // just as good" is the app contradicting itself in one sentence. The
+        // card stores one answer; the engine's opinion is that the position
+        // does not.
         if gap <= equivalentGap, played.band >= answer.band {
-            return "yours was just as good"
+            // …unless the answer was already known to be forced. This probe is
+            // a 40k-node glance, and on the puzzles whose point lies deeper
+            // than that — sacrifices, quiet moves at the top of the user's band
+            // — it will happily rate a second move equal. Crediting it there
+            // overrides a stronger, already-verified signal with a weaker one,
+            // and it does so on exactly the puzzles whose idea is hardest and
+            // most worth learning. Silence is the honest answer.
+            return answerIsForced ? nil : .equivalent
         }
 
         guard gap >= significantGap else { return nil }
         // A band that is not actually worse says nothing useful, however big the
         // raw gap: "also wins" is not a criticism.
         guard played.band < answer.band else { return nil }
-        return played.band.playedPhrase
+        return .worse(played.band)
+    }
+
+    /// The verdict as the second half of "But yours…".
+    static func clause(
+        answer: PuzzleEvaluation?,
+        played: PuzzleEvaluation?,
+        answerIsForced: Bool = false
+    ) -> String? {
+        verdict(answer: answer, played: played, answerIsForced: answerIsForced)?.phrase
     }
 }

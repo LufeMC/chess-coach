@@ -1,6 +1,7 @@
 import EngineKit
 import Foundation
 import Testing
+import TrainingCore
 
 @testable import ChessCoach
 
@@ -359,9 +360,13 @@ struct HumanizerTests {
 
     // MARK: Opponent ladder
 
+    // The app used to carry its own copy of the ladder beside the profiles, and
+    // the copy had drifted from the tuned one. These now exercise the rule the
+    // app actually calls, through the same entry point `OpponentPicker` uses.
+
     @Test("The ladder sits above the user and stays inside the profile range")
     func ladderOffsets() {
-        let ratings = (0..<8).map { OpponentLadder.rating(forUserRating: 1200, gameIndex: $0) }
+        let ratings = (0..<8).map { EloLadder.opponentRating(userRating: 1200, gameIndex: $0) }
 
         #expect(ratings.allSatisfy { $0 >= 800 && $0 <= 2200 })
         #expect(ratings.allSatisfy { $0 % 25 == 0 }, "ratings should be rounded to 25")
@@ -374,16 +379,16 @@ struct HumanizerTests {
     @Test("The ladder clamps rather than running off either end")
     func ladderClamps() {
         for index in 0..<4 {
-            #expect(OpponentLadder.rating(forUserRating: 400, gameIndex: index) >= 800)
-            #expect(OpponentLadder.rating(forUserRating: 2600, gameIndex: index) <= 2200)
+            #expect(EloLadder.opponentRating(userRating: 400, gameIndex: index) >= 800)
+            #expect(EloLadder.opponentRating(userRating: 2600, gameIndex: index) <= 2200)
         }
     }
 
     @Test("The ladder tracks the user's rating upward")
     func ladderTracksUser() {
         for index in 0..<4 {
-            let low = OpponentLadder.rating(forUserRating: 1000, gameIndex: index)
-            let high = OpponentLadder.rating(forUserRating: 1800, gameIndex: index)
+            let low = EloLadder.opponentRating(userRating: 1000, gameIndex: index)
+            let high = EloLadder.opponentRating(userRating: 1800, gameIndex: index)
             #expect(high > low, "opponent did not rise with the user at cycle position \(index)")
         }
     }

@@ -37,11 +37,16 @@ struct TrainingConcept: Sendable, Hashable, Identifiable {
         case positional
 
         /// What the set calls this slot.
+        ///
+        /// Each one names a *category*, because the label stands where `3 / 10`
+        /// normally does and has to say what kind of step this is. "Position"
+        /// did not: over a board it reads as the noun, and the Train tab uses
+        /// the same word for a card mined from the user's own game.
         var label: String {
             switch self {
-            case .opening: "Opening"
+            case .opening: "Opening line"
             case .endgame: "Endgame"
-            case .positional: "Position"
+            case .positional: "Positional idea"
             }
         }
     }
@@ -89,6 +94,49 @@ struct TrainingConcept: Sendable, Hashable, Identifiable {
     /// The rating from which this concept is worth teaching.
     var fromRating: Int
     var exercise: Exercise
+
+    /// Other replies the same idea has to answer, each a complete line from the
+    /// same starting position as ``exercise``.
+    ///
+    /// ## Why one stored line is not an opening
+    ///
+    /// A single move order trains the move order. The first thing a real
+    /// opponent does is play something else, and that position — the one the
+    /// user actually has to think in — is the one the exercise never showed.
+    /// Replaying fifteen memorised plies feels like study and transfers to the
+    /// games where nobody deviates, which is none of them.
+    ///
+    /// So an opening carries the main line plus the replies it most often has
+    /// to answer, and ``ConceptScheduler`` serves a different one each time the
+    /// concept comes round. Every entry demonstrates the *same* `lookFor` cue as
+    /// the main line, because the lesson is not re-taught alongside it.
+    ///
+    /// Empty for endgames and positional ideas: their exercises are a drill and
+    /// a corpus position searched at run time, neither of which is a stored
+    /// line.
+    var alternateLines: [[String]] = []
+
+    /// The main line first, then its alternatives. Always non-empty for a
+    /// `.line` exercise.
+    var lineVariations: [[String]] {
+        guard case let .line(_, moves, _) = exercise else { return [] }
+        return [moves] + alternateLines
+    }
+
+    /// This concept with `variation` in place of its stored line.
+    ///
+    /// Substituted into the whole `TrainingConcept` rather than handed alongside
+    /// it, because three separate things read the exercise — the lesson card's
+    /// board (`ConceptPreview`), the "you play N moves" price on its button, and
+    /// the exercise runner. Passing the variation only to the runner would put a
+    /// picture of one line above a button that priced a second and a board that
+    /// played a third.
+    func playing(variation: [String]) -> TrainingConcept {
+        guard case let .line(fen, _, opponentMovesFirst) = exercise else { return self }
+        var copy = self
+        copy.exercise = .line(fen: fen, moves: variation, opponentMovesFirst: opponentMovesFirst)
+        return copy
+    }
 }
 
 // MARK: - Positional features
@@ -150,7 +198,16 @@ extension TrainingConcept {
                     "f1d3", "e8g8", "e1g1", "c7c5", "c2c3", "b8c6", "b1d2"
                 ],
                 opponentMovesFirst: false
-            )
+            ),
+            // 1…Nf6 rather than 1…d5, which is the reply that catches out
+            // anyone who learned the setup as a fixed sequence: the same seven
+            // White moves work, and the bishop still has to come out before e3.
+            alternateLines: [
+                [
+                    "d2d4", "g8f6", "c1f4", "e7e6", "e2e3", "c7c5",
+                    "c2c3", "d7d5", "g1f3", "f8e7", "f1d3", "e8g8", "e1g1"
+                ]
+            ]
         ),
         TrainingConcept(
             id: "opening.italian",
@@ -172,7 +229,13 @@ extension TrainingConcept {
                     "d2d3", "d7d6", "e1g1", "e8g8"
                 ],
                 opponentMovesFirst: true
-            )
+            ),
+            // 2.Bc4 before the knight. Nothing in the answer changes — knights
+            // out first, then the bishop, then castle — but the move order is
+            // different enough that a rehearsed sequence stops helping.
+            alternateLines: [
+                ["e2e4", "e7e5", "f1c4", "g8f6", "d2d3", "b8c6", "g1f3", "f8c5", "e1g1", "e8g8"]
+            ]
         ),
         TrainingConcept(
             id: "opening.qgd",
@@ -190,7 +253,13 @@ extension TrainingConcept {
                 fen: Position.standard.fen,
                 moves: ["d2d4", "d7d5", "c2c4", "e7e6", "b1c3", "g8f6", "c1g5", "f8e7", "e2e3", "e8g8"],
                 opponentMovesFirst: true
-            )
+            ),
+            // 2.Nf3 first, delaying c4. The same four Black moves in a
+            // different order, which is the point: the setup is what is being
+            // learned, not the sequence.
+            alternateLines: [
+                ["d2d4", "d7d5", "g1f3", "g8f6", "c2c4", "e7e6", "b1c3", "f8e7", "c1g5", "e8g8"]
+            ]
         ),
         TrainingConcept(
             id: "opening.f7attack",
@@ -210,7 +279,13 @@ extension TrainingConcept {
                 fen: Position.standard.fen,
                 moves: ["e2e4", "e7e5", "f1c4", "b8c6", "d1h5", "g7g6", "h5f3", "g8f6"],
                 opponentMovesFirst: true
-            )
+            ),
+            // The queen out on move two instead of move three. Same answer,
+            // and the swapped order is exactly what makes a memorised reply
+            // fail — the position after 2.Qh5 has never been on screen.
+            alternateLines: [
+                ["e2e4", "e7e5", "d1h5", "b8c6", "f1c4", "g7g6", "h5f3", "g8f6"]
+            ]
         ),
         TrainingConcept(
             id: "opening.ruyLopez",
@@ -233,7 +308,13 @@ extension TrainingConcept {
                     "e1g1", "f8e7", "f1e1", "b7b5", "a4b3", "d7d6"
                 ],
                 opponentMovesFirst: true
-            )
+            ),
+            // The half of the lesson the main line never reaches: they take the
+            // knight. It stops at the recapture on purpose — the cue is which
+            // pawn takes back, and everything after it is a different subject.
+            alternateLines: [
+                ["e2e4", "e7e5", "g1f3", "b8c6", "f1b5", "a7a6", "b5c6", "d7c6"]
+            ]
         ),
         TrainingConcept(
             id: "opening.flank",
@@ -323,8 +404,17 @@ extension TrainingConcept {
                     + "king up to deliver mate on the edge.",
                 why: "It is the first mate you must never fumble. Failing to convert queen against "
                     + "king does not lose you half a point — it loses the whole game you had already won.",
-                lookFor: "Keep the queen a knight's move from their king. It shrinks the box every "
-                    + "time and it is the one pattern that cannot stalemate."
+                // The cue used to end "it is the one pattern that cannot
+                // stalemate", which is backwards: the knight's-move square is
+                // *precisely* what stalemates once the king is cornered, and
+                // `kqk.2` starts with the black king on h8. A user who followed
+                // the old cue stalemated, was told the technique failed, and had
+                // been promised that could not happen. The stop condition is
+                // therefore in the first sentence, because `Teaching.cue` quotes
+                // that sentence alone into the drill's result banner.
+                lookFor: "Keep the queen a knight's move away until their king reaches the edge. "
+                    + "Then stop squeezing and bring your own king up, because in the corner that "
+                    + "same square is stalemate."
             ),
             fromRating: 0,
             exercise: .drill(.kqk)

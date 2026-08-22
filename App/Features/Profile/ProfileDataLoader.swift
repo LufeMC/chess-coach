@@ -24,8 +24,19 @@ struct ProfileChartData: Sendable {
     /// Games the leak table actually rests on, for the `Last 23 games` label.
     var leakWindowGames: Int
 
-    /// Finished games available at all, for the leak section's empty state.
+    /// Analysed games available at all, for the leak section's empty state.
     var gamesAvailable: Int
+
+    /// The start of the oldest game ``occurrences`` were read from, and
+    /// therefore the earliest moment any of them could have happened.
+    ///
+    /// Carried because the sparklines need to know how far back the app
+    /// actually looked. Without it they assume a fixed ninety days, and a leak
+    /// read from twenty games of daily play draws four empty buckets followed
+    /// by two full ones — a habit that looks like it is getting rapidly worse
+    /// when nothing about it changed at all. `nil` when there is nothing to
+    /// look at.
+    var occurrenceWindowStart: Date?
 
     static let empty = ProfileChartData(
         series: [:], occurrences: [:], leakWindowGames: 0, gamesAvailable: 0
@@ -84,7 +95,7 @@ actor ProfileDataLoader {
     }
 
     func load(now: Date = Date()) throws -> ProfileChartData {
-        let finished = try games.recent(limit: Self.historyGameLimit).filter { $0.endedAt != nil }
+        let recent = try games.recent(limit: Self.historyGameLimit)
         let rating = try samples(of: .ladderRating)
         let puzzle = try samples(of: .puzzleRating)
         let puzzleDeviation = try samples(of: .puzzleRatingDeviation)
@@ -93,11 +104,36 @@ actor ProfileDataLoader {
         // `LeakAnalyzer`, so the `Last N games` label and the numbers under it
         // describe the same sample. Reading a different slice here would put a
         // truthful-looking label on a table it does not describe.
-        let leakHorizon = Array(finished.prefix(MetricsService.maximumWindowGames(in: ladder)))
+        //
+        // "Exactly" is load-bearing and was not true before: this filtered on
+        // `endedAt != nil` while `MetricsService` filters on `analysis ==
+        // .complete`, and the two differ for every game that has finished but
+        // not yet been analysed — which, since the queue drains in the
+        // background, is most often the game the user just played. The label
+        // counted it and the rows could not.
+        //
+        // Both bounds are mirrored, not just the filter. `MetricsService` looks
+        // no further back than three windows of raw history before filtering,
+        // so a user with a long analysis backlog gets a deliberately smaller
+        // sample there — and a loader that kept digging until it found twenty
+        // analysed games would label that smaller table with a bigger number.
+        // See `MetricsService.recompute` for the four lines this mirrors.
+        let horizon = MetricsService.maximumWindowGames(in: ladder)
+        let leakHorizon = Array(
+            recent
+                .prefix(horizon * MetricsService.unanalysedGameAllowance)
+                .filter { $0.analysis == .complete }
+                .prefix(horizon)
+        )
 
         var occurrences: [String: [LeakOccurrence]] = [:]
         for game in leakHorizon {
-            let playedAt = game.endedAt ?? game.startedAt
+            // `startedAt`, like `MetricsService`, and not `endedAt`: the window
+            // label, the bucketing behind the sparkline and the dates on the
+            // occurrence rows all have to be on one clock, or a game that began
+            // one side of a cutoff and ended the other is counted by one of
+            // them and not the others.
+            let playedAt = game.startedAt
             for moment in try moments.moments(forGame: game.id) {
                 occurrences[moment.causeTag, default: []].append(
                     LeakOccurrence(
@@ -118,7 +154,7 @@ actor ProfileDataLoader {
         }
 
         let gameRecords = leakHorizon.map {
-            TrainingCore.GameRecord(id: $0.id.uuidString, playedAt: $0.endedAt ?? $0.startedAt)
+            TrainingCore.GameRecord(id: $0.id.uuidString, playedAt: $0.startedAt)
         }
 
         return ProfileChartData(
@@ -126,11 +162,16 @@ actor ProfileDataLoader {
                 rating: rating,
                 puzzle: puzzle,
                 puzzleDeviation: puzzleDeviation,
-                games: finished
+                games: recent
             ),
             occurrences: occurrences,
             leakWindowGames: LeakTable.windowSize(games: gameRecords, now: now, tuning: tuning.focus),
-            gamesAvailable: leakHorizon.count
+            gamesAvailable: leakHorizon.count,
+            // The oldest game in the horizon, not the oldest occurrence: the
+            // sparkline's span is how far back the app *looked*, so an empty
+            // stretch at the left of it means "we looked and found nothing",
+            // which is the improvement the sparkline exists to show.
+            occurrenceWindowStart: leakHorizon.last?.startedAt
         )
     }
 

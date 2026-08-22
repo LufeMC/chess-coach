@@ -39,7 +39,11 @@ struct MainTabBar: View {
                         // A tap on the tab you are already on is not a no-op
                         // worth animating; only a real change gets the spring.
                         guard selection != tab.value else { return }
-                        Haptics.play(.pieceLifted)
+                        // No haptic. Changing tab is navigation, which
+                        // ``Haptics`` excludes by name — and this one was
+                        // `pieceLifted`, so the switch a user reaches for to
+                        // stop the board buzzing was silencing the tab bar
+                        // instead of anything they had touched a piece with.
                         withAnimation(Motion.snappy) { selection = tab.value }
                     }
                 )

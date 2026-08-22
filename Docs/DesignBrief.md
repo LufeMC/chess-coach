@@ -44,6 +44,21 @@ nowhere else.
 ### Layout invariant
 **Exactly one filled button per screen.** Everything else is `.bordered`, plain, or status.
 
+### Focus invariant
+**Only a live game hides the tab bar.** `PlayScreen` is the one screen that writes
+`AppModel.isPlayingGame` — on appear, whenever `session` becomes nil or non-nil, and on
+disappear — and `RootView` hides `MainTabBar` on exactly that flag. Nothing else may write it.
+
+The other two focus behaviours are deliberate and different, and neither is a precedent:
+
+- **Review keeps its stack.** `todayPath` survives a tab switch on purpose, so leaving Review
+  and coming back returns you to the same moment rather than to the top of the game.
+- **The Train session is a `fullScreenCover`** and so cannot be switched away from at all. That
+  is a property of a timed drill run, not a focus rule.
+
+A new screen that wants focus mode takes the Play rule — set and clear one flag, keep the tab
+bar reachable the instant the timed thing ends. It does not invent a fourth model.
+
 ---
 
 ## Screen 1 — Today
@@ -69,7 +84,8 @@ Steps 1–3 are **status, not buttons** — they may navigate but must not look 
 Structure copied from Duolingo Chess's in-game board, minus the cartoon layer.
 
 - **Top bar = three capsules only.** Bare `xmark` glyph (no circle chrome); your clock + opponent clock side by side with the **inactive one dimmed to ~35% opacity** (better active-side indicator than borders or color); right-aligned material/eval capsule `↑ 11` with directional chevron + tint. `Capsule().fill(.quaternary)` + `.monospacedDigit()`.
-- **Board edge-to-edge** — no horizontal padding, no coordinates, no border by default (make them settings). Low square contrast puts all visual weight on pieces and leaves headroom for highlights.
+- **Board edge-to-edge** — no horizontal padding, no border by default (make the border a setting). Low square contrast puts all visual weight on pieces and leaves headroom for highlights.
+- **Coordinates are on, always, and are not a setting.** Every coaching sentence in this app names squares, and a reader who cannot decode `f3` has no way to connect the sentence to the board except by being shown, on the board, which square f3 is. They cost no width — the glyphs sit inside the corner squares, not in a gutter — so the price is a little ink and the return is algebraic notation learned by osmosis. Turned on in `BoardAppearance.style`, because it is an app decision and not a package default; `BoardUI`'s own default stays off, which is right for a board built to be *played* on rather than *learned* on.
 - **Opponent chip above board, user below.** Compact `HStack`: `Circle` monogram + name + one-line trait. Describe personality in *trait phrases*, not difficulty integers: `Oscar · trades early, hates pressure`. *(Bloom guide picker)*
 - **Move feedback is drawn on the square, not in a banner** — concentric expanding rings on the affected square, green + `+9` for a gain, red + `-3` for a loss. Two or three `Circle().stroke()` layers animated with `.scaleEffect` + `.opacity` in the board `ZStack`. This is the eval-delta primitive.
 - **Undo/redo as ghost circular buttons** flanking the bottom edge, `.tertiary` when disabled.
@@ -181,6 +197,6 @@ motivating element on the screen. *(Bevel Recovery)*
 5. **Confetti/celebration modals after every session.** Reserve for rung completion at most.
 6. **A results modal that blocks return to the board.** Post-game is a screen you can leave.
 7. **Big centered ring gauges for non-0–100 values.** Right for readiness, wrong for rating — use a line chart with trend annotation.
-8. **Coordinates, borders, captured-piece trays on by default** — make them settings.
+8. **Borders and captured-piece trays on by default** — make them settings. Coordinates are the one deliberate exception and are not a setting: see Screen 2.
 9. **Spinners inside the coach card** — reserve the frame with a redacted skeleton.
 10. **Multiple filled buttons per screen.**

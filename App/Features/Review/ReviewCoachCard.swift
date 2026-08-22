@@ -1,5 +1,6 @@
 import AnalysisKit
 import SwiftUI
+import TrainingCore
 
 /// The coach's read on one position.
 ///
@@ -9,10 +10,25 @@ import SwiftUI
 /// Profile leak table uses for this cause, which is what lets a reader connect
 /// the move they just lost a piece to with the row costing them the most rating.
 ///
-/// Bounded on purpose. The prose slot always reserves exactly three lines and
-/// the rest of the note sits behind the pill, so the card is the same height for
-/// every moment in the strip and the filmstrip above it never moves under the
-/// finger that just tapped it.
+/// ## The question comes first
+///
+/// The note is covered until the reader asks for it. The best-written coaching
+/// copy in the app — "Before you let go of that piece, what would be attacking
+/// it on the square you picked?" — used to sit inside a sheet *behind* the
+/// answer, which defeats the whole point of asking: a student who has been asked
+/// what the piece was doing on that square reads the answer differently from one
+/// who was handed it. The self-check already proves the app is willing to
+/// withhold; this does it per moment.
+///
+/// Uncovering is also what counts the moment as reviewed. It is the one act on
+/// this screen that requires the reader to have looked at the position first —
+/// selecting a thumbnail is not, which is why the day's "Review 3 moments" used
+/// to be satisfiable by opening the screen and tapping twice.
+///
+/// The whole note is shown once uncovered. It is budgeted to 400 characters and
+/// written as happened → proof → step, so clipping it to three lines cut it in
+/// the middle of the proof and put the only clause a player can act on tomorrow
+/// below the fold.
 struct ReviewCoachCard: View {
 
     let note: String
@@ -20,14 +36,24 @@ struct ReviewCoachCard: View {
     let diagnosis: ReviewDiagnosis
     /// Context line, e.g. `"Move 23 · Blunder"`.
     var subtitle: String?
-    /// The Socratic lead-in, shown at the top of the detail sheet where there is
-    /// room to sit with it.
+    /// The Socratic lead-in. `nil` on a praised move and on a moment no detector
+    /// explained, where there is nothing honest to ask.
     var question: String?
     /// Questions the app can answer from its own data.
     var suggestedQuestions: [ReviewSuggestedQuestion] = []
+    /// Which answers are uncovered.
+    ///
+    /// Owned by the model rather than by this card, because one of the answers
+    /// is also drawn on the board — the engine's move as an arrow — and the
+    /// board is not this card's to draw on.
+    var revealedQuestionIDs: Set<String> = []
+    var onToggleQuestion: (String) -> Void = { _ in }
+    /// Called the first time the reader uncovers the note.
+    var onReveal: () -> Void = {}
+    /// Sends the reader to Train, filtered to this moment's habit.
+    var onDrill: ((Habit) -> Void)? = nil
 
-    @State private var isShowingDetail = false
-    @State private var revealedQuestionIDs: Set<String> = []
+    @State private var isNoteShown = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
@@ -35,22 +61,92 @@ struct ReviewCoachCard: View {
             if let step = diagnosis.step {
                 stepRow(step)
             }
-            prose
-            footer
 
-            if !suggestedQuestions.isEmpty {
-                VStack(spacing: 8) {
-                    ForEach(suggestedQuestions) { suggestion in
-                        questionChip(suggestion)
+            if let question, !isNoteShown {
+                ask(question)
+            } else {
+                prose
+
+                if !isNoteShown {
+                    // Nothing to ask on this one, so the note is already
+                    // legible. The button is what makes reading it a deliberate
+                    // act rather than a side effect of scrolling past.
+                    Button("Mark this one reviewed") { reveal() }
+                        .buttonStyle(.primaryAction)
+                        .padding(.top, 2)
+                } else {
+                    if !suggestedQuestions.isEmpty {
+                        VStack(spacing: 8) {
+                            ForEach(suggestedQuestions) { suggestion in
+                                questionChip(suggestion)
+                            }
+                        }
+                        .padding(.top, 2)
                     }
+                    drillRow
                 }
-                .padding(.top, 2)
             }
         }
         .padding(14)
         .frame(maxWidth: .infinity, alignment: .leading)
         .elevation(.raised, cornerRadius: CornerRadius.card)
         .animation(Motion.contentSwap, value: revealedQuestionIDs)
+        .animation(Motion.contentSwap, value: isNoteShown)
+    }
+
+    /// The Socratic lead-in, and the only way past it.
+    private func ask(_ question: String) -> some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text(question)
+                .typeRole(.headline)
+                .multilineTextAlignment(.leading)
+                .fixedSize(horizontal: false, vertical: true)
+
+            Button("Show the answer") { reveal() }
+                .buttonStyle(.primaryAction)
+        }
+    }
+
+    private func reveal() {
+        guard !isNoteShown else { return }
+        isNoteShown = true
+        onReveal()
+    }
+
+    /// The way from a mistake to the drill for it.
+    ///
+    /// The app exists to run play → review → drill, and until this row the last
+    /// element on the screen was a disclosure triangle: the user finished
+    /// reading why they lost a piece and had nowhere to go with it.
+    @ViewBuilder
+    private var drillRow: some View {
+        if let onDrill, let habit = suggestedQuestions.compactMap(\.habit).first {
+            Button {
+                onDrill(habit)
+            } label: {
+                HStack(spacing: 8) {
+                    Image(systemName: "target")
+                        .font(.caption)
+                    Text("Drill this in Train · \(habit.microGoalTitle)")
+                        .typeRole(.caption, appliesForeground: false)
+                        .multilineTextAlignment(.leading)
+                    Spacer(minLength: 0)
+                    Image(systemName: "chevron.right")
+                        .font(.caption2.weight(.semibold))
+                }
+                .foregroundStyle(Palette.accent.dynamic)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.horizontal, 12)
+                .padding(.vertical, 10)
+                .background(
+                    RoundedRectangle(cornerRadius: CornerRadius.chip, style: .continuous)
+                        .strokeBorder(Palette.accent.dynamic.opacity(0.45), lineWidth: 2)
+                )
+                .contentShape(RoundedRectangle(cornerRadius: CornerRadius.chip, style: .continuous))
+            }
+            .buttonStyle(.pressable)
+            .padding(.top, 2)
+        }
     }
 
     // MARK: Header
@@ -95,30 +191,17 @@ struct ReviewCoachCard: View {
 
     // MARK: Prose
 
+    /// The whole note, unclipped.
+    ///
+    /// No `lineLimit`. The note is bounded at ``MomentExplainer/characterBudget``
+    /// characters and its last clause is the step to take at the board, so three
+    /// reserved lines hid the mechanism and kept the diagnosis the reader had
+    /// already seen in the title.
     private var prose: some View {
         Text(note)
             .typeRole(.body)
-            .lineLimit(3, reservesSpace: true)
             .multilineTextAlignment(.leading)
             .fixedSize(horizontal: false, vertical: true)
-    }
-
-    /// One line, always, so the card keeps its height across a selection change.
-    private var footer: some View {
-        Button {
-            isShowingDetail = true
-        } label: {
-            Text("Go deeper")
-                .typeRole(.caption, appliesForeground: false)
-                .foregroundStyle(Palette.accent.dynamic)
-                .padding(.horizontal, 12)
-                .padding(.vertical, 6)
-                .background(Capsule().fill(Palette.surfaceSunken.dynamic))
-        }
-        .buttonStyle(.pressable)
-        .sheet(isPresented: $isShowingDetail) {
-            ReviewCoachDetail(note: note, question: question, subtitle: subtitle)
-        }
     }
 
     // MARK: Suggested questions
@@ -131,11 +214,7 @@ struct ReviewCoachCard: View {
         let isRevealed = revealedQuestionIDs.contains(suggestion.id)
 
         return Button {
-            if isRevealed {
-                revealedQuestionIDs.remove(suggestion.id)
-            } else {
-                revealedQuestionIDs.insert(suggestion.id)
-            }
+            onToggleQuestion(suggestion.id)
         } label: {
             VStack(alignment: .leading, spacing: 4) {
                 HStack(spacing: 8) {
@@ -153,6 +232,15 @@ struct ReviewCoachCard: View {
                         .typeRole(.caption)
                         .multilineTextAlignment(.leading)
                         .fixedSize(horizontal: false, vertical: true)
+
+                    if suggestion.arrowUCI != nil {
+                        // Says where to look. Without it the arrow appearing on
+                        // a board four inches away is a change nobody is
+                        // watching for.
+                        Text("It is drawn on the board.")
+                            .typeRole(.caption, appliesForeground: false)
+                            .foregroundStyle(.tertiary)
+                    }
                 }
             }
             .frame(maxWidth: .infinity, alignment: .leading)
@@ -221,57 +309,6 @@ struct ReviewVerdictCard: View {
     }
 }
 
-// MARK: - Sheet
-
-/// The full note, behind the pill.
-///
-/// The question comes first and the explanation second, which is the order a
-/// coach would use: a student who has been asked what the piece was doing on
-/// that square reads the answer differently from one who was handed it.
-private struct ReviewCoachDetail: View {
-    let note: String
-    let question: String?
-    let subtitle: String?
-
-    @Environment(\.dismiss) private var dismiss
-
-    var body: some View {
-        NavigationStack {
-            ScrollView {
-                VStack(alignment: .leading, spacing: 12) {
-                    if let subtitle {
-                        Text(subtitle)
-                            .typeRole(.caption)
-                    }
-                    if let question {
-                        Text(question)
-                            .typeRole(.headline)
-                            .fixedSize(horizontal: false, vertical: true)
-                    }
-                    Text(note)
-                        .typeRole(.body)
-                        .fixedSize(horizontal: false, vertical: true)
-                }
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .padding()
-            }
-            .background(Palette.surfaceGround.dynamic.ignoresSafeArea())
-            .navigationTitle("Coach")
-            #if os(iOS)
-                .navigationBarTitleDisplayMode(.inline)
-            #endif
-            .toolbar {
-                ToolbarItem(placement: .cancellationAction) {
-                    Button("Done") { dismiss() }
-                }
-            }
-        }
-        #if os(macOS)
-            .frame(minWidth: 420, minHeight: 320)
-        #endif
-    }
-}
-
 #Preview("Coach card") {
     ScrollView {
         VStack(spacing: 16) {
@@ -281,7 +318,8 @@ private struct ReviewCoachDetail: View {
                     body: """
                     You played 71% accuracy over 34 moves. Moving a piece onto a square it \
                     could be taken on came up twice — that is the pattern, not the individual \
-                    moves. Work through the positions below on a board before you read the lines.
+                    moves. Tap each position below and find the better move yourself before you
+                    open the coach's note.
                     """
                 )
             )
@@ -289,22 +327,24 @@ private struct ReviewCoachDetail: View {
             ReviewCoachCard(
                 note: """
                     Nxe5 put your knight on e5, where it can just be taken. Rxe5 takes it — two \
-                    attackers to one defender on e5, 310cp. Step 5, the blunder check, is what \
-                    would have caught this.
+                    attackers to one defender on e5, about three pawns. One blunder check before \
+                    releasing the piece is all this needed.
                     """,
-                diagnosis: ReviewDiagnosis(title: "Hanging pieces", step: "Step 5 · Blunder check"),
+                diagnosis: ReviewDiagnosis(title: "Hanging pieces", step: "Blunder check"),
                 subtitle: "Move 23 · Blunder",
                 question: CoachingQuestions.question(forCauseTag: .hungMovedPiece),
                 suggestedQuestions: [
                     ReviewSuggestedQuestion(
                         id: "best",
                         question: "What should I have played?",
-                        answer: "Re8 — the engine's move in this position."
+                        answer: "Re8 — the line runs Re8 Nxe5 Rxe5. Set the position up and play "
+                            + "Nxe5 instead: the answer is Rxe5."
                     ),
                     ReviewSuggestedQuestion(
                         id: "habit",
                         question: "How do I catch this next time?",
-                        answer: "Blunder-check every move"
+                        answer: ReviewSuggestedQuestions.habitInstruction(.blunderCheck),
+                        habit: .blunderCheck
                     ),
                 ]
             )

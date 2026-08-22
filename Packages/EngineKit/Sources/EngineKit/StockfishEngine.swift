@@ -71,6 +71,15 @@ public actor StockfishEngine {
     /// Deepest info line seen per MultiPV rank for the in-flight search.
     private var searchLines: [Int: UCIInfo] = [:]
 
+    /// Deepest *finished* rank-1 iteration of the in-flight search.
+    ///
+    /// Tracked as the search runs rather than derived from `searchLines` at the
+    /// end, because the last line for rank 1 is often a bound from the partial
+    /// iteration the engine was stopped in — the depth it reached and the depth
+    /// it completed are different numbers, and only the second one describes the
+    /// strength of the answer. See ``SearchResult/completedDepth``.
+    private var searchCompletedDepth = 0
+
     /// Every line the engine has emitted since `startCapture()`. Only used by
     /// diagnostics and tests; nil in normal operation so we don't grow forever.
     private var capturedLines: [String]?
@@ -204,6 +213,7 @@ public actor StockfishEngine {
 
         searchLines.removeAll(keepingCapacity: true)
         searchStopped = false
+        searchCompletedDepth = 0
         searchInFlight = true
         setPosition(position)
 
@@ -313,6 +323,13 @@ public actor StockfishEngine {
         if let info = UCIParser.parseInfo(line) {
             // Later lines for a rank are deeper, so they supersede earlier ones.
             searchLines[info.multipv] = info
+            // An exact rank-1 score is the engine saying it finished that
+            // iteration for its first move. A bound is not — it is the score it
+            // had when something cut the iteration off — so a bounded line
+            // advances the reported depth without advancing the completed one.
+            if info.multipv == 1, info.bound == .exact {
+                searchCompletedDepth = max(searchCompletedDepth, info.depth)
+            }
             return
         }
 
@@ -323,7 +340,8 @@ public actor StockfishEngine {
                     bestMove: bestMove.best,
                     ponderMove: bestMove.ponder,
                     lines: lines,
-                    wasTruncated: searchStopped
+                    wasTruncated: searchStopped,
+                    completedDepth: searchCompletedDepth
                 )
             )
             return
@@ -364,6 +382,7 @@ public actor StockfishEngine {
         // `searchAlreadyRunning`.
         searchLines.removeAll(keepingCapacity: true)
         searchStopped = false
+        searchCompletedDepth = 0
         searchInFlight = false
         let waiter = searchWaiter
         searchWaiter = nil
@@ -387,6 +406,7 @@ public actor StockfishEngine {
         if !engineStillRunning {
             searchLines.removeAll(keepingCapacity: true)
             searchStopped = false
+            searchCompletedDepth = 0
             searchInFlight = false
         }
 

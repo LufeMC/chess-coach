@@ -59,14 +59,19 @@ private func storedMomentWithPayload(
         sideToMove: .white,
         playedSAN: "Nxe5",
         playedUCI: "f3e5",
-        bestSAN: "Re8",
-        bestUCI: "e1e8",
+        bestSAN: "d3",
+        bestUCI: "d2d3",
         cpBefore: 40,
         cpAfter: -280,
         winPctBefore: 56,
         winPctAfter: 22,
         deltaEP: 0.34,
         judgment: .blunder,
+        // Real lines, legal in that position: the "what should I have played"
+        // chip is built by replaying them, and a chip with nothing to replay is
+        // deliberately not offered at all.
+        pvBest: ["d2d3", "f8c5", "e1g1"],
+        pvRefutation: ["c6e5"],
         criticalityGap: 0.2,
         detector: .hangingPiece,
         causeTag: .hungMovedPiece,
@@ -136,9 +141,12 @@ private func finishedGame(
     )
 }
 
+/// A half-open range rather than `1...count`, so that `count: 0` is the empty
+/// game and not a trap: a resignation on move one is exactly the case the
+/// verdict has to survive, so the fixture for it must be constructible.
 private func moveRows(count: Int) -> [GameMove] {
-    (1...count).map { ply in
-        GameMove(gameID: fixtureGameID, ply: ply, san: "Nf3", uci: "g1f3")
+    (0..<count).map { index in
+        GameMove(gameID: fixtureGameID, ply: index + 1, san: "Nf3", uci: "g1f3")
     }
 }
 
@@ -154,7 +162,7 @@ struct ReviewDiagnosisTests {
         let diagnosis = ReviewDiagnoses.diagnosis(for: storedMoment())
 
         #expect(diagnosis.title == LeakTable.title(for: TrainingCore.CauseTag.hungMovedPiece))
-        #expect(diagnosis.step == "Step 5 · Blunder check")
+        #expect(diagnosis.step == "Blunder check")
     }
 
     /// `MomentBuilder` hands a praised move the `generic` tag and S3, because
@@ -175,7 +183,7 @@ struct ReviewDiagnosisTests {
         let diagnosis = ReviewDiagnoses.diagnosis(for: storedMoment(causeTag: .generic, stepTag: .s3Candidates))
 
         #expect(diagnosis.title == ReviewDiagnoses.unexplainedTitle)
-        #expect(diagnosis.step == "Step 3 · Candidates")
+        #expect(diagnosis.step == "Candidates")
     }
 
     /// A row synced down from a newer build names a step this one has never
@@ -201,13 +209,17 @@ struct ReviewDiagnosisTests {
         #expect(ReviewDiagnoses.diagnosis(for: moment).step == nil)
     }
 
-    @Test("Every step of the routine has a name, and only the knowledge bucket is unnumbered")
+    /// The numbers pointed back at a routine nothing in the app teaches, so a
+    /// first-time reviewer met "Step 5" with no way to find out what steps 1 to
+    /// 4 were.
+    @Test("Every step of the routine has a name, and none of them is a bare number")
     func everyStepIsNamed() {
         for step in AnalysisKit.StepTag.allCases {
             let title = ReviewDiagnoses.stepTitle(step)
             #expect(!title.isEmpty)
-            #expect(title.hasPrefix("Step ") == (step != .kKnowledge))
+            #expect(title.hasPrefix("Step ") == false)
         }
+        #expect(ReviewDiagnoses.stepTitle(.s5BlunderCheck) == "Blunder check")
     }
 
     /// The lead-in is a question about a mistake. Asked of the one moment in a
@@ -224,8 +236,37 @@ struct ReviewDiagnosisTests {
 @Suite("Suggested questions")
 struct ReviewSuggestedQuestionTests {
 
+    /// The answer has to show the reader how to find the move. A bare "Re8 — the
+    /// engine's move in this position." is the "wins a knight" announcement in
+    /// another costume.
     @Test("Both chips are offered when the app can answer both")
     func bothQuestions() {
+        let id = UUID()
+        let questions = ReviewSuggestedQuestions.byMoment(
+            moments: [storedMomentWithPayload(id: id)],
+            cards: [momentCard(id: id)],
+            rung: 2
+        )
+
+        #expect(questions[id]?.count == 2)
+        let best = try! #require(questions[id]?.first?.answer)
+        // The engine's own line, replayed into notation, plus the reply that
+        // punished what was actually played.
+        #expect(best.contains("the line runs d3 Bc5"))
+        #expect(best.contains("play Nxe5 instead"))
+        #expect(best.contains("Nxe5."))
+
+        // The habit chip says what to do at the board, not just its own name.
+        let habit = try! #require(questions[id]?.last?.answer)
+        #expect(habit == ReviewSuggestedQuestions.habitInstruction(.blunderCheck))
+        #expect(habit != Habit.blunderCheck.microGoalTitle)
+        #expect(questions[id]?.last?.habit == .blunderCheck)
+    }
+
+    /// Silence beats a move with no reason behind it: without a stored line
+    /// there is nothing to show but the SAN, so the chip is not offered.
+    @Test("A best move with no line behind it is not turned into a chip")
+    func bestMoveWithoutALineIsOmitted() {
         let id = UUID()
         let questions = ReviewSuggestedQuestions.byMoment(
             moments: [storedMoment(id: id, causeTag: .hungMovedPiece)],
@@ -233,9 +274,8 @@ struct ReviewSuggestedQuestionTests {
             rung: 2
         )
 
-        #expect(questions[id]?.count == 2)
-        #expect(questions[id]?.first?.answer.hasPrefix("Re8") == true)
-        #expect(questions[id]?.last?.answer == Habit.blunderCheck.microGoalTitle)
+        #expect(questions[id]?.count == 1)
+        #expect(questions[id]?.contains { $0.question == "What should I have played?" } == false)
     }
 
     /// The habit chip is the curriculum's mapping, and that mapping is
@@ -249,8 +289,10 @@ struct ReviewSuggestedQuestionTests {
         let low = ReviewSuggestedQuestions.byMoment(moments: stored, cards: [momentCard(id: id)], rung: 1)
         let high = ReviewSuggestedQuestions.byMoment(moments: stored, cards: [momentCard(id: id)], rung: 3)
 
-        #expect(low[id]?.last?.answer == Habit.blunderCheck.microGoalTitle)
-        #expect(high[id]?.last?.answer == Habit.candidatesFirst.microGoalTitle)
+        #expect(low[id]?.last?.habit == .blunderCheck)
+        #expect(high[id]?.last?.habit == .candidatesFirst)
+        #expect(low[id]?.last?.answer == ReviewSuggestedQuestions.habitInstruction(.blunderCheck))
+        #expect(high[id]?.last?.answer == ReviewSuggestedQuestions.habitInstruction(.candidatesFirst))
     }
 
     /// Nothing is invented: a cause tag from a newer build maps to no habit, and
@@ -381,6 +423,38 @@ struct ReviewVerdictTests {
         )
 
         #expect(verdict != nil)
+    }
+
+    /// A game resigned on move one is marked complete with no evaluations, and
+    /// the summariser would still write "A loss with no single moment behind it
+    /// … The game ran 0 moves" — a considered assessment of a game that never
+    /// happened.
+    @Test("A game too short to have gone wrong gets no verdict")
+    func tooShortForAVerdict() {
+        #expect(
+            ReviewVerdicts.verdict(
+                game: finishedGame(),
+                moves: moveRows(count: 0),
+                moments: [],
+                cards: []
+            ) == nil
+        )
+        #expect(
+            ReviewVerdicts.verdict(
+                game: finishedGame(),
+                moves: moveRows(count: ReviewVerdicts.minimumPlies - 1),
+                moments: [],
+                cards: []
+            ) == nil
+        )
+        #expect(
+            ReviewVerdicts.verdict(
+                game: finishedGame(),
+                moves: moveRows(count: ReviewVerdicts.minimumPlies),
+                moments: [],
+                cards: []
+            ) != nil
+        )
     }
 
     @Test("An unanalysed or unfinished game gets no verdict rather than a hedged one")

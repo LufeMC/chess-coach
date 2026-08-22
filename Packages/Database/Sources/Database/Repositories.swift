@@ -704,6 +704,29 @@ public struct ConceptRepository: Sendable {
         }
     }
 
+    /// Records that a concept was served, without claiming an outcome.
+    ///
+    /// For concepts whose exercise is an endgame drill: the drill runs on its
+    /// own screen after the set closes, so the session that scheduled it never
+    /// learns whether it was passed, and `recordAttempt` would have to invent a
+    /// correctness it does not have.
+    ///
+    /// It still has to be recorded. `ConceptScheduler` rotates by `timesSeen`
+    /// and then `lastSeenAt`, so a concept that is introduced but never seen
+    /// again sits permanently at zero and wins every tie-break — which pinned
+    /// the concept slot of every future session onto the same drill. Whether
+    /// the drill was passed is tracked separately, as a per-family clean streak,
+    /// and that is what the curriculum actually gates on.
+    public func markSeen(id: String, at date: Date = Date()) throws {
+        try writer.write { db in
+            var row = try ConceptProgress.where { $0.id.eq(id) }.fetchOne(db)
+                ?? ConceptProgress(id: id)
+            row.timesSeen += 1
+            row.lastSeenAt = date
+            try ConceptProgress.upsert { row }.execute(db)
+        }
+    }
+
     /// Records an attempt at a concept's exercise.
     public func recordAttempt(id: String, correct: Bool, at date: Date = Date()) throws {
         try writer.write { db in
@@ -713,6 +736,112 @@ public struct ConceptRepository: Sendable {
             if correct { row.timesCorrect += 1 }
             row.lastSeenAt = date
             try ConceptProgress.upsert { row }.execute(db)
+        }
+    }
+}
+
+// MARK: - Erasing everything
+
+extension UserDatabase {
+
+    /// What a wipe would take, in the units a confirmation has to state.
+    ///
+    /// Counts rather than a sentence, because the screen that asks has to price
+    /// the loss for *this* user: "everything" is not a quantity, and a user who
+    /// cannot see that it is 37 games has no way to tell a rash tap from a
+    /// deliberate one.
+    public struct UserDataSummary: Sendable, Hashable {
+        public var games: Int
+        public var moments: Int
+        public var cards: Int
+        /// Recorded skill metrics, which is where calibration's result lives.
+        ///
+        /// Counted because a user can have a measured rating and no games at
+        /// all — calibration writes its outcome before the first sparring game
+        /// is ever played — and a wipe row disabled on "no games" in front of a
+        /// freshly calibrated player would be refusing to delete data that
+        /// plainly exists.
+        public var metrics: Int
+        /// The playing rating that would go back to its default.
+        public var rating: Int
+
+        public init(games: Int, moments: Int, cards: Int, metrics: Int, rating: Int) {
+            self.games = games
+            self.moments = moments
+            self.cards = cards
+            self.metrics = metrics
+            self.rating = rating
+        }
+
+        /// True when there is nothing to lose, so the caller can say so rather
+        /// than offer a destructive action against an empty database.
+        public var isEmpty: Bool {
+            games == 0 && moments == 0 && cards == 0 && metrics == 0
+        }
+    }
+
+    public func userDataSummary() throws -> UserDataSummary {
+        let rating = try settings.current().userRating
+        return try writer.read { db in
+            UserDataSummary(
+                games: try Game.all.fetchCount(db),
+                moments: try Moment.all.fetchCount(db),
+                cards: try SRSCard.all.fetchCount(db),
+                metrics: try SkillMetric.all.fetchCount(db),
+                rating: Int(rating.rounded())
+            )
+        }
+    }
+
+    /// Empties every table this device owns and returns settings to defaults.
+    ///
+    /// One transaction, and **not** a file deletion. SQLiteData binds live
+    /// `@FetchAll`/`@FetchOne` observers to the open connection: removing the
+    /// file out from under them leaves every bound view showing the stale rows
+    /// it last read, with no way to re-bind short of relaunching. Deleting rows
+    /// through the same writer is what the observers are watching for, so the
+    /// screens go empty the moment this returns.
+    ///
+    /// The settings row is reset in place rather than dropped, and the
+    /// presentation preferences — board theme, piece set, sound, haptics —
+    /// survive it. Those are not progress: a user clearing their games has not
+    /// asked to have the sound turned back on, and silently undoing a choice
+    /// they made weeks ago is the app taking more than it said it would.
+    /// Everything that *is* a measurement — both ratings, the deviation, the
+    /// rung — goes back to its default.
+    ///
+    /// The device calibration survives for the same kind of reason: it is a
+    /// measurement of the *phone*, not of the user, it is explicitly not synced,
+    /// and re-running the engine bench after a wipe would cost the user thirty
+    /// seconds to learn what the app already knew.
+    public func deleteAllUserData() throws {
+        let kept = try settings.current()
+        try writer.write { db in
+            // Games first: moves, moments and ply evals ride out on
+            // `ON DELETE CASCADE`, and deleting them separately afterwards
+            // would be a second pass over rows that are already gone.
+            try Game.delete().execute(db)
+            try Moment.delete().execute(db)
+            try PlyEval.delete().execute(db)
+            try ReviewLog.delete().execute(db)
+            try SRSCard.delete().execute(db)
+            try MetricSample.delete().execute(db)
+            try SkillMetric.delete().execute(db)
+            try ConceptProgress.delete().execute(db)
+            try DailyLoop.delete().execute(db)
+            try CalibrationDraft.delete().execute(db)
+            try AppSettings.delete().execute(db)
+            try AppSettings.insert {
+                AppSettings(
+                    claudeModel: kept.claudeModel,
+                    effort: kept.effort,
+                    boardTheme: kept.boardTheme,
+                    pieceSet: kept.pieceSet,
+                    soundOn: kept.soundOn,
+                    hapticsOn: kept.hapticsOn
+                )
+            }
+            .execute(db)
         }
     }
 }

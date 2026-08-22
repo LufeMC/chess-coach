@@ -37,6 +37,15 @@ struct GuidedMode: Sendable {
         /// The strongest threat the opponent has if the user passes, in expected
         /// points. Produced by a null-move probe; nil when it wasn't run.
         var nullMoveThreatEP: Double?
+        /// Whether the opponent's free move in that probe is one the user would
+        /// have to answer — a check, a capture or a promotion.
+        ///
+        /// The expected-points figure on its own cannot tell a threat from the
+        /// user's own tactic or from zugzwang; both make a free move valuable
+        /// without anything being threatened. See
+        /// ``GameSession/isForcing(uci:inNullMovePosition:)`` for why the test is
+        /// deliberately narrower than the truth.
+        var nullMoveThreatIsForcing: Bool = false
         /// True when the engine's best move is quiet (no check, capture, or
         /// promotion).
         var bestMoveIsQuiet: Bool
@@ -59,6 +68,18 @@ struct GuidedMode: Sendable {
         var minFullMoveNumber = 6
         /// Don't interrupt someone in time trouble.
         var minClockMs = 30_000
+        /// The last pause of the game is held back until here.
+        ///
+        /// Three pauses, an eight-ply cooldown and an opening floor of move six
+        /// means the entire budget can be spent by move fourteen — and it
+        /// usually is, because the gate is first-come and the sharpest gaps of a
+        /// game against a 1000–1500 opponent are early. Then a genuinely
+        /// instructive quiet position on move thirty gets nothing, because the
+        /// coach spent its questions on the first sharp thing it saw. Holding one
+        /// back costs nothing in a short game — an unspent pause was never worth
+        /// anything — and buys a question in the phase where these games are
+        /// actually decided.
+        var reservedPauseMinFullMoveNumber = 20
 
         /// Criticality bar for a generic pause.
         var genericGapThreshold = 0.10
@@ -77,6 +98,10 @@ struct GuidedMode: Sendable {
     func prompt(for context: Context) -> Prompt? {
         guard context.fullMoveNumber >= budget.minFullMoveNumber else { return nil }
         guard context.pausesUsedThisGame < budget.maxPausesPerGame else { return nil }
+        guard
+            context.pausesUsedThisGame < budget.maxPausesPerGame - 1
+                || context.fullMoveNumber >= budget.reservedPauseMinFullMoveNumber
+        else { return nil }
         guard context.pliesSinceLastPause >= budget.minPliesBetweenPauses else { return nil }
         guard context.userClockMs > budget.minClockMs else { return nil }
 
@@ -119,7 +144,7 @@ struct GuidedMode: Sendable {
     func matchesFocusPredicate(_ context: Context) -> Bool {
         switch focusHabit {
         case .whatChanged, .scanThreats:
-            return (context.nullMoveThreatEP ?? 0) >= 0.10
+            return hasThreat(context)
         case .candidatesFirst:
             return context.bestMoveIsQuiet
         case .calcToQuiet:
@@ -137,11 +162,31 @@ struct GuidedMode: Sendable {
         }
     }
 
+    /// Whether the opponent actually threatens something here.
+    ///
+    /// Two conditions, not one. The expected-points figure says a free move
+    /// would be worth a lot to the opponent; the forcing bit says there is
+    /// something on the board for the user to *find*. Without the second, the
+    /// same number fires on a position that is entirely about the user's own
+    /// tactic and on zugzwang in a pawn ending — and the question this gates
+    /// ("what are every check, capture, and threat — theirs first?") is then
+    /// unanswerable, while the move the user plays anyway is recorded as having
+    /// answered it.
+    private func hasThreat(_ context: Context) -> Bool {
+        (context.nullMoveThreatEP ?? 0) >= 0.10 && context.nullMoveThreatIsForcing
+    }
+
     /// Picks a habit that matches what actually makes this position sharp, so a
     /// generic pause still asks a relevant question rather than the week's habit
     /// regardless of fit.
     private func situationalHabit(for context: Context) -> Habit? {
-        if (context.nullMoveThreatEP ?? 0) >= 0.10 { return .scanThreats }
+        // An endgame with nothing forcing available is about technique, and the
+        // threat branch has to yield to it rather than the other way round: in a
+        // pawn ending the null-move number is large precisely *because* someone
+        // has to move, so the threat question would win every time and ask about
+        // checks and captures that are not on the board.
+        if context.phase == .endgame, !context.nullMoveThreatIsForcing { return .endgameTechnique }
+        if hasThreat(context) { return .scanThreats }
         if context.bestMoveIsProphylactic { return .scanThreats }
         if context.userExpectedPoints >= 0.85 { return .convertCleanly }
         if context.phase == .endgame { return .endgameTechnique }
@@ -170,8 +215,15 @@ struct GuidedMode: Sendable {
             "How safe is your king three moves from now? Which square around it is weakest?"
         case .endgameTechnique:
             "Where does your king need to stand here? Can you force it there?"
+        // No verdict in the sentence. `convertCleanly` is reached two ways —
+        // because the position matches its 0.85 predicate, and as the fallback
+        // when the week's focus habit is this one and nothing else fits — and on
+        // the second route "You're winning" is an eval assertion the engine
+        // never made. Even on the first it primes exactly the wrong thing: a
+        // 1200 who is told they are winning stops looking for the counterplay
+        // this question is asking them to find.
         case .convertCleanly:
-            "You're winning. What's their only source of counterplay, and can you take it away?"
+            "What's their only source of counterplay here, and can you take it away?"
         case .clockDiscipline:
             "This one deserves real time. What makes it different from the last three moves?"
         }
@@ -187,10 +239,23 @@ struct GuidedMode: Sendable {
         if playedMove == bestMove { return 1.0 }
 
         // Within a hair of best still shows the user saw the idea.
+        //
+        // "A hair" is the app's own inaccuracy bar rather than a number of this
+        // rule's own, and the difference is the whole reason this branch works
+        // at all. A pause only happens when best beats second by at least
+        // `focusGapThreshold` (0.07), so a tier keyed to 0.05 could never fire:
+        // the two constants were written apart and the near-miss tier had been
+        // dead ever since, quietly recording a user who parried the threat with
+        // the engine's second choice as having missed the idea entirely.
+        //
+        // `EvalMath.inaccuracyThreshold` is also the only bar that keeps this
+        // verdict consistent with the rest of the app: a move the post-game pass
+        // will not even call an inaccuracy is not one the coach should be
+        // marking wrong in front of the user mid-game.
         if let second = secondBest, playedMove == second.bestMove {
             let gap = EvalMath.expectedPoints(score: best.score)
                 - EvalMath.expectedPoints(score: second.score)
-            return gap <= 0.05 ? 0.7 : 0
+            return gap < EvalMath.inaccuracyThreshold ? 0.7 : 0
         }
         return 0
     }

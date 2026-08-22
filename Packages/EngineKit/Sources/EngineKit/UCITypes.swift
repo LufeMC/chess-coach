@@ -1,9 +1,17 @@
 import Foundation
 
 /// An engine evaluation, always from the perspective of the side to move.
+///
+/// `mate(0)` is the one value whose sign does not follow the rule the others
+/// do: an engine reports `score mate 0` for a position that is *already*
+/// checkmate with the scored side to move, so it means "I am mated", not "I
+/// mate in zero". Everything here treats it as a loss for that reason —
+/// `AnalysisKit.EvalMath.winPercent(score:)` already scores it 0%, and this type
+/// used to disagree with it.
 public enum UCIScore: Sendable, Equatable {
     case centipawns(Int)
-    /// Moves (not plies) until mate. Negative means the side to move is getting mated.
+    /// Moves (not plies) until mate. Negative means the side to move is getting
+    /// mated; zero means the side to move is mated already.
     case mate(Int)
 
     /// Centipawns clamped into a finite range, with mates mapped to the extremes.
@@ -12,11 +20,22 @@ public enum UCIScore: Sendable, Equatable {
     public func centipawnValue(mateEquivalent: Int = 10_000) -> Int {
         switch self {
         case .centipawns(let cp): return cp
-        case .mate(let moves): return moves >= 0 ? mateEquivalent : -mateEquivalent
+        // `> 0`, not `>= 0`: mate in *zero* is a position already checkmated
+        // with this side to move, which is the worst score there is rather than
+        // the best. The strictly-greater test used to be `>=`, which handed the
+        // one terminal mate value a winning number.
+        case .mate(let moves): return moves > 0 ? mateEquivalent : -mateEquivalent
         }
     }
 
     /// Flips perspective (used when converting between side-to-move and white-relative).
+    ///
+    /// `mate(0)` survives the flip unchanged and therefore reads as a loss from
+    /// both sides, which is wrong for exactly one of them. It is left that way
+    /// deliberately: turning it into `mate(1)` would invent a distance to mate
+    /// the engine never reported. Producers avoid the value instead —
+    /// `AnalysisPipeline.terminalScore(for:)` emits `.mate(-1)` for a mated
+    /// position so that the negation carries a real number.
     public var negated: UCIScore {
         switch self {
         case .centipawns(let cp): return .centipawns(-cp)
@@ -25,12 +44,34 @@ public enum UCIScore: Sendable, Equatable {
     }
 }
 
+/// Whether a score is the engine's final word at that depth.
+///
+/// Stockfish prints `lowerbound`/`upperbound` when a root move failed outside
+/// its aspiration window and the iteration has not re-searched it yet: the
+/// number is a bound clamped to the window, not an evaluation. A search that is
+/// stopped — by a `stop`, by its node limit, by its movetime — prints whatever
+/// it had, so the last line of a cut-off search is routinely a bound, and it
+/// can sit next to a *different* rank still carrying the previous iteration's
+/// exact score. Any consumer that subtracts one rank from another (the guided
+/// criticality gate, best-vs-played) is comparing two different measurements
+/// unless it checks this first.
+public enum ScoreBound: String, Sendable, Equatable {
+    /// A real evaluation, searched inside the window.
+    case exact
+    /// The true score is at least this; the line failed high.
+    case lower
+    /// The true score is at most this; the line failed low.
+    case upper
+}
+
 /// One `info` line from the engine, keyed by its MultiPV rank.
 public struct UCIInfo: Sendable, Equatable {
     public var multipv: Int
     public var depth: Int
     public var selDepth: Int
     public var score: UCIScore
+    /// Whether `score` is an evaluation or a window bound. See ``ScoreBound``.
+    public var bound: ScoreBound
     public var nodes: Int
     public var nps: Int
     public var timeMs: Int
@@ -42,6 +83,7 @@ public struct UCIInfo: Sendable, Equatable {
         depth: Int = 0,
         selDepth: Int = 0,
         score: UCIScore = .centipawns(0),
+        bound: ScoreBound = .exact,
         nodes: Int = 0,
         nps: Int = 0,
         timeMs: Int = 0,
@@ -51,6 +93,7 @@ public struct UCIInfo: Sendable, Equatable {
         self.depth = depth
         self.selDepth = selDepth
         self.score = score
+        self.bound = bound
         self.nodes = nodes
         self.nps = nps
         self.timeMs = timeMs
@@ -75,18 +118,53 @@ public struct SearchResult: Sendable, Equatable {
     /// like a completed one, and the post-game pass checkpoints its evaluations
     /// as a resume prefix it never revisits: stored once, a shallow score fixes
     /// the wrong judgment of that one move in place for good.
+    ///
+    /// It only ever means "somebody stopped this", though, so it is half the
+    /// answer — see ``completedDepth`` for the other half.
     public var wasTruncated: Bool
+
+    /// The deepest iteration rank 1 actually finished: the greatest depth at
+    /// which the engine printed an exact rank-1 score.
+    ///
+    /// The reason this exists is that ``wasTruncated`` cannot see the search cut
+    /// itself short. A `.depthWithin` search — the sparring opponent's, whose
+    /// depth *is* its playing strength — is stopped by Stockfish itself when the
+    /// movetime backstop arrives, and that result comes back with
+    /// `wasTruncated == false` and lines from whatever iteration it had reached.
+    /// A "depth 13" opponent that only ever got to depth 9 then wins a rated
+    /// game at full weight, with nothing anywhere recording that it was not the
+    /// opponent it claimed to be. Comparing this against the depth that was
+    /// asked for is how a caller tells the two apart.
+    ///
+    /// Zero when the engine printed no exact rank-1 line at all (a terminal
+    /// position, or a search stopped inside its first iteration).
+    public var completedDepth: Int
 
     public init(
         bestMove: String?,
         ponderMove: String? = nil,
         lines: [UCIInfo] = [],
-        wasTruncated: Bool = false
+        wasTruncated: Bool = false,
+        completedDepth: Int = 0
     ) {
         self.bestMove = bestMove
         self.ponderMove = ponderMove
         self.lines = lines
         self.wasTruncated = wasTruncated
+        self.completedDepth = completedDepth
+    }
+
+    /// Whether the search reached the depth it was asked for.
+    ///
+    /// Answers `true` for limits that never named a depth: "did it get there" is
+    /// not a question a node- or time-limited search can fail.
+    public func reachedRequestedDepth(of limit: SearchLimit) -> Bool {
+        switch limit {
+        case .depth(let depth), .depthWithin(let depth, _):
+            return completedDepth >= depth
+        case .nodes, .movetime, .clock, .infinite:
+            return true
+        }
     }
 
     /// The engine's preferred line (MultiPV rank 1).

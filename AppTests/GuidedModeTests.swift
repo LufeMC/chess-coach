@@ -20,6 +20,10 @@ struct GuidedModeTests {
         pausesUsed: Int = 0,
         pliesSinceLastPause: Int = 20,
         threatEP: Double? = nil,
+        /// Defaults to true so a fixture that names a threat gets a real one.
+        /// The gate requires both: a big null-move number with nothing forcing
+        /// behind it is zugzwang or the user's own tactic, not a threat.
+        threatIsForcing: Bool = true,
         bestIsQuiet: Bool = false,
         bestIsProphylactic: Bool = false,
         phase: Phase = .middlegame,
@@ -36,6 +40,7 @@ struct GuidedModeTests {
             // ~0.30 expected points worse — comfortably over any threshold.
             secondBest: UCIInfo(multipv: 2, score: .centipawns(-140), pv: ["d2d4"]),
             nullMoveThreatEP: threatEP,
+            nullMoveThreatIsForcing: threatIsForcing,
             bestMoveIsQuiet: bestIsQuiet,
             bestMoveIsProphylactic: bestIsProphylactic,
             phase: phase,
@@ -62,7 +67,8 @@ struct GuidedModeTests {
     @Test("Respects the per-game pause budget")
     func respectsBudget() {
         #expect(gate.prompt(for: criticalContext(pausesUsed: 3)) == nil)
-        #expect(gate.prompt(for: criticalContext(pausesUsed: 2)) != nil)
+        // Past the reserve, so the third pause is refused by the budget alone.
+        #expect(gate.prompt(for: criticalContext(fullMoveNumber: 24, pausesUsed: 2)) != nil)
     }
 
     @Test("Enforces a cooldown between pauses")
@@ -139,5 +145,83 @@ struct GuidedModeTests {
         #expect(GuidedMode.grade(playedMove: "e2e4", best: best, secondBest: nearEqual) == 1.0)
         #expect(GuidedMode.grade(playedMove: "d2d4", best: best, secondBest: nearEqual) == 0.7)
         #expect(GuidedMode.grade(playedMove: "a2a3", best: best, secondBest: clearlyWorse) == 0)
+    }
+
+    /// The near-miss tier used to be keyed to 0.05 while the loosest bar that
+    /// can produce a pause is 0.07, so it could never fire: every second-best a
+    /// user could actually be graded against was scored a flat miss.
+    @Test("A second-best inside the inaccuracy bar is reachable, and outside it is not")
+    func nearMissTierIsReachable() {
+        let best = UCIInfo(multipv: 1, score: .centipawns(100), pv: ["e2e4"])
+
+        // ~0.06 expected points worse: over the focus bar that let the pause
+        // happen at all, and not something the review would call an inaccuracy.
+        let inside = UCIInfo(multipv: 2, score: .centipawns(34), pv: ["d2d4"])
+        #expect(GuidedMode.grade(playedMove: "d2d4", best: best, secondBest: inside) == 0.7)
+
+        // ~0.11 — an inaccuracy by the app's own scale, so the coach and the
+        // post-game pass agree it was not the move the position asked for.
+        let outside = UCIInfo(multipv: 2, score: .centipawns(-20), pv: ["d2d4"])
+        #expect(GuidedMode.grade(playedMove: "d2d4", best: best, secondBest: outside) == 0)
+    }
+
+    /// The null-move number cannot tell a threat from zugzwang: in a pawn ending
+    /// it is large precisely *because* somebody has to move. Asking "what are
+    /// every check, capture, and threat" in a position that has none is the one
+    /// case where the question cannot be answered from the board at all.
+    @Test("An endgame with nothing forcing asks about technique, not threats")
+    func endgameOutranksAPhantomThreat() {
+        let quietEnding = criticalContext(threatEP: 0.30, threatIsForcing: false, phase: .endgame)
+        #expect(gate.prompt(for: quietEnding)?.habit == .endgameTechnique)
+
+        // A pawn about to queen is a threat, and then the threat question wins.
+        let realThreat = criticalContext(threatEP: 0.30, threatIsForcing: true, phase: .endgame)
+        #expect(gate.prompt(for: realThreat)?.habit == .scanThreats)
+    }
+
+    /// The value of the tempo is high whenever the *user* has a tactic the
+    /// opponent could defuse, so the raw number credits threat-awareness for
+    /// positions that never required a threat scan.
+    @Test("A threat number with nothing forcing behind it is not a threat")
+    func nonForcingThreatDoesNotMatchTheFocusPredicate() {
+        var gate = GuidedMode(focusHabit: .scanThreats)
+        gate.budget = .default
+
+        // Over the focus bar, under the generic one — so the pause depends
+        // entirely on whether this counts as a threat.
+        var context = criticalContext(threatEP: 0.15, threatIsForcing: false)
+        context.best = UCIInfo(multipv: 1, score: .centipawns(90), pv: ["e2e4"])
+        context.secondBest = UCIInfo(multipv: 2, score: .centipawns(0), pv: ["d2d4"])
+
+        #expect(gate.prompt(for: context) == nil)
+    }
+
+    /// Three pauses, an eight-ply cooldown and an opening floor of move six
+    /// means the whole budget can be gone by move fourteen — and against a
+    /// 1000–1500 opponent the sharpest gaps are early, so it usually is.
+    @Test("The last pause of the game is held back for the middlegame")
+    func lastPauseIsReserved() {
+        let earlyThird = criticalContext(fullMoveNumber: 14, pausesUsed: 2)
+        #expect(gate.prompt(for: earlyThird) == nil)
+
+        let laterThird = criticalContext(fullMoveNumber: 24, pausesUsed: 2)
+        #expect(gate.prompt(for: laterThird) != nil)
+
+        // The first two are unaffected: holding one back is not a cooldown.
+        #expect(gate.prompt(for: criticalContext(fullMoveNumber: 14, pausesUsed: 1)) != nil)
+    }
+
+    /// The house rule: coaching copy never asserts something the engine did not
+    /// verify. `convertCleanly` is reached two ways, and on the fallback route —
+    /// the week's focus habit with nothing else fitting — nothing has checked
+    /// that the user is winning at all.
+    @Test("No question states a verdict on the position")
+    func questionsNeverAssertAnEvaluation() {
+        for habit in Habit.allCases {
+            let question = gate.question(for: habit)
+            #expect(!question.contains("You're winning"))
+            #expect(!question.contains("You are winning"))
+            #expect(!question.contains("You're losing"))
+        }
     }
 }

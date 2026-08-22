@@ -273,28 +273,50 @@ struct GuidedPromptSheet: View {
 /// one would be the layout telling the user that giving up is the expected
 /// choice, and they would feel that before reading a word. The give-up path
 /// stays available, one tap away, as a plain row.
+///
+/// ## Three things this sheet has to be honest about
+///
+/// The move has **already** been taken back — the retraction runs before the
+/// phase that shows this sheet, so the user watched it happen. The filled
+/// button therefore says `Try again`, which is what it does; a `Take it back`
+/// here offers to do something the app did a moment ago.
+///
+/// The board underneath is **live**, which is why there is no "Not now" pill.
+/// A skip that does exactly what the filled button does is not a way out, and
+/// the real one — keep the move — is `Play it anyway`.
+///
+/// And the last rung of the hint ladder **costs the rating**. Drawing the
+/// refutation and then playing something else makes the result partly the
+/// coach's, so `EloLadder` scores the game unrated. That is a fair trade, and
+/// nobody can make a trade they were not told about — so the control that
+/// spends it says so before it is tapped, and the sheet keeps saying so
+/// afterwards.
 struct SecondTrySheet: View {
 
     let state: GameSession.SecondTryState
     let session: GameSession
 
+    @Environment(\.dynamicTypeSize) private var dynamicTypeSize
+
+    private var isAssisted: Bool { state.hintLevel >= GameSession.SecondTryState.assistedHintLevel }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
-            SheetHeader(
-                title: "Almost there",
-                // Every coaching sheet gets a way out that is not an answer.
-                skip: SheetHeader.Skip(title: "Not now") { session.resumeAfterSecondTry() }
-            )
+            SheetHeader(title: "Almost there")
 
-            Text(prompt)
+            Text(Self.prompt(hintLevel: state.hintLevel))
                 .typeRole(.caption, appliesForeground: false)
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
-                .lineLimit(2, reservesSpace: true)
+                // Two lines is what the space below the board affords. At
+                // accessibility sizes the user has already chosen legibility
+                // over layout, and the sheet scrolls rather than truncating a
+                // sentence mid-clause.
+                .modifier(ReservedProseLines(dynamicTypeSize.isAccessibilitySize ? nil : 2))
 
             Spacer(minLength: 0)
 
-            Button("Take it back") {
+            Button(Self.primaryTitle(hintLevel: state.hintLevel)) {
                 session.resumeAfterSecondTry()
             }
             .buttonStyle(.primaryAction)
@@ -303,11 +325,11 @@ struct SecondTrySheet: View {
             // is the space below the board, and a third stacked button would
             // spend it on the two things the user is least likely to want.
             HStack(spacing: 16) {
-                if state.hintLevel < 2 {
+                if !isAssisted {
                     Button {
                         session.requestHint()
                     } label: {
-                        Label("Show me why", systemImage: "sparkles")
+                        Label(Self.hintTitle(hintLevel: state.hintLevel), systemImage: "sparkles")
                             .typeRole(.caption, appliesForeground: false)
                             .foregroundStyle(.secondary)
                     }
@@ -329,11 +351,35 @@ struct SecondTrySheet: View {
         .padding(.top, 16)
     }
 
-    private var prompt: String {
-        switch state.hintLevel {
-        case 0: "That move gives something away. Look again — the board is still live."
-        case 1: "Look at the highlighted square. What does it let them do?"
-        default: "That was their idea. Find a move that deals with it."
+    /// What "try again" is worth at this rung.
+    ///
+    /// Static so the one claim on this sheet that costs the user something can
+    /// be asserted without rendering it. The app exists to move one number, and
+    /// this is the only control in Play that stops it moving.
+    static func primaryTitle(hintLevel: Int) -> String {
+        hintLevel >= GameSession.SecondTryState.assistedHintLevel
+            ? "Try again \u{00B7} unrated"
+            : "Try again"
+    }
+
+    /// The next rung, named by what it hands over and what it costs.
+    static func hintTitle(hintLevel: Int) -> String {
+        hintLevel == 0 ? "Show me why" : "Show their move \u{00B7} unrated"
+    }
+
+    /// Each rung says what to *do* with what is now on the board.
+    ///
+    /// A pulsed square and an arrow are not an explanation; the sentence beside
+    /// them has to name the mechanism, or what the ladder teaches is to wait for
+    /// the arrow rather than to look. What it must not do is claim material —
+    /// the session knows the evaluation dropped and which reply did it, not what
+    /// that reply wins — so each line asks for the count rather than asserting
+    /// its result.
+    static func prompt(hintLevel: Int) -> String {
+        switch hintLevel {
+        case 0: "Taken back — that move gives something away. The board is live; find another."
+        case 1: "Their reply lands on the highlighted square. Work out what it hits from there."
+        default: "The arrow is their reply. Count what defends the square it lands on."
         }
     }
 }
@@ -342,7 +388,7 @@ struct SecondTrySheet: View {
 
 /// Everything that is not "make a move".
 ///
-/// The status row never grows past its three segments, so resign, flip and start
+/// The status row never grows past its segments, so resign, flip and start
 /// again live behind one `•••`. Resigning is two taps from the board and is a
 /// tinted row rather than a filled button — a destructive action that is the
 /// most prominent thing in the sheet is a trap.
@@ -350,10 +396,27 @@ struct GameOptionsSheet: View {
 
     let isFinished: Bool
     let onFlip: () -> Void
+    /// Puts the offer to the opponent and reports whether they took it. `nil`
+    /// when a draw cannot be offered right now — it is the user's move or
+    /// nothing, the same as over the board.
+    var onOfferDraw: (() -> Bool)? = nil
     let onResign: () -> Void
     let onNewGame: () -> Void
 
     @Environment(\.dismiss) private var dismiss
+
+    /// Set once an offer has been declined, so the row reports the answer
+    /// instead of silently doing nothing on a second tap.
+    @State private var drawDeclined = false
+
+    /// Resigning takes two taps on the same row.
+    ///
+    /// "Flip the board" sits directly above it, and a thumb aiming for Flip
+    /// that lands one row low used to end the game outright — a lost result
+    /// written to the table and a rating move, from a mis-tap. The exit in the
+    /// corner has always asked first; this is the same question, asked in the
+    /// space a sheet row has, and it re-arms every time the sheet is opened.
+    @State private var resignArmed = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -368,19 +431,59 @@ struct GameOptionsSheet: View {
                 Divider().padding(.leading, 34)
 
                 if isFinished {
-                    SheetRow(title: "New game", systemImage: "plus.circle") {
+                    // Named with what it costs: the summary and the review it
+                    // routes to are still reachable from Today, but they are not
+                    // reachable from here once this game is replaced.
+                    SheetRow(title: "New game · skips this summary", systemImage: "plus.circle") {
                         onNewGame()
                         dismiss()
                     }
                 } else {
+                    // Above resign, because agreeing a dead ending is the answer
+                    // to the position resign is usually reached for. Without it
+                    // the choice in a drawn rook ending was to shuffle until a
+                    // repetition or to take a ladder loss for a game nobody won.
+                    //
+                    // A decline is stated rather than swallowed: the opponent
+                    // answered, and a control that appears to do nothing is
+                    // worse than one that says no. The reason is theirs and it
+                    // is honest — they judge the position by their own last
+                    // search, exactly as a club player judges it by their own
+                    // reading.
+                    if let onOfferDraw {
+                        SheetRow(
+                            title: drawDeclined ? "They'd rather play on" : "Offer a draw",
+                            systemImage: "hand.raised"
+                        ) {
+                            guard !drawDeclined else { return }
+                            if onOfferDraw() {
+                                dismiss()
+                            } else {
+                                drawDeclined = true
+                            }
+                        }
+
+                        Divider().padding(.leading, 34)
+                    }
+
                     // Amber rather than red: red means "advantage lost" in this
                     // app, and a red row here would teach it a second meaning.
-                    SheetRow(title: "Resign", systemImage: "flag", tint: Palette.caution.dynamic) {
+                    SheetRow(
+                        title: resignArmed ? "Tap again to resign" : "Resign",
+                        systemImage: "flag",
+                        tint: Palette.caution.dynamic
+                    ) {
+                        guard resignArmed else {
+                            resignArmed = true
+                            return
+                        }
                         onResign()
                         dismiss()
                     }
                 }
             }
+            .animation(Motion.contentSwap, value: resignArmed)
+            .animation(Motion.contentSwap, value: drawDeclined)
 
             Spacer(minLength: 0)
         }
@@ -394,8 +497,15 @@ struct GameOptionsSheet: View {
 /// The exit confirmation.
 ///
 /// Leaving mid-game is a resignation, and a resignation should never be one tap
-/// from the board. The safe path — keep playing — is the filled button; leaving
-/// is a quiet row underneath it.
+/// from the board. The safe path — keep playing — is the filled button;
+/// resigning is a quiet row underneath it.
+///
+/// It resigns and *stays*. Clearing the board on the way out dropped the user
+/// back on "Play Oscar" with no result, no summary and no route to the review —
+/// the app inviting them to play again instead of showing them the game they
+/// just ended. Resigning here now runs the same end-of-game handoff every other
+/// finish runs, which is why the tertiary row says "Resign" and not "Resign and
+/// leave".
 struct LeaveGameSheet: View {
 
     let onKeepPlaying: () -> Void
@@ -403,9 +513,9 @@ struct LeaveGameSheet: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
-            SheetHeader(title: "Leave this game?")
+            SheetHeader(title: "Resign this game?")
 
-            Text("Leaving counts as a resignation. The game is still saved, and still analysed.")
+            Text("Leaving mid-game counts as a resignation. The game is still saved and analysed, and its result and summary appear right here.")
                 .typeRole(.caption, appliesForeground: false)
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
@@ -415,7 +525,7 @@ struct LeaveGameSheet: View {
             Button("Keep playing", action: onKeepPlaying)
                 .buttonStyle(.primaryAction)
 
-            Button("Resign and leave", action: onLeave)
+            Button("Resign", action: onLeave)
                 .buttonStyle(.tertiaryAction)
                 .foregroundStyle(Palette.caution.dynamic)
         }
@@ -493,5 +603,30 @@ struct SheetRow: View {
             .padding(.vertical, 11)
         }
         .buttonStyle(.pressable)
+    }
+}
+
+/// A prose block that reserves a fixed number of lines, or none at all.
+///
+/// `lineLimit(_:reservesSpace:)` takes a non-optional `Int`, so "no limit at
+/// accessibility sizes" cannot be expressed by passing `nil` to it — that is a
+/// compile error, and the other overload has no way to reserve the height. One
+/// modifier holding both branches keeps the view's identity stable across the
+/// switch, which a bare `if` in a body would not: the sheet is presented at a
+/// fixed detent, and a `Text` that changes identity there re-enters rather than
+/// re-flowing.
+private struct ReservedProseLines: ViewModifier {
+
+    /// Lines to reserve, or nil to let the text run as long as it needs.
+    private let lines: Int?
+
+    init(_ lines: Int?) { self.lines = lines }
+
+    func body(content: Content) -> some View {
+        if let lines {
+            content.lineLimit(lines, reservesSpace: true)
+        } else {
+            content.lineLimit(nil)
+        }
     }
 }

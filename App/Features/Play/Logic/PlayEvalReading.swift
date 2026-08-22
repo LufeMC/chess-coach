@@ -28,6 +28,33 @@ import Foundation
 ///
 /// Guided mode is the exception the session already carves out, and
 /// ``winPercent(_:)`` renders the engine number as a coarse bucket for it.
+///
+/// ## Why the pill only carries the engine reading
+///
+/// All of the above is why material belongs on screen; none of it argues that
+/// it belongs *twice*. `CapturedTray` already prints the same signed number
+/// under the player who is ahead, beside the pieces that explain it, which is
+/// the better of the two places for it — the working is next to the answer. So
+/// the status pill's first segment is the guided-only engine reading and the
+/// tray carries material. ``material(_:)`` stays because the balance it renders
+/// is still the honest reading of the board, and the tray is one refactor away
+/// from wanting it.
+///
+/// ## Why the engine reading is a word and not a number
+///
+/// Because a number would claim more than its source can support. That reading
+/// is rank one of the *opponent's* search — depth-capped to model a player of
+/// its own rating, sampled at MultiPV width, and run on the position before its
+/// own move, so it is one ply behind the board the user is looking at and it
+/// changes only when the opponent moves. `↑ +12%` states two significant
+/// figures of a 1200-strength opinion in the same typography as an exact
+/// material count, and the reader has no way to tell which they are holding.
+///
+/// `BETTER` / `EVEN` / `WORSE` is everything that source can honestly carry: the
+/// direction survives being one ply stale far better than the magnitude does,
+/// and it is the vocabulary a club player would use out loud anyway. The
+/// magnitude is not thrown away — it decides whether the segment is coloured at
+/// all, and the spoken label says it in full, framed as the estimate it is.
 struct PlayEvalReading: Equatable, Sendable {
 
     /// Which way the position leans, from the user's side. Drawn as an arrow so
@@ -44,7 +71,8 @@ struct PlayEvalReading: Equatable, Sendable {
 
     var direction: Direction
     var magnitude: Magnitude
-    /// `+3`, `−2` (a real minus sign, not a hyphen), or `EVEN`.
+    /// `+3`, `−2` (a real minus sign, not a hyphen), `EVEN`, or — for the engine
+    /// reading — one of `BETTER` / `EVEN` / `WORSE`.
     var text: String
     var symbolName: String
     var accessibilityText: String
@@ -67,11 +95,13 @@ struct PlayEvalReading: Equatable, Sendable {
         )
     }
 
-    /// The engine's win percentage from the user's perspective, bucketed.
+    /// The engine's win percentage from the user's perspective, as a word.
     ///
-    /// Rendered as points above or below even rather than as a raw percentage:
-    /// `62%` invites reading it as a probability the engine is not claiming,
-    /// while `↑ +12` sits in the same grammar as the material reading beside it.
+    /// The buckets are kept — they decide the colour and the spoken label — but
+    /// nothing numeric reaches the screen. See the type's own note for why: this
+    /// number is the opponent's depth-capped search, one ply behind the board,
+    /// and printing `+12%` of it beside an exact material count claims a
+    /// precision it does not have.
     static func winPercent(_ percent: Double) -> PlayEvalReading {
         let delta = Int((percent - 50).rounded())
         let magnitude: Magnitude =
@@ -81,11 +111,28 @@ struct PlayEvalReading: Equatable, Sendable {
             case 15..<30: .clear
             default: .decisive
             }
+        let direction: Direction = magnitude == .level ? .level : (delta > 0 ? .ahead : .behind)
         return make(
             signedValue: magnitude == .level ? 0 : delta,
             magnitude: magnitude,
+            text: word(for: direction),
             spoken: spokenWinPercent(delta: delta, magnitude: magnitude)
         )
+    }
+
+    /// The engine reading's whole vocabulary.
+    ///
+    /// Three words, because three is what the source supports and because they
+    /// are the words a club player says out loud. Deliberately not "winning" or
+    /// "losing" at the decisive end: a 1200 told they are winning stops looking
+    /// for counterplay, which is the opposite of what guided mode is for, and
+    /// the reading is an estimate rather than a verdict either way.
+    private static func word(for direction: Direction) -> String {
+        switch direction {
+        case .ahead: "BETTER"
+        case .level: "EVEN"
+        case .behind: "WORSE"
+        }
     }
 
     /// Material on the board, in pawns, from `color`'s point of view.
@@ -108,7 +155,12 @@ struct PlayEvalReading: Equatable, Sendable {
 
     // MARK: - Construction
 
-    private static func make(signedValue: Int, magnitude: Magnitude, spoken: String) -> PlayEvalReading {
+    private static func make(
+        signedValue: Int,
+        magnitude: Magnitude,
+        text overrideText: String? = nil,
+        spoken: String
+    ) -> PlayEvalReading {
         let direction: Direction =
             if magnitude == .level {
                 .level
@@ -116,7 +168,7 @@ struct PlayEvalReading: Equatable, Sendable {
                 signedValue > 0 ? .ahead : .behind
             }
 
-        let text: String =
+        let counted: String =
             switch direction {
             // A word, not `0`: "EVEN" reads at a glance in the same tracked
             // uppercase as the rest of the label vocabulary, and a lone zero
@@ -125,6 +177,9 @@ struct PlayEvalReading: Equatable, Sendable {
             case .ahead: "+\(signedValue)"
             case .behind: "\u{2212}\(abs(signedValue))"
             }
+        // The override exists for the one reading that is not a count. Material
+        // is exact and prints its number; the engine's estimate prints a word.
+        let text = overrideText ?? counted
 
         let symbol: String =
             switch direction {
@@ -152,12 +207,19 @@ struct PlayEvalReading: Equatable, Sendable {
         }
     }
 
+    /// The magnitude the pill drops, said in full — and named as an estimate.
+    ///
+    /// VoiceOver has room for the qualifier the pill does not, and the qualifier
+    /// is the honest part: this is the opponent's own depth-capped reading of
+    /// the previous position, not a verdict on the one in front of the user.
     private static func spokenWinPercent(delta: Int, magnitude: Magnitude) -> String {
-        switch magnitude {
-        case .level: "The position is level"
-        case .slight: delta > 0 ? "You are slightly better" : "You are slightly worse"
-        case .clear: delta > 0 ? "You are clearly better" : "You are clearly worse"
-        case .decisive: delta > 0 ? "You are winning" : "You are losing"
-        }
+        let reading: String =
+            switch magnitude {
+            case .level: "the position is level"
+            case .slight: delta > 0 ? "you are slightly better" : "you are slightly worse"
+            case .clear: delta > 0 ? "you are clearly better" : "you are clearly worse"
+            case .decisive: delta > 0 ? "you are much better" : "you are much worse"
+            }
+        return "Estimate: \(reading)"
     }
 }

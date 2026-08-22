@@ -143,3 +143,101 @@ struct MatingMaterialTests {
         #expect(!MatingMaterial.timeoutIsDraw(flagged: .black, position: bareKing))
     }
 }
+
+// MARK: - Between games
+
+/// The card that stands between two calibration games.
+///
+/// The five games used to run into each other: record, drop the session, and the
+/// next starting position arrived on the same frame. Checkmate, a flag and a
+/// fifty-move draw were indistinguishable from the chair, and the reveal then
+/// told a user who had never seen a result that they had won every game.
+@Suite("Calibration between games")
+struct CalibrationInterludeTests {
+
+    private func card(
+        gameNumber: Int = 1,
+        termination: GameTermination = .checkmate,
+        measured: GameOutcome = .win,
+        userWon: Bool? = true,
+        opponentRating: Int = 1_100,
+        totalGames: Int = 5
+    ) -> CalibrationInterlude {
+        CalibrationInterlude.result(
+            gameNumber: gameNumber,
+            outcome: outcome(
+                result: userWon == true ? "1-0" : "0-1",
+                termination: termination.rawValue,
+                userWon: userWon
+            ),
+            measured: measured,
+            opponentRating: opponentRating,
+            totalGames: totalGames
+        )
+    }
+
+    @Test("A finished game names how it ended and which game it was")
+    func namesTheResult() {
+        let win = card()
+        #expect(win.title == "Game 1 — you won by checkmate")
+        #expect(win.actionTitle == "Play game 2")
+
+        let loss = card(termination: .timeout, measured: .loss, userWon: false)
+        #expect(loss.title.contains("ran out of time"))
+    }
+
+    /// The ladder moving is the honest part of this phase, and until now the
+    /// only trace of it was the opponent's number changing on the next board.
+    @Test("The card names where the ladder goes next")
+    func namesTheLadderStep() {
+        #expect(card(measured: .win).detail.contains("1200"))
+        #expect(card(termination: .resignation, measured: .loss, userWon: false).detail.contains("1000"))
+
+        let drawn = card(termination: .agreement, measured: .draw, userWon: nil)
+        #expect(drawn.detail.contains("stays at about 1100"))
+    }
+
+    /// `GameSession` reports an unknown-termination draw once its opponent
+    /// retries are spent. That is the engine giving up, not a result the user
+    /// played, and half a rating point of evidence about them would be invented
+    /// by recording it.
+    @Test("A game the engine abandoned is not counted, and is offered again")
+    func abandonedGameIsNotCounted() {
+        let abandoned = card(gameNumber: 3, termination: .unknown, measured: .draw, userWon: nil)
+        #expect(abandoned.measuredOutcome == nil)
+        #expect(abandoned.actionTitle == "Play game 3 again")
+        #expect(abandoned.title.contains("stopped"))
+    }
+
+    @Test("A counted game carries the outcome the combiner is told about")
+    func countedGameCarriesItsOutcome() {
+        #expect(card(measured: .win).measuredOutcome == .win)
+    }
+
+    /// The fifty-move override is the one place the card and the scoring could
+    /// disagree, and a card reading "drawn" over a result recorded as a loss
+    /// would be the app keeping two sets of books.
+    @Test("A fifty-move draw scored as a loss says so")
+    func fiftyMoveOverrideIsStated() {
+        let scored = card(termination: .fiftyMoves, measured: .loss, userWon: nil)
+        #expect(scored.title.contains("scored as a loss"))
+        #expect(scored.measuredOutcome == .loss)
+    }
+
+    @Test("The last game hands over to the puzzles rather than to a sixth board")
+    func lastGameLeadsToPuzzles() {
+        let last = card(gameNumber: 5, totalGames: 5)
+        #expect(last.actionTitle == "Start the puzzles")
+        #expect(last.detail.contains("Twenty puzzles"))
+    }
+
+    /// The draft holds finished games only, so an interrupted game restarts —
+    /// and the counter, unchanged, says nothing happened.
+    @Test("A resumed calibration says the interrupted game starts again")
+    func resumeIsExplained() {
+        let resumed = CalibrationInterlude.resumed(gameNumber: 3, totalGames: 5, opponentRating: 1_200)
+        #expect(resumed.measuredOutcome == nil)
+        #expect(resumed.detail.contains("starts again"))
+        #expect(resumed.actionTitle == "Play game 3")
+    }
+}

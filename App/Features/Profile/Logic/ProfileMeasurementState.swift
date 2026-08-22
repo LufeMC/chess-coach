@@ -22,6 +22,20 @@ enum ProfileMeasurementState: Sendable, Hashable {
     /// No evidence at all.
     case nothingYet(noun: String)
 
+    /// The numbers are being recomputed and nothing can be said yet.
+    ///
+    /// Distinct from ``nothingYet`` because on a launch the two render the same
+    /// blank screen and only one of them is a fact about the user. A calibrated
+    /// player told "no games recorded yet" while the replay runs is being told
+    /// something false.
+    case measuring
+
+    /// The stored history could not be read.
+    ///
+    /// Also distinct from ``nothingYet``, and for the same reason: a failed read
+    /// on an account with forty games behind it must not assert an absence.
+    case unreadable
+
     /// The sentence shown in place of the number, or `nil` when there is a real
     /// number to show.
     var message: String? {
@@ -33,6 +47,10 @@ enum ProfileMeasurementState: Sendable, Hashable {
             return "Not enough \(noun) yet — \(remaining) more to measure this"
         case .nothingYet(let noun):
             return "No \(noun) recorded yet"
+        case .measuring:
+            return "Measuring your recent games…"
+        case .unreadable:
+            return "Couldn't read your history — pull down to retry"
         }
     }
 

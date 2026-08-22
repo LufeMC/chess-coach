@@ -66,15 +66,19 @@ actor EngineService {
     }
 
     /// Engine configuration that differs per client.
+    ///
+    /// There is deliberately no `play(device:)` helper alongside the two below.
+    /// One used to exist and nothing called it: every sparring acquire builds its
+    /// Configuration from `profile.multiPV`, because MultiPV is not a constant
+    /// for play — it is one of the two dials the humanizer's rating ladder is
+    /// made of, tapering 14 → 13 → 12 → 10 → 9 across the anchors alongside
+    /// temperature. A helper that hardcoded a single width would look like the
+    /// obvious entry point and would silently re-rate every opponent on the
+    /// ladder the first time somebody reached for it, with no test to fail.
     struct Configuration: Sendable, Equatable {
         var multiPV: Int
         var threads: Int
         var hashMB: Int
-
-        static func play(device: DeviceProfile) -> Configuration {
-            // Sparring samples among candidate moves, so it needs a wide MultiPV.
-            Configuration(multiPV: 10, threads: device.threads, hashMB: device.hashMB)
-        }
 
         static func analysis(device: DeviceProfile, multiPV: Int = 2) -> Configuration {
             Configuration(multiPV: multiPV, threads: device.threads, hashMB: device.hashMB)
@@ -161,6 +165,14 @@ actor EngineService {
 
     // MARK: - Boot
 
+    /// How long the boot bench may take before its answer is written off.
+    ///
+    /// The stock 180s is a deadline for a hung engine, not for a measurement the
+    /// user is waiting behind: a bench that has not finished in half a minute is
+    /// not going to produce a number worth the launch it is delaying, and the
+    /// fallback (an unmeasured budget, re-measured next launch) is cheap.
+    private static let benchTimeout: Duration = .seconds(30)
+
     /// Boots the engine, loads networks, and calibrates the per-position node
     /// budget for this device.
     ///
@@ -192,7 +204,17 @@ actor EngineService {
         booted = true
     }
 
-    /// Measures this device's throughput and converts it into a node budget.
+    /// Measures this device's throughput — or recalls the last measurement of it
+    /// — and converts it into a node budget.
+    ///
+    /// The recall is the point. The bench used to run on the critical path of
+    /// every cold launch and its result was thrown away at exit, so the node
+    /// budget was re-derived from one unrepeatable measurement of whatever state
+    /// the phone happened to be in that minute. A warm phone measures slower
+    /// than a cool one, which means the same mistake in the same kind of
+    /// position can come back "inaccuracy" one evening and "mistake" the next
+    /// with nothing on screen to explain the difference — the app disagreeing
+    /// with itself is the one thing a training tool cannot afford.
     private func calibrate() async -> DeviceProfile {
         let cores = ProcessInfo.processInfo.activeProcessorCount
 
@@ -213,7 +235,7 @@ actor EngineService {
         await engine.setOption(.hash, hashMB)
         await engine.isReady()
 
-        let nps = await engine.bench(depth: 8, threads: threads, hashMB: min(hashMB, 64))
+        let nps = await measuredThroughput(threads: threads, hashMB: hashMB)
 
         // Derive nodes from measured throughput rather than hardcoding, then
         // clamp: too few nodes makes classification noisy, too many blows the
@@ -222,6 +244,47 @@ actor EngineService {
         let analysisNodes = min(max(derived, 120_000), 1_500_000)
 
         return DeviceProfile(threads: threads, hashMB: hashMB, analysisNodes: analysisNodes, benchNPS: nps)
+    }
+
+    /// This device's nodes per second, remembered if it has ever been measured
+    /// under conditions worth trusting.
+    ///
+    /// Two rules, and both are about what a single bench reading is worth:
+    ///
+    /// * A remembered reading is reused rather than re-measured. It came from a
+    ///   run of this same build on this same hardware, so it is at least as good
+    ///   as a fresh one — and it costs nothing, which takes the bench off the
+    ///   launch path entirely after the first time.
+    /// * A reading taken while the phone is hot or in Low Power Mode is used for
+    ///   this session but never written down. Throttling only ever lowers the
+    ///   number, so such a reading is a lower bound on the device rather than a
+    ///   measurement of it, and remembering it would pin every later session to
+    ///   the worst minute this phone ever had.
+    private func measuredThroughput(threads: Int, hashMB: Int) async -> Int {
+        if let remembered = BenchMemory.remembered() { return remembered }
+
+        let measured = await engine.bench(
+            depth: 8,
+            threads: threads,
+            hashMB: min(hashMB, 64),
+            timeout: Self.benchTimeout
+        )
+
+        guard measured > 0 else {
+            // Worth a log line rather than silence: the caller clamps a zero up
+            // to the 120k floor, which is a real budget that produces real (and
+            // shallow) verdicts, so a bench that never reported would otherwise
+            // look exactly like a slow phone.
+            Self.log.warning("Engine bench reported no throughput; using the floor node budget for this session.")
+            return 0
+        }
+
+        if BenchMemory.conditionsAreOrdinary {
+            BenchMemory.remember(measured)
+        } else {
+            Self.log.info("Measured \(measured) n/s on a throttled device; using it for this session only.")
+        }
+        return measured
     }
 
     // MARK: - Leasing
@@ -371,6 +434,26 @@ actor EngineService {
         }
     }
 
+    /// Applies one client's options, clearing the search tree when the engine
+    /// changes hands.
+    ///
+    /// ## The shipped opponent is not quite the opponent that was measured
+    ///
+    /// Worth knowing before anyone touches the numbers here.
+    /// `Docs/humanizer-calibration.md` measured the rating ladder with one
+    /// thread and a transposition table cleared before every ply. Play in the
+    /// app runs on `device.threads` and keeps the table across the opponent's
+    /// own consecutive moves (the early return below), both of which search
+    /// effectively deeper at a fixed depth cap — while the app's `.depthWithin`
+    /// movetime backstop, which the harness did not have, cuts the other way.
+    /// Nothing records which of those the game was played under, so the honest
+    /// statement is that the shipped opponent differs from the measured one in
+    /// an unrecorded and mode-dependent way, not that it is stronger.
+    ///
+    /// Closing that gap means either re-measuring the ladder under the shipped
+    /// configuration or pinning play to the harness's, and both re-rate every
+    /// anchor — so it is a deliberate exercise with a recalibration run attached,
+    /// not a line to change in passing.
     private func reconfigure(client: Client, configuration: Configuration) async {
         // Reconfiguring on a change of *owner*, not only of numbers: the handoff
         // exists to stop one client from inheriting another's search tree, and
@@ -410,7 +493,24 @@ actor EngineService {
             // a bug, and one that races whoever does hold it.
             guard self.lease != nil else { throw LeaseError.expired }
         }
-        return try await engine.search(position, limit: limit)
+
+        let result = try await engine.search(position, limit: limit)
+
+        // A depth-limited search that ran out of time first is the one failure
+        // in here that leaves no trace of itself: `wasTruncated` is false
+        // because nobody stopped it, the lines look like any other lines, and
+        // for the sparring opponent the depth *is* the strength the rating
+        // claims. Logging it is the cheapest way to find out how often the
+        // movetime backstop actually bites on a real device — the answer
+        // decides whether the ladder needs to weigh those games differently, and
+        // right now nothing anywhere is in a position to say.
+        if case .depthWithin(let requested, let milliseconds) = limit, result.completedDepth < requested {
+            let client = self.lease?.client.rawValue ?? "unleased"
+            Self.log.notice(
+                "\(client, privacy: .public) search reached depth \(result.completedDepth, privacy: .public) of \(requested, privacy: .public) in its \(milliseconds, privacy: .public)ms."
+            )
+        }
+        return result
     }
 
     func stop() async {
@@ -445,6 +545,67 @@ actor EngineService {
     nonisolated var isThermallyConstrained: Bool {
         let state = ProcessInfo.processInfo.thermalState
         return state == .serious || state == .critical
+    }
+}
+
+/// What the boot bench measured, remembered across launches.
+///
+/// Deliberately `UserDefaults` and not the database. This is a fact about a
+/// piece of hardware, not about the user: syncing it through CloudKit would tell
+/// an iPad how fast an iPhone is, and giving it a column would be a migration on
+/// a schema that already ships.
+private enum BenchMemory {
+
+    /// Nodes per second last measured for this hardware running this build, or
+    /// `nil` if it has never been measured under conditions worth trusting.
+    static func remembered() -> Int? {
+        let stored = UserDefaults.standard.integer(forKey: key)
+        return stored > 0 ? stored : nil
+    }
+
+    /// Records a measurement, keeping the best one this build has seen.
+    ///
+    /// `max` because every force acting on the number pushes it down —
+    /// throttling, Low Power Mode, another app on the performance cores — and
+    /// none pushes it above what the silicon can actually do. The largest
+    /// reading is therefore the closest one to the truth, not an outlier.
+    static func remember(_ nps: Int) {
+        guard nps > 0 else { return }
+        let defaults = UserDefaults.standard
+        defaults.set(max(nps, defaults.integer(forKey: key)), forKey: key)
+    }
+
+    /// Whether the phone is in a state where a benchmark measures the device
+    /// rather than its current predicament.
+    static var conditionsAreOrdinary: Bool {
+        let process = ProcessInfo.processInfo
+        guard !process.isLowPowerModeEnabled else { return false }
+        switch process.thermalState {
+        case .nominal, .fair: return true
+        case .serious, .critical: return false
+        @unknown default: return false
+        }
+    }
+
+    /// Keyed by hardware *and* build. A Stockfish upgrade, a change of compiler
+    /// flags, or a different NNUE net all change how fast the same phone
+    /// searches, so a number carried over from the previous build would be a
+    /// confident statement about a binary that no longer exists.
+    private static var key: String {
+        "engine.benchNPS.\(hardwareModel).\(buildVersion)"
+    }
+
+    private static var hardwareModel: String {
+        var system = utsname()
+        uname(&system)
+        return withUnsafeBytes(of: &system.machine) { raw in
+            let bytes = raw.prefix { $0 != 0 }
+            return String(decoding: bytes, as: UTF8.self)
+        }
+    }
+
+    private static var buildVersion: String {
+        Bundle.main.infoDictionary?["CFBundleVersion"] as? String ?? "unknown"
     }
 }
 

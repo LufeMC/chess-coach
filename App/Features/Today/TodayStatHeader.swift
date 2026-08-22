@@ -6,7 +6,7 @@
 import BoardUI
 import SwiftUI
 
-/// The header: the rating, big, and the streak beside it.
+/// The header: the rating, big, with its movement beside it.
 ///
 /// ## Why this is not a row of counters
 ///
@@ -25,18 +25,22 @@ import SwiftUI
 /// the header — set at display size, with the delta beside it — and everything
 /// else is subordinate to it, because everything else *is* subordinate to it.
 ///
-/// The streak stays, small, because the habit is real and worth acknowledging.
-/// It is a line of text rather than a flame: heat metaphors only escalate, and
-/// by day 200 there is nowhere left for a flame to go.
+/// The streak is not here. It is drawn once, in the week strip below, beside
+/// the seven day marks that explain what the number counts — a flame in the
+/// header and the same count 150 points lower is two treatments of one number
+/// on one screen, and the strip is where the brief puts it.
 struct TodayStatHeader: View {
 
-    /// Days in a row.
-    let streakDays: Int
     /// Nil until the rating has actually been read — the header then renders the
     /// rung name alone rather than a placeholder figure that looks measured.
     let rating: Int?
     /// Change since the last recorded rating, if there is one to report.
     var ratingDelta: Int?
+
+    /// The rating scales with the user's text size like everything else. A
+    /// fixed 40pt is the one number on the screen that would stay put while the
+    /// labels around it grew, which reads as a rendering fault.
+    @ScaledMetric(relativeTo: .largeTitle) private var ratingSize: CGFloat = 40
 
     var body: some View {
         HStack(alignment: .center, spacing: 14) {
@@ -45,7 +49,7 @@ struct TodayStatHeader: View {
                     // Verbatim, always: a rating is an identifier, not a
                     // quantity, and the localised form prints "1,051".
                     Text(verbatim: rating.map { "\($0)" } ?? "—")
-                        .font(.system(size: 40, design: .rounded).weight(.heavy))
+                        .font(.system(size: ratingSize, design: .rounded).weight(.heavy))
                         .monospacedDigit()
                         .foregroundStyle(Palette.accent.dynamic)
 
@@ -54,28 +58,38 @@ struct TodayStatHeader: View {
                     }
                 }
 
-                Text("RATING")
+                // Named for the app, matching the Profile chart's headline
+                // unit. The number under it is measured only against Rookly's
+                // own opponents — `Docs/humanizer-calibration.md` is explicit
+                // that self-play fixes the *spacing* between them and says
+                // nothing about the absolute offset, so this ladder can be
+                // uniformly a few hundred points away from a rated site and
+                // these games would look identical either way. A bare "RATING"
+                // beside a 40pt figure invites a club player to read it as the
+                // rating they already hold; one word stops that, and the climb
+                // strip below says the rest.
+                Text("ROOKLY RATING")
                     .typeRole(.label, appliesForeground: false)
                     .foregroundStyle(.secondary)
             }
 
             Spacer(minLength: 0)
 
-            if streakDays > 0 {
-                StreakBadge(days: streakDays)
-            }
-
             NavigationLink {
                 GameLibraryScreen()
             } label: {
-                HeaderGlyph(symbol: "clock.arrow.circlepath")
+                // Labelled, because a clock-arrow glyph is a generic history
+                // icon and the game library is otherwise only findable by
+                // tapping things. The word matches the title of the screen it
+                // opens — a door and its room have to have one name.
+                HeaderGlyph(symbol: "clock.arrow.circlepath", label: "Games")
             }
-            .accessibilityLabel("Past games")
+            .accessibilityLabel("Games")
 
             NavigationLink {
                 SettingsScreen()
             } label: {
-                HeaderGlyph(symbol: "gearshape.fill")
+                HeaderGlyph(symbol: "gearshape.fill", label: "Settings")
             }
             .accessibilityLabel("Settings")
         }
@@ -108,47 +122,33 @@ private struct RatingDelta: View {
     }
 }
 
-/// The streak, as a number and a word rather than a flame.
-private struct StreakBadge: View {
-    let days: Int
-
-    var body: some View {
-        HStack(spacing: 5) {
-            Text(verbatim: "\(days)")
-                .font(.system(.headline, design: .rounded, weight: .heavy))
-                .monospacedDigit()
-            Text(days == 1 ? "day" : "days")
-                .font(.system(.caption, design: .rounded, weight: .bold))
-        }
-        .foregroundStyle(Palette.gold.dynamic)
-        .padding(.horizontal, 10)
-        .padding(.vertical, 5)
-        .background(
-            Capsule().fill(Palette.gold.dynamic.opacity(0.14))
-        )
-        .accessibilityElement(children: .ignore)
-        .accessibilityLabel(days == 1 ? "1 day streak" : "\(days) day streak")
-    }
-}
-
-/// A utility door, sized to sit under the rating without competing with it.
+/// A utility door: the glyph, and the word for what is behind it.
+///
+/// Both stay dim on purpose — these are doors, not the screen's business — but
+/// dim and *unnamed* is a door only a user who already knows the app can find.
 private struct HeaderGlyph: View {
     let symbol: String
+    let label: String
 
     var body: some View {
-        Image(systemName: symbol)
-            .font(.system(size: 18, weight: .bold))
-            .foregroundStyle(DualColor(light: 0xA9A4B5, dark: 0x6B6280).dynamic)
-            .frame(width: 30, height: 30)
-            .contentShape(Rectangle())
+        VStack(spacing: 1) {
+            Image(systemName: symbol)
+                .font(.system(size: 18, weight: .bold))
+            Text(label)
+                .typeRole(.label, appliesForeground: false)
+        }
+        .foregroundStyle(DualColor(light: 0xA9A4B5, dark: 0x6B6280).dynamic)
+        .frame(minWidth: 30)
+        .contentShape(Rectangle())
+        .accessibilityHidden(true)
     }
 }
 
 #Preview("Stat header") {
     NavigationStack {
         VStack(spacing: 0) {
-            TodayStatHeader(streakDays: 12, rating: 1066, ratingDelta: 14)
-            TodayStatHeader(streakDays: 0, rating: nil)
+            TodayStatHeader(rating: 1066, ratingDelta: 14)
+            TodayStatHeader(rating: nil)
             Spacer()
         }
         .background(Palette.surfaceGround.dynamic)

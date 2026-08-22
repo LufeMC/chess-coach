@@ -62,6 +62,23 @@ struct OpponentPickerTests {
         #expect(OpponentPicker(userRating: 3000, gamesPlayed: 2).rating <= 2200)
     }
 
+    @Test("The shipped ladder is the tuned one, rounding to the nearest rung")
+    func usesTheTunedLadder() {
+        // The app carried a second copy of this rule that truncated to 25 with
+        // integer division, so a +50 stretch turned into +37 and the cycle
+        // aimed above the ~45% score it was tuned for. 1013 + 50 is 1063, which
+        // rounds to 1075 and truncated to 1050.
+        #expect(OpponentPicker(userRating: 1013, gamesPlayed: 0).rating == 1075)
+    }
+
+    @Test("The stretch and confidence games say what they are")
+    func cycleFramingNamesTheIntent() {
+        // Without this the roster looks like it drifts: the same named opponent
+        // shows a different rating game to game with nothing explaining why.
+        let framings = (0..<4).map { OpponentPicker(userRating: 1100, gamesPlayed: $0).framing }
+        #expect(framings == [nil, nil, "a stretch game", "a confidence game"])
+    }
+
     @Test("Colour alternates so the user isn't always White")
     func colourAlternates() {
         // Playing one side forever hides half the openings and half the

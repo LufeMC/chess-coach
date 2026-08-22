@@ -82,8 +82,9 @@ public struct BoardStyle: Hashable, Sendable, Identifiable {
   /// above it. On by default because teaching evaluation on every capture is
   /// worth more to a training app than to anyone else, and off-switchable
   /// because a review scrubber and a 150pt thumbnail want a still board. The
-  /// board additionally suppresses it whenever the user is not the one playing
-  /// the moves — see ``BoardView``.
+  /// board additionally suppresses it on a board nobody is playing on, which it
+  /// works out from the interaction mode and from whether the caller named a
+  /// `materialPerspective` — see ``BoardView``.
   public var showsMaterialFeedback: Bool
 
   /// Corner rounding of the board. Zero by default — the board runs

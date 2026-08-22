@@ -229,38 +229,44 @@ enum LeakTable {
     /// Every line describes the *move*: "the piece you moved was left where it
     /// could be taken", never "you hang pieces". The distinction is the whole
     /// difference between a diagnosis a user acts on and one they stop opening.
+    ///
+    /// Two clauses: what happened, then how to catch it. The first half alone
+    /// restates the row's own title — "positional drift: several quiet moves
+    /// with no plan" is a definition, not a diagnosis — and leaves the user to
+    /// take the training button on trust. The second half is the mechanism: the
+    /// question to ask, at the moment it would have caught this.
     static func detail(for tag: CauseTag) -> String {
         switch tag {
         case .missedNewThreat:
-            return "The opponent's last move created a threat that went unanswered."
+            return "The opponent's last move created a threat that went unanswered — ask what their move attacks before choosing yours."
         case .ignoredStandingThreat:
-            return "A threat that had been on the board for several moves stayed unanswered."
+            return "A threat that had stood for several moves stayed unanswered — re-check standing threats, not only new ones."
         case .missedForcingIdea:
-            return "A check, capture or threat of your own was available and went unplayed."
+            return "A check, capture or threat of your own went unplayed — list your checks and captures before quiet moves."
         case .kingExposure:
-            return "The king's shelter came apart before the position could afford it."
+            return "The king's shelter came apart before the position could afford it — count the attackers aimed at it first."
         case .forcingBias:
-            return "A check or capture played because it was forcing, not because it was best."
+            return "A check or capture played because it was forcing — calculate it to a quiet position before playing it."
         case .planlessTrade:
-            return "Pieces came off with nothing gained by the trade."
+            return "Pieces came off with nothing gained — name what the trade improves before taking."
         case .positionalDrift:
-            return "Several quiet moves in a row with no plan behind them."
+            return "Several quiet moves with no plan behind them — pick a worst-placed piece and give it a square."
         case .miscalculatedTactic:
-            return "A line was calculated, and the calculation went wrong."
+            return "A calculated line went wrong — at every capture, check for an in-between move before going deeper."
         case .allowedDeepTactic:
-            return "A tactic several moves deep landed against you."
+            return "A tactic several moves deep landed against you — after your candidate, look for their forcing reply."
         case .miscountedExchange:
-            return "The captures on one square were counted wrong."
+            return "The captures on one square were counted wrong — count attackers and defenders, cheapest first."
         case .hungMovedPiece:
-            return "The piece you moved was left where it could be taken."
+            return "The piece you moved was left where it could be taken — before releasing, ask what attacks the square it lands on."
         case .hungLeftPiece:
-            return "A piece elsewhere on the board was left undefended."
+            return "A piece elsewhere was left undefended — scan your own loose pieces after every move you make."
         case .allowedShallowTactic:
-            return "A one or two-move tactic landed against you."
+            return "A one or two-move tactic landed against you — check their checks and captures before you commit."
         case .endgameTechnique:
-            return "A known endgame method was available and was not used."
+            return "A known endgame method was available and not used — name the technique before starting to calculate."
         case .openingPrinciple:
-            return "An opening move against development, the centre, or king safety."
+            return "An opening move against development, the centre, or king safety — develop, castle, then commit a pawn."
         default:
             // An unknown tag still belongs in a table whose job is
             // completeness, and inventing prose for it would be worse than
@@ -276,8 +282,16 @@ enum LeakTable {
     /// destination, "Train hanging pieces" is a description of the problem with
     /// the word Train in front of it. A generic `Continue` would be worse than
     /// either — the step and what it costs both belong on the button.
-    static func trainActionTitle(for row: LeakRow) -> String {
-        guard let habit = row.habit else { return "Train this pattern" }
+    ///
+    /// `nil` when the cause has no habit mapped to it, which is the same
+    /// condition under which the handoff cannot open a session: the tab switch
+    /// carries the habit and nothing else, so a habitless cause lands the user
+    /// on Train home with no set. Returning a title here — the old fallback was
+    /// "Train this pattern" — put a filled button in front of an action that
+    /// silently did nothing, so the absence of a title is what the two surfaces
+    /// now key their buttons off.
+    static func trainActionTitle(for row: LeakRow) -> String? {
+        guard let habit = row.habit else { return nil }
         return "Train \(habit.trainingNoun)"
     }
 
@@ -327,13 +341,16 @@ struct LeakDiagnosis: Sendable, Hashable {
         case concentrated
         case spread
 
-        /// The word beside the number. One word, because it is read at a glance
-        /// — a phrase gets read *instead of* the number rather than with it.
+        /// The phrase beside the number, read at a glance.
+        ///
+        /// The three are parallel statements of *how many holes there are*.
+        /// "Clean" was not: beside a figure it read as a grade on the user
+        /// rather than as a shape, while the other two described distribution.
         var word: String {
             switch self {
-            case .clean: return "Clean"
-            case .concentrated: return "Concentrated"
-            case .spread: return "Spread"
+            case .clean: return "Nothing much"
+            case .concentrated: return "One cause"
+            case .spread: return "Several causes"
             }
         }
     }
@@ -380,8 +397,9 @@ struct LeakDiagnosis: Sendable, Hashable {
                 shape: .clean,
                 headline: "Nothing here is costing you much.",
                 explanation: """
-                    Across \(sample) no cause recurs often enough to be worth a training block. \
-                    Keep playing — this table finds the next one before you feel it.
+                    Across \(sample) these causes cost \(points) points of result a game — \
+                    \(Self.unitGloss) — which is not enough to be worth a training block. \
+                    Keep playing; this table finds the next one before you feel it.
                     """
             )
         }
@@ -393,9 +411,10 @@ struct LeakDiagnosis: Sendable, Hashable {
                 shape: .spread,
                 headline: "The points are coming off in small pieces.",
                 explanation: """
-                    Across \(sample) these causes account for \(points) expected points a game, \
-                    split fairly evenly between them. Take them from the top — with nothing \
-                    dominating, the ordering is the whole of the priority.
+                    Across \(sample) these causes cost \(points) points of result a game — \
+                    \(Self.unitGloss) — split fairly evenly between them. Take them from the \
+                    top: with nothing dominating, the ordering is the whole of the priority. \
+                    \(Self.impactGloss)
                     """
             )
         }
@@ -405,12 +424,42 @@ struct LeakDiagnosis: Sendable, Hashable {
             shape: .concentrated,
             headline: "\(top.title) is where most of it goes.",
             explanation: """
-                Across \(sample) these causes account for \(points) expected points a game, and \
-                \(Int((share * 100).rounded()))% of that is the top row alone. Work it first; \
-                the rest of the table barely moves until it does.
+                Across \(sample) these causes cost \(points) points of result a game — \
+                \(Self.unitGloss) — and \(Int((share * 100).rounded()))% of that is the top row \
+                alone. Work it first; the rest of the table barely moves until it does. \
+                \(Self.impactGloss)
                 """
         )
     }
+
+    /// The unit beside every figure in this section.
+    ///
+    /// **Not "expected points".** That is what the analyser computes — a
+    /// win-probability delta — and it is a term a 1200 player has never met; a
+    /// chess player reading "pts" reasonably guesses rating points or material,
+    /// both of which make `−0.42` nonsense. "Points of result" says what the
+    /// scale is in the only currency the user is playing for, and
+    /// ``unitGloss`` fixes it exactly.
+    /// Spelled "per game" rather than "/ game" because this string is also the
+    /// figure's VoiceOver label, and a slash is read out as the word.
+    static let unitDenominator = "points of result per game"
+
+    /// What a point *is*, said once on the screen that uses it.
+    ///
+    /// The number the whole section is sorted by was previously defined nowhere
+    /// a sighted reader could find it — only in the VoiceOver label. Naming the
+    /// scale is the difference between a headline figure and a decoration: the
+    /// user cannot tell whether 0.3 is a lot without knowing that 1 is a whole
+    /// win.
+    static let unitGloss = "a win is worth 1 point, a draw a half"
+
+    /// The same gloss as a standalone sentence, for surfaces that have no
+    /// explanation paragraph to fold it into.
+    static let unitSentence = "Points of result: \(unitGloss)."
+
+    /// What the chips on the rows mean, said once rather than on every row.
+    static let impactGloss =
+        "Anything over \(String(format: "%.2f", LeakTable.highImpactThreshold)) a game is marked High impact."
 }
 
 // MARK: - Per-leak history
@@ -423,18 +472,42 @@ struct LeakDiagnosis: Sendable, Hashable {
 /// changed something, which is the only argument that survives a bad week.
 struct LeakTrend: Sendable, Hashable {
 
-    /// Expected points lost inside each bucket, oldest first, so the sparkline
+    /// Points of result lost inside each bucket, oldest first, so the sparkline
     /// reads left-to-right the way time does.
     var buckets: [Double]
 
-    /// The span the buckets cover.
+    /// The span the buckets cover — the span the caller actually looked at, not
+    /// a nominal one. See ``make(from:now:observedSince:maximumDays:bucketCount:)``.
     var days: Int
 
     /// The tallest bucket, which the sparkline scales against. Never zero —
     /// ``make`` refuses to build a trend with nothing in it.
     var peak: Double { buckets.max() ?? 0 }
 
-    var spanLabel: String { "\(days) days" }
+    /// Says which end is which. Six bars and the bare figure "90 days" leave the
+    /// reader to guess whether time runs left-to-right, and a sparkline read
+    /// backwards says the opposite of what it means.
+    var spanLabel: String {
+        days == 1 ? "1 day, oldest first" : "\(days) days, oldest first"
+    }
+
+    /// Which way the shape is going, for the accessibility value.
+    ///
+    /// VoiceOver previously got the span and nothing else — the one element on
+    /// the screen that can say "it is working" said nothing at all. Halves
+    /// rather than first-versus-last bucket, because a single quiet fortnight
+    /// at either end would otherwise decide the verdict.
+    var directionLabel: String {
+        let half = buckets.count / 2
+        guard half > 0 else { return "not enough history to show a direction" }
+        let older = buckets.prefix(half).reduce(0, +)
+        let newer = buckets.suffix(buckets.count - half).reduce(0, +)
+        guard older > 0 else { return "flat over \(days) days" }
+        let change = (newer - older) / older
+        if change <= -0.15 { return "falling over \(days) days" }
+        if change >= 0.15 { return "rising over \(days) days" }
+        return "flat over \(days) days"
+    }
 
     /// Occurrences below this cannot make a shape, only a pattern of when the
     /// user happened to sit down and play.
@@ -446,13 +519,41 @@ struct LeakTrend: Sendable, Hashable {
     /// read as a claim about direction, and a claim about direction drawn from
     /// three moves is the kind of number that makes a user distrust every other
     /// number beside it.
+    ///
+    /// - Parameter observedSince: The earliest instant the caller's occurrences
+    ///   could have come from. `nil` means "assume the full span".
+    ///
+    /// ## Why the span is not simply ninety days
+    ///
+    /// It was, and the label said so, while the occurrences behind it came from
+    /// the leak horizon — the last twenty analysed games. For anyone playing
+    /// daily that is about three weeks, so four of the six buckets were empty
+    /// *by construction* and every sparkline on the screen drew the same shape:
+    /// nothing, nothing, nothing, nothing, then a surge. A user reading that
+    /// sees a habit getting rapidly worse, on the one element of the screen
+    /// whose entire job is to be able to say the opposite.
+    ///
+    /// Bucketing across the window that was actually read fixes both halves.
+    /// The shape describes the period it was measured over, and a leading run
+    /// of empty buckets now means what it looks like it means — the app looked
+    /// there and found nothing, which for a fix four weeks old is exactly the
+    /// evidence the user wants.
     static func make(
         from occurrences: [LeakOccurrence],
         now: Date = Date(),
-        days: Int = 90,
+        observedSince: Date? = nil,
+        maximumDays: Int = 90,
         bucketCount: Int = 6
     ) -> LeakTrend? {
-        guard days > 0, bucketCount >= 2 else { return nil }
+        guard maximumDays > 0, bucketCount >= 2 else { return nil }
+
+        // Rounded up, so a window of "twenty days and two hours" is described
+        // as twenty-one days rather than as twenty days that quietly excludes
+        // its own oldest game.
+        let observed = observedSince.map { start in
+            Int((now.timeIntervalSince(start) / 86_400).rounded(.up))
+        }
+        let days = min(maximumDays, max(observed ?? maximumDays, 1))
 
         let span = Double(days) * 86_400
         let bucketSeconds = span / Double(bucketCount)
@@ -461,7 +562,11 @@ struct LeakTrend: Sendable, Hashable {
 
         for occurrence in occurrences {
             let age = now.timeIntervalSince(occurrence.playedAt)
-            guard age >= 0, age < span else { continue }
+            // Inclusive at the far end. Every occurrence in a game is stamped
+            // with that game's start, so the oldest game in the window sits
+            // exactly on the boundary — an exclusive test would silently drop
+            // the whole game the window was sized from.
+            guard age >= 0, age <= span else { continue }
             let index = bucketCount - 1 - min(Int(age / bucketSeconds), bucketCount - 1)
             buckets[index] += occurrence.epLost
             counted += 1

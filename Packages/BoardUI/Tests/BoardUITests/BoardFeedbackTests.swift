@@ -62,6 +62,28 @@ struct BoardFeedbackTests {
     #expect(model.captureFlourish?.delta.label == "\u{2212}1")
   }
 
+  /// "Flip the board" moves the orientation, so on a played board the reader's
+  /// own captures started coming up as red negatives — the flourish teaching the
+  /// exact opposite of the habit it exists to build. A caller that knows which
+  /// colour the reader is playing names it, and the sign stops depending on
+  /// which way the board happens to be facing.
+  @Test func namedPerspectiveOutranksOrientation() {
+    let model = model(captureFEN, orientation: .black, materialFeedback: true)
+    model.materialPerspective = .white
+    model.update(position: capturing(model))
+
+    #expect(model.captureFlourish?.delta.value == 1)
+    #expect(model.captureFlourish?.delta.isGain == true)
+  }
+
+  @Test func withoutANamedPerspectiveTheOrientationStillDecides() {
+    let model = model(captureFEN, orientation: .black, materialFeedback: true)
+    model.materialPerspective = nil
+    model.update(position: capturing(model))
+
+    #expect(model.captureFlourish?.delta.value == -1)
+  }
+
   @Test func boardsThatDidNotAskForItStaySilent() {
     // Review scrubbers and filmstrip thumbnails replay captures constantly.
     let model = model(captureFEN, materialFeedback: false)

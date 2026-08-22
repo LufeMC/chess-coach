@@ -25,12 +25,18 @@ struct AcknowledgementsScreen: View {
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 24) {
-                // ChessCoach's own licence comes first. The rest of this screen
-                // is notices *owed to* other projects; this card is the app
-                // stating its own terms, which is the thing GPL v3 obliges and
-                // the thing a list of third-party notices does not cover.
+                // Rookly's own licence comes first. The rest of this screen is
+                // notices *owed to* other projects; this card is the app stating
+                // its own terms, which is the thing GPL v3 obliges and the thing
+                // a list of third-party notices does not cover.
+                //
+                // The name is the installed one. This card is the app naming
+                // itself and its terms, and doing that under a name the user has
+                // never seen reads as another product's licence pasted in —
+                // which is the opposite of what the screen is for. "ChessCoach"
+                // is the repository, and stays in the source link.
                 VStack(alignment: .leading, spacing: 6) {
-                    Text("ChessCoach")
+                    Text("Rookly")
                         .typeRole(.headline)
 
                     Text("GNU GPL v3")
@@ -42,11 +48,11 @@ struct AcknowledgementsScreen: View {
                         .fixedSize(horizontal: false, vertical: true)
 
                     Text("""
-                        ChessCoach embeds Stockfish, which is licensed under the \
+                        Rookly embeds Stockfish, which is licensed under the \
                         GNU General Public License v3. Linking it into this app \
                         makes the combined program a derivative work, so \
-                        ChessCoach is distributed under the same licence, and \
-                        its complete corresponding source is published.
+                        Rookly is distributed under the same licence, and its \
+                        complete corresponding source is published.
 
                         This program comes with ABSOLUTELY NO WARRANTY.
                         """)
@@ -55,7 +61,10 @@ struct AcknowledgementsScreen: View {
                         .fixedSize(horizontal: false, vertical: true)
                         .padding(.top, 2)
 
-                    Link("Source code", destination: Self.sourceRepository)
+                    // Named for where it goes: the one link on this screen that
+                    // leaves the app, in an app that otherwise never needs a
+                    // network, should say so before it is tapped.
+                    Link("Source code on GitHub", destination: Self.sourceRepository)
                         .typeRole(.caption)
                         .padding(.top, 2)
                 }
@@ -83,7 +92,7 @@ struct AcknowledgementsScreen: View {
                             .padding(.top, 2)
 
                         if let url = entry.source {
-                            Link("Source", destination: url)
+                            Link("Source on the web", destination: url)
                                 .typeRole(.caption)
                                 .padding(.top, 2)
                         }

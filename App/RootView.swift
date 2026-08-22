@@ -1,3 +1,4 @@
+import BoardUI
 import SwiftUI
 
 /// Platform split: iPhone is board-first with a tab bar, Mac is review-centric
@@ -9,46 +10,133 @@ struct RootView: View {
         switch model.bootState {
         case .idle, .booting:
             BootView()
-        case .failed(let message):
-            BootFailureView(message: message)
-        case .ready:
-            // Calibration gates the app rather than presenting over it: the
-            // rating and starting rung it produces are what every other screen
-            // reads, so entering Today first would mean showing a ladder and a
-            // leak chart with nothing behind them.
-            if model.needsCalibration {
-                CalibrationScreen { model.calibrationFinished() }
-            } else {
-                #if os(macOS)
-                    MacRootView()
-                #else
-                    PhoneRootView()
-                #endif
+        case .failed(let failure):
+            BootFailureView(failure: failure) {
+                Task { await model.retryBoot() }
             }
+        case .ready:
+            VStack(spacing: 0) {
+                // Every screen below this saves something, and none of them can
+                // when the database did not open. Each says so in its own words
+                // when the user reaches it; this is the one place that can say
+                // it before they spend a game finding out.
+                if model.databaseError != nil {
+                    StorageUnavailableNotice()
+                }
+
+                // Calibration gates the app rather than presenting over it: the
+                // rating and starting rung it produces are what every other
+                // screen reads, so entering Today first would mean showing a
+                // ladder and a leak chart with nothing behind them.
+                if model.needsCalibration {
+                    CalibrationScreen { model.calibrationFinished() }
+                } else {
+                    #if os(macOS)
+                        MacRootView()
+                    #else
+                        PhoneRootView()
+                    #endif
+                }
+            }
+            // The Haptics switch in Settings names the board's own feedbacks —
+            // lift, drop, refusal, capture, check — and BoardUI has no way to
+            // see a setting the app stores. Handing it down from the one root
+            // every screen hangs off is what makes the switch tell the truth.
+            // `BoardAppearance` is `@Observable`, so flipping it re-renders the
+            // boards with the new value rather than waiting for a relaunch.
+            .environment(\.boardHapticsEnabled, BoardAppearance.shared.hapticsEnabled)
         }
     }
 }
 
+/// The wait before the first screen.
+///
+/// "Warming up the engine" was the first sentence the app ever said, and it was
+/// about a subsystem. This one is about the board, and it says how long: the
+/// engine measures this device on every launch, which is real work with no
+/// visible cause, and a wait nobody has sized reads as a wait that has hung.
 private struct BootView: View {
     var body: some View {
         VStack(spacing: 16) {
             ProgressView()
-            Text("Warming up the engine")
-                .font(.footnote)
-                .foregroundStyle(.secondary)
+            VStack(spacing: 4) {
+                Text("Getting the board ready")
+                    .font(.footnote.weight(.semibold))
+                Text("A few seconds — the app measures this device's speed each launch.")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+                    .multilineTextAlignment(.center)
+            }
         }
+        .padding(.horizontal, 32)
     }
 }
 
+/// The engine did not start.
+///
+/// A dead end with a Swift enum printed in it was the worst screen in the app:
+/// nothing to tap, and a sentence naming a type. The plain reason is the
+/// content, trying again is the action — a handshake that timed out on a busy
+/// phone usually succeeds on the second attempt — and the raw case stays
+/// reachable for the one reader it is any use to.
 private struct BootFailureView: View {
-    let message: String
+    let failure: AppModel.BootFailure
+    let onRetry: () -> Void
+
+    @State private var isShowingDetail = false
 
     var body: some View {
         ContentUnavailableView {
-            Label("Engine unavailable", systemImage: "exclamationmark.triangle")
+            Label("The engine could not start", systemImage: "exclamationmark.triangle")
         } description: {
-            Text(message)
+            VStack(spacing: 10) {
+                Text(failure.message)
+
+                Button(isShowingDetail ? "Hide details" : "Show details") {
+                    isShowingDetail.toggle()
+                }
+                .font(.footnote)
+
+                if isShowingDetail {
+                    Text(failure.detail)
+                        .font(.system(.caption, design: .monospaced))
+                        .textSelection(.enabled)
+                }
+            }
+        } actions: {
+            Button("Try again", action: onRetry)
+                .buttonStyle(.primaryAction)
         }
+        .animation(Motion.standard, value: isShowingDetail)
+    }
+}
+
+/// Nothing can be written to disk.
+///
+/// Rare — it takes an unwritable Application Support directory — and total when
+/// it happens: no rating, no saved games, no review. The three screens that hit
+/// it each explain themselves once the user is standing on them, which is one
+/// screen too late.
+private struct StorageUnavailableNotice: View {
+    var body: some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Text("Nothing can be saved right now")
+                .typeRole(.label)
+            Text("You can still play, but games, ratings and reviews are lost when the app closes.")
+                .typeRole(.caption)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(.horizontal, 16)
+        .padding(.vertical, 10)
+        .background(Palette.caution.dynamic.opacity(0.16))
+        .overlay(alignment: .bottom) {
+            Rectangle()
+                .fill(Palette.hairline.dynamic)
+                .frame(height: 2)
+        }
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel("Nothing can be saved right now. You can still play, but games, ratings and reviews are lost when the app closes.")
     }
 }
 

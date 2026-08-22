@@ -30,19 +30,23 @@ struct RungCard: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
-            HStack(alignment: .firstTextBaseline) {
-                Text("Rung \(rung.rung)")
-                    .typeRole(.label, appliesForeground: false)
-                    .foregroundStyle(.white.opacity(0.85))
-                Spacer(minLength: 8)
-                if let focusHabit = rung.focusHabit {
-                    FocusChip(text: focusHabit)
-                }
-            }
+            // `Rung 2 of 4`, not `Rung 2`. The ladder's length is what turns a
+            // label into a position, and this card is the first place in the
+            // app most users meet the word at all.
+            Text("Rung \(rung.rung) of \(rung.rungCount)")
+                .typeRole(.label, appliesForeground: false)
+                .foregroundStyle(.white.opacity(0.85))
 
             Text(rung.title)
                 .font(.system(.title3, design: .rounded, weight: .heavy))
                 .foregroundStyle(.white)
+
+            // Its own line rather than pinned opposite the eyebrow: the habit
+            // is a sentence, and a sentence squeezed into the gap left by a
+            // label truncates at the word that carried it.
+            if let focusHabit = rung.focusHabit {
+                FocusChip(text: focusHabit)
+            }
 
             progressArea
         }
@@ -57,11 +61,25 @@ struct RungCard: View {
 
     @ViewBuilder
     private var progressArea: some View {
-        if let progress = rung.progress {
-            ProgressTrack(progress: progress)
-                .frame(height: barHeight)
-                .accessibilityLabel("Rung progress")
-                .accessibilityValue("\(Int((progress * 100).rounded())) percent")
+        if let skills = rung.skills {
+            VStack(alignment: .leading, spacing: 5) {
+                ProgressTrack(progress: skills.fraction)
+                    .frame(height: barHeight)
+                // A bar with no unit is a claim the reader has to guess at.
+                // This one is the fraction of the rung's required skills that
+                // are met, and finishing it is what moves you up a rung.
+                //
+                // Counted rather than given as a percentage: see
+                // ``RungSkillProgress`` for why a bar that moves in thirds must
+                // not be labelled as if it moved in points.
+                Text("\(RungPresentation.progressCaption) · \(skills.caption)")
+                    .typeRole(.caption, appliesForeground: false)
+                    .foregroundStyle(.white.opacity(0.85))
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            .accessibilityElement(children: .ignore)
+            .accessibilityLabel(RungPresentation.progressCaption)
+            .accessibilityValue(skills.caption)
         } else if isMeasuring {
             // Exactly the bar's geometry, so nothing moves when the real value
             // lands. That is the entire job of a skeleton.
@@ -102,13 +120,19 @@ private struct ProgressTrack: View {
     }
 }
 
+/// This week's habit, framed as what it is.
+///
+/// The framing is drawn, not just spoken: an imperative sentence floating in a
+/// white pill on the rung card could be a tip, a badge or a task, and the word
+/// in front of it is the only thing that says which.
 private struct FocusChip: View {
     let text: String
 
     var body: some View {
-        Text(text)
+        Text("Focus · \(text)")
             .typeRole(.caption, appliesForeground: false)
             .foregroundStyle(.white)
+            .fixedSize(horizontal: false, vertical: true)
             .padding(.horizontal, 10)
             .padding(.vertical, 4)
             .background(Capsule().fill(.white.opacity(0.22)))
@@ -291,10 +315,10 @@ private struct PathNodeView: View {
             VStack(spacing: 2) {
                 Text(state.title)
                     .typeRole(.headline, appliesForeground: false)
-                    .foregroundStyle(state.status == .locked ? AnyShapeStyle(.tertiary) : AnyShapeStyle(.primary))
+                    .foregroundStyle(state.status.isDimmed ? AnyShapeStyle(.tertiary) : AnyShapeStyle(.primary))
 
-                if let reason = state.lockedReason {
-                    Text(reason)
+                if let note = state.note {
+                    Text(note)
                         .typeRole(.caption)
                 } else if let tally = state.tally, state.status != .done {
                     Text(tally.accessibilityText)
@@ -303,7 +327,7 @@ private struct PathNodeView: View {
             }
         }
         .accessibilityElement(children: .combine)
-        .accessibilityHint(state.status == .locked ? (state.lockedReason ?? "") : "")
+        .accessibilityHint(state.status.isDimmed ? (state.note ?? "") : "")
     }
 
     @ViewBuilder
@@ -342,6 +366,8 @@ private struct PathNodeView: View {
         switch state.status {
         case .done: "checkmark"
         case .locked: "lock.fill"
+        case .waiting: "hourglass"
+        case .empty: "minus"
         default:
             switch state.step {
             case .game: "star.fill"
@@ -352,7 +378,7 @@ private struct PathNodeView: View {
     }
 
     private var glyphTint: Color {
-        state.status == .locked
+        state.status.isDimmed
             ? DualColor(light: 0xAFAFAF, dark: 0x52656D).dynamic
             : .white
     }

@@ -63,6 +63,18 @@ struct FinishedGameRecord: Sendable {
     /// ``TrainingCore/LadderGame/containedLevel2AssistedRetry``: the result is
     /// partly the engine's, and counting it measures the coach.
     var usedAssistedRetry: Bool = false
+    /// How many moves the user took back, by any route — second try at any hint
+    /// level, or the undo window before the opponent replies.
+    ///
+    /// ``usedAssistedRetry`` only catches the one case where the coach drew the
+    /// refutation first, and that is the rarest of them. Every blunder over
+    /// 0.30 expected points in a sparring game is offered back for free, so a
+    /// win after two quietly retracted blunders used to move the rating exactly
+    /// as far as a clean one — and the ladder then served opponents the player
+    /// could not beat unaided. ``TrainingCore/EloLadder`` halves K per
+    /// retraction instead of refusing the game outright: the game was still
+    /// played, it is just weaker evidence.
+    var retractionCount: Int = 0
 
     /// The JSON blob written to `games.opponentParams`.
     struct OpponentParams: Sendable, Codable, Equatable {
@@ -135,6 +147,12 @@ extension FinishedGameRecord {
     /// the rating.
     var ladderGame: LadderGame? {
         guard let ratingWeight, let played = GameResult(rawValue: result) else { return nil }
+        // `unknown` is the termination `GameSession` writes when the opponent
+        // search stopped answering and the game was abandoned where it stood.
+        // The stored "1/2-1/2" is a placeholder, not a result: nobody agreed a
+        // draw, and feeding it to the ladder would be evidence about a game the
+        // player never got to finish.
+        guard GameTermination(rawValue: termination) != .unknown else { return nil }
 
         let outcome: GameOutcome =
             if played == .draw {
@@ -147,7 +165,8 @@ extension FinishedGameRecord {
             opponentRating: Double(opponentRating),
             outcome: outcome,
             mode: ratingWeight,
-            containedLevel2AssistedRetry: usedAssistedRetry
+            containedLevel2AssistedRetry: usedAssistedRetry,
+            retractionCount: retractionCount
         )
     }
 }
@@ -280,11 +299,32 @@ actor LadderRatingWriter {
     /// deliberately shared, because a guard that averaged a different set of
     /// games than the rating would be checking the rating against a number it
     /// never came from.
+    ///
+    /// ## Why assisted-retry games are dropped here
+    ///
+    /// ``EloLadder/update(state:game:tuning:)`` already refuses to rate a game
+    /// where the coach showed the refutation and the move was taken back — see
+    /// ``TrainingCore/LadderGame/containedLevel2AssistedRetry``, "a rating that
+    /// counts them measures the coach, not the user". `performanceRating` does
+    /// not know about the flag, so before this filter existed the same games the
+    /// rating declined to use could still trip the guard: a run of coached wins
+    /// read as a player performing far above their rating, and the guard's
+    /// answer to that is K=40 for the next five games. The rating then moved
+    /// four times as fast on evidence it had itself thrown away.
+    ///
+    /// The fetch is five windows deep rather than three because of that filter.
+    /// A fortnight of leaning on take-backs can leave fewer than ten usable
+    /// games inside a narrower read, and a guard that quietly stops running is
+    /// worse than one that fires late — this is the check that catches a rating
+    /// set to the wrong level in the first place.
     private func driftChecked(_ state: LadderState) -> LadderState {
         guard let games else { return state }
 
-        let recent = (try? games.recent(limit: Self.driftWindow * 3)) ?? []
-        let ladder = recent.compactMap(MetricComputer.ladderGame(for:)).prefix(Self.driftWindow)
+        let recent = (try? games.recent(limit: Self.driftWindow * 5)) ?? []
+        let ladder = recent
+            .compactMap(MetricComputer.ladderGame(for:))
+            .filter { !$0.containedLevel2AssistedRetry }
+            .prefix(Self.driftWindow)
 
         guard ladder.count >= Self.driftWindow,
               let performance = EloLadder.performanceRating(games: Array(ladder))

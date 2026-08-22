@@ -59,6 +59,17 @@ final class BoardModel {
   /// one the user is actually playing on — see ``BoardView``.
   var emitsMaterialFeedback = false
 
+  /// Whose side of the table the material number is counted from.
+  ///
+  /// `nil` falls back to ``orientation``, which is where this started and is
+  /// right for any board that is never turned around. It is *wrong* for one that
+  /// is: "Flip the board" changes the orientation, so after a flip the reader's
+  /// own captures started showing as red negatives — the flourish teaching the
+  /// exact opposite of what it exists to teach. A caller that knows which colour
+  /// the reader is playing names it here and the sign stops depending on which
+  /// way the board happens to be facing.
+  var materialPerspective: Piece.Color?
+
   // MARK: Feedback counters
   //
   // `.sensoryFeedback` fires on a value *change*, so each event needs its own
@@ -230,7 +241,7 @@ final class BoardModel {
   /// went, which is the half of en passant people get wrong.
   private func raiseCaptureFlourish(from previous: Position, to current: Position) {
     guard emitsMaterialFeedback, let square = departing.first?.square else { return }
-    let delta = MaterialDelta.between(previous, current, for: orientation)
+    let delta = MaterialDelta.between(previous, current, for: materialPerspective ?? orientation)
     guard !delta.isZero else { return }
 
     flourishToken += 1

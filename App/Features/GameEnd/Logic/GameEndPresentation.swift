@@ -95,7 +95,18 @@ struct GameEndBanner: Equatable, Sendable {
     /// `Docs/craft-standards.md` also lists a red X after a loss among the
     /// things that make an app feel cheap. So a loss states the fact in the same
     /// geometry as a win, tinted neutral.
-    static func make(outcome: GameSession.Outcome, opponentName: String) -> GameEndBanner {
+    ///
+    /// - Parameter persistenceFailure: set when the game could not be written to
+    ///   disk. It belongs on the banner and not only on the summary because the
+    ///   banner is the one beat every finished game passes through: collapsing
+    ///   it or tapping the exit is an ordinary way to end an evening, and a user
+    ///   who does that would otherwise learn the game was lost only by finding
+    ///   Today still asking them to play one.
+    static func make(
+        outcome: GameSession.Outcome,
+        opponentName: String,
+        persistenceFailure: String? = nil
+    ) -> GameEndBanner {
         let kind: Kind =
             switch outcome.userWon {
             case .some(true): .win
@@ -103,12 +114,27 @@ struct GameEndBanner: Equatable, Sendable {
             case nil: .draw
             }
 
+        let headline = headline(outcome: outcome, opponentName: opponentName, kind: kind)
+
         return GameEndBanner(
             kind: kind,
             symbolName: symbolName(for: kind),
-            headline: headline(outcome: outcome, opponentName: opponentName, kind: kind),
-            ctaTitle: "See the summary"
+            headline: persistenceFailure == nil ? headline : notSaved(headline),
+            // The CTA carries it too, because the collapsed chip and the
+            // headline can both be read past in a second; the button is the
+            // thing being aimed at.
+            ctaTitle: persistenceFailure == nil ? "See the summary" : "See the summary · not saved"
         )
+    }
+
+    /// The result, then the fact that it was not kept.
+    ///
+    /// Every result sentence ends in a full stop, so the clause is joined onto
+    /// the sentence rather than after it — "Checkmate — you win. — not saved."
+    /// is a typographical stutter in the one place the reader has to trust.
+    private static func notSaved(_ headline: String) -> String {
+        let stem = headline.hasSuffix(".") ? String(headline.dropLast()) : headline
+        return "\(stem) — not saved."
     }
 
     private static func symbolName(for kind: Kind) -> String {
@@ -127,6 +153,11 @@ struct GameEndBanner: Equatable, Sendable {
         case .resignation:
             return kind == .win ? "\(opponentName) resigned." : "You resigned."
         case .timeout:
+            // A flag fall only draws when the side still on the clock cannot
+            // mate with what it has left, and the outcome does not record which
+            // flag fell — so the draw sentence names the rule rather than
+            // guessing at a player and getting it wrong half the time.
+            if kind == .draw { return "A flag fell, and there was not enough material to mate — draw." }
             return kind == .win ? "\(opponentName) ran out of time." : "You ran out of time."
         case .stalemate:
             return "Stalemate — draw."
@@ -138,7 +169,15 @@ struct GameEndBanner: Equatable, Sendable {
             return "Not enough material to mate — draw."
         case .repetition:
             return "Threefold repetition — draw."
-        case .unknown, .none:
+        case .unknown:
+            // `GameSession` writes this termination in exactly one situation:
+            // the opponent search stopped answering and the game was abandoned
+            // where it stood. The stored result is "1/2-1/2" because a result
+            // invented for either side would be a lie, but so is a bare "Draw."
+            // — nobody agreed to one, and the ladder is told to ignore the game
+            // (see ``FinishedGameRecord/ladderGame``).
+            return "The engine stopped responding, so this game was abandoned. It does not count."
+        case .none:
             switch kind {
             case .win: return "You win."
             case .loss: return "\(opponentName) wins."
@@ -212,6 +251,41 @@ struct GameSummaryPresentation: Equatable, Sendable {
         }
     }
 
+    // MARK: Pricing the wait
+
+    /// Seconds of engine time the base walk costs per position.
+    ///
+    /// The pass evaluates one position per half-move plus the final one, at the
+    /// engine's lowest priority. The figure is a rough measured average on the
+    /// oldest supported phone, not a budget the pass is held to.
+    static let secondsPerPosition = 0.35
+    /// Positions re-searched afterwards for coaching lines, and what each costs.
+    /// Mirrors `AnalysisService.enrichmentBudget`.
+    static let enrichedPositions = 12
+    static let secondsPerEnrichedPosition = 0.5
+
+    /// Roughly how long this game's analysis takes, in seconds.
+    ///
+    /// A wait nobody has priced is a wait people leave the app during, and
+    /// leaving the app is the one action that guarantees it never finishes — the
+    /// engine suspends in the background. Being wrong by half is fine here; the
+    /// only distinction the reader needs is ten seconds from two minutes.
+    static func analysisEstimateSeconds(plyCount: Int) -> Int {
+        let positions = Double(max(plyCount, 0) + 1)
+        let seconds =
+            positions * secondsPerPosition
+            + Double(enrichedPositions) * secondsPerEnrichedPosition
+        return max(5, Int(seconds.rounded()))
+    }
+
+    /// The estimate as the screen says it: "about 40 seconds", "about 2 minutes".
+    static func analysisEstimateText(plyCount: Int) -> String {
+        let seconds = analysisEstimateSeconds(plyCount: plyCount)
+        guard seconds >= 90 else { return "about \(seconds) seconds" }
+        let minutes = Int((Double(seconds) / 60).rounded())
+        return "about \(minutes) minutes"
+    }
+
     static func make(_ input: Input) -> GameSummaryPresentation {
         let banner = GameEndBanner.make(outcome: input.outcome, opponentName: input.opponentName)
         let analysisFailed = input.analysisState == .failed
@@ -221,7 +295,12 @@ struct GameSummaryPresentation: Equatable, Sendable {
         // or failed — a missing number is missing for good, and leaving a
         // placeholder pulsing at a number that will never arrive is worse than
         // saying so.
-        let analysisSettled = analysisFailed || input.analysisState == .complete
+        // A game that never reached disk is settled too, and in the bleakest
+        // way: there is no row for the pass to run against, so the poll would
+        // read `nil` forever and the skeletons would pulse for as long as the
+        // screen is open.
+        let analysisSettled =
+            analysisFailed || input.analysisState == .complete || input.persistenceFailure != nil
         let accuracy: String? =
             if let value = input.accuracy {
                 "\(Int(value.rounded()))%"
@@ -257,11 +336,17 @@ struct GameSummaryPresentation: Equatable, Sendable {
         }
         guard let count = input.momentCount, !analysisFailed else {
             // Analysis is still running: name the destination honestly rather
-            // than promising a number that might turn out to be two.
-            return .review(title: "Open the review")
+            // than promising a number that might turn out to be two. "Open the
+            // review" on its own would be indistinguishable from the finished
+            // game below that found nothing, which is the one thing this button
+            // has to tell the reader.
+            if analysisFailed { return .review(title: "See the game · no analysis for this one") }
+            return .review(title: "Analysing · open the game and its moves")
         }
         guard count > 0 else {
-            return .review(title: "Open the review")
+            // Finished, and there was nothing worth studying. Saying so is the
+            // difference between a button worth tapping and a Continue.
+            return .review(title: "See the game · no moments to review · ~1 min")
         }
         // Word for word the Today checklist's CTA — verb, object, price —
         // because this is the same step, and the loop only visibly closes if

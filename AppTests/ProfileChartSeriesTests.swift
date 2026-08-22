@@ -167,4 +167,23 @@ struct ProfileChartSeriesTests {
         #expect(ProfileChartMetric.accuracy.format(84.26) == "84.3%")
         #expect(ProfileChartMetric.accuracy.formatCompact(84.26) == "84%")
     }
+
+    @Test("The headline says which scale the number is on")
+    func namesItsScale() {
+        // The app has no accounts and imports nothing, so a club player reading
+        // "1187 rating" will take it for the rating they already hold.
+        #expect(ProfileChartMetric.rating.unit == "Rookly rating")
+        #expect(ProfileChartMetric.rating.scaleNote?.contains("not your club or online rating") == true)
+        #expect(ProfileChartMetric.accuracy.scaleNote == nil)
+    }
+
+    @Test("The trend note counts stored observations, not games")
+    func trendNounMatchesTheData() {
+        // Rating history stores one sample per day the value stood still plus
+        // one per move, so "1 more game" is a promise the series cannot keep.
+        #expect(ProfileChartMetric.rating.trendNoun == "days of play")
+        #expect(ProfileChartMetric.rating.trendNounSingular == "day of play")
+        // Accuracy genuinely is one point per game.
+        #expect(ProfileChartMetric.accuracy.trendNoun == "games")
+    }
 }

@@ -25,6 +25,18 @@ struct ReviewScreen: View {
     /// Mac only; harmless elsewhere.
     @State private var isCoachCollapsed = false
     @State private var isMoveListExpanded = false
+    /// Shown under the graph until the reader has scrubbed once, ever. Nothing
+    /// on the screen said the curve was draggable or that the pieces are
+    /// tappable in replay, and neither is discoverable by looking.
+    @AppStorage("review.hasScrubbed") private var hasScrubbed = false
+
+    /// Optional so previews and hosts that build no services still render.
+    @Environment(AppModel.self) private var appModel: AppModel?
+
+    /// The daily loop's next step and its price, read once when the screen
+    /// opens. Nil while it is being read, and nil for good when the day has
+    /// nothing left in it — see ``handoff``.
+    @State private var nextStep: (title: String, destination: TodayDestination)?
 
     /// Read through the shared appearance rather than captured once, so a theme
     /// changed in Settings is reflected the next time this screen draws.
@@ -63,8 +75,14 @@ struct ReviewScreen: View {
                 .navigationBarTitleDisplayMode(.inline)
             #endif
             .task {
+                nextStep = TodayModel.nextStepAfterReview()
                 await model.load()
                 if let focusMomentID { model.select(momentID: focusMomentID) }
+                // The pass is usually still running when this screen opens — the
+                // handoff from Summary is a few seconds after the game — so the
+                // screen keeps reading until it settles rather than promising a
+                // curve that only a back-and-re-enter would ever produce.
+                await model.followAnalysis()
             }
             .modifier(ReviewKeyboardCommands(model: model))
     }
@@ -73,14 +91,18 @@ struct ReviewScreen: View {
     private var content: some View {
         switch model.loadState {
         case .loading:
-            ProgressView()
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            // The final layout is known before the read finishes — board,
+            // scrubber slot, three pills — so it is drawn rather than covered.
+            // `craft-standards.md`: no spinners outside a button.
+            ReviewSkeleton()
 
         case .missing:
             ContentUnavailableView {
                 Label("Game not found", systemImage: "questionmark.folder")
             } description: {
-                Text("It may have been deleted on another device.")
+                // Nothing here syncs and there is no account, so "another
+                // device" invented a cause the reader knows is impossible.
+                Text("This game is no longer in your history.")
             }
 
         case .failed(let message):
@@ -136,7 +158,13 @@ struct ReviewScreen: View {
                     capturedRow
                         .padding(.horizontal, 16)
 
+                    evalReadingRow
+                        .padding(.horizontal, 16)
+
                     scrubber
+                        .padding(.horizontal, 16)
+
+                    stepRow
                         .padding(.horizontal, 16)
 
                     ScrollView {
@@ -147,9 +175,7 @@ struct ReviewScreen: View {
                         // problem; a "Next" the user cannot see is.
                         ScrollViewReader { scroll in
                         VStack(alignment: .leading, spacing: 20) {
-                            if let notice = analysisNotice {
-                                notice.padding(.horizontal, 16)
-                            }
+                            analysisNotice.padding(.horizontal, 16)
                             // The engine's read stays covered until the user
                             // has committed to their own. See
                             // ``ReviewSelfCheck`` for why a review that opens
@@ -159,6 +185,14 @@ struct ReviewScreen: View {
                                     .padding(.horizontal, 16)
                                     .id(Self.selfCheckAnchor)
                             } else {
+                                if let result = model.selfCheckResult {
+                                    // What the questions came to, before the
+                                    // engine's read starts talking over it.
+                                    Text(result)
+                                        .typeRole(.caption)
+                                        .fixedSize(horizontal: false, vertical: true)
+                                        .padding(.horizontal, 16)
+                                }
                                 if let verdict = model.verdict {
                                     ReviewVerdictCard(verdict: verdict)
                                         .padding(.horizontal, 16)
@@ -169,6 +203,8 @@ struct ReviewScreen: View {
                                 coachSection.padding(.horizontal, 16)
                             }
                             moveListSection
+                                .padding(.horizontal, 16)
+                            handoff
                                 .padding(.horizontal, 16)
                         }
                         .padding(.vertical, 16)
@@ -197,10 +233,12 @@ struct ReviewScreen: View {
             HStack(spacing: 10) {
                 ReviewPanel(title: "Board") {
                     VStack(spacing: 14) {
-                        if let notice = analysisNotice { notice }
+                        analysisNotice
                         board
                             .frame(maxWidth: 520)
                         capturedRow
+                            .frame(maxWidth: 520)
+                        evalReadingRow
                             .frame(maxWidth: 520)
                         evalBar
                             .frame(maxWidth: 520)
@@ -295,8 +333,28 @@ struct ReviewScreen: View {
             // "where could that knight have gone?" is most of why anyone replays.
             interaction: .replay,
             highlights: model.highlights,
+            // The engine's move, once the reader has asked for it. See
+            // ``ReviewModel/boardArrows``.
+            arrows: model.boardArrows,
             style: style
         )
+    }
+
+    /// One line under the board saying which way the position is going.
+    ///
+    /// The curve above it is drawn White-at-top and never flipped, so a reader
+    /// who played Black watches it climb while they lose. This is the sentence
+    /// that resolves it, and it is the only place on the phone that answers "am
+    /// I winning here?" in words while scrubbing. It keeps its slot when there
+    /// is no evaluation so the board does not jump as analysis lands.
+    private var evalReadingRow: some View {
+        Text(model.evalReading ?? " ")
+            .typeRole(.caption)
+            .monospacedDigit()
+            .frame(maxWidth: .infinity)
+            .contentTransition(.opacity)
+            .animation(Motion.crossfade, value: model.evalReading)
+            .accessibilityLabel(Text(model.evalReading ?? "Not evaluated yet"))
     }
 
     /// The material count for the position on screen. In review it moves as the
@@ -312,12 +370,21 @@ struct ReviewScreen: View {
             ReviewScrubber(
                 points: model.track.points,
                 segments: model.phaseSegments,
-                moments: momentMarks,
+                // The coloured dots are the answer to "where did you lose
+                // material?", so they stay off the curve until the question has
+                // been answered — see ``ReviewSelfCheck``.
+                moments: model.isSelfCheckActive ? [:] : momentMarks,
                 index: Binding(
                     get: { model.selectedIndex },
-                    set: { model.select(index: $0) }
+                    set: {
+                        hasScrubbed = true
+                        model.select(index: $0)
+                    }
                 ),
-                style: style
+                style: style,
+                // The side actually played, not the board orientation: flipping
+                // the board must not move the "· you" onto the other axis label.
+                playedSide: model.playedSide
             )
         } else {
             // No curve yet. The strip keeps its slot so the layout does not jump
@@ -328,17 +395,84 @@ struct ReviewScreen: View {
                 .elevation(.raised, cornerRadius: CornerRadius.card, fill: Palette.surfaceSunken)
                 .pendingOutline(cornerRadius: CornerRadius.card)
                 .overlay {
-                    Text(model.analysisState == .failed ? "No evaluation" : "Evaluation pending")
+                    Text(scrubberPlaceholder)
                         .typeRole(.caption)
                 }
         }
     }
 
+    /// What the empty curve slot says.
+    ///
+    /// A game resigned on move one is marked complete with a single position in
+    /// it, and "Evaluation pending" there waits for something that is never
+    /// coming.
+    private var scrubberPlaceholder: String {
+        switch model.analysisState {
+        case .failed: "No evaluation"
+        case .complete: "Too short to evaluate"
+        case .pending, .running: "Evaluation pending"
+        }
+    }
+
+    /// One half-move at a time, in both directions.
+    ///
+    /// On a 70-ply game the scrubber maps four points to a half-move, so
+    /// landing on "the move before the blunder" by finger is luck. These were
+    /// wired for the Mac menu only; on the phone the alternative was a 64-row
+    /// table.
+    private var stepRow: some View {
+        VStack(spacing: 6) {
+            HStack(spacing: 16) {
+                stepButton(symbol: "chevron.left", label: "Previous move") {
+                    hasScrubbed = true
+                    model.stepBackward()
+                }
+                Text(stepLabel)
+                    .typeRole(.caption, monospacedDigits: true)
+                    .frame(maxWidth: .infinity)
+                stepButton(symbol: "chevron.right", label: "Next move") {
+                    hasScrubbed = true
+                    model.stepForward()
+                }
+            }
+
+            if !hasScrubbed {
+                Text("Drag the graph to move through the game, or tap a piece to see where it could go.")
+                    .typeRole(.caption, appliesForeground: false)
+                    .foregroundStyle(.tertiary)
+                    .multilineTextAlignment(.center)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+    }
+
+    private var stepLabel: String {
+        guard let ply = model.currentPly else { return "Start" }
+        return "Move \((ply + 1) / 2)"
+    }
+
+    private func stepButton(symbol: String, label: String, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Image(systemName: symbol)
+                .font(.footnote.weight(.semibold))
+                .frame(width: 34, height: 34)
+                .elevation(.raised, cornerRadius: 17)
+        }
+        .buttonStyle(.pressable)
+        .accessibilityLabel(Text(label))
+    }
+
     private var momentMarks: [Int: BoardUI.MoveClassification] {
         model.momentCards.reduce(into: [:]) { marks, card in
-            // Marked at the ply the mistake was *made*, which is the position
-            // index after the move — that is where the curve moves.
-            marks[card.ply] = card.classification
+            // The dot goes where the *card* goes: the position before the move,
+            // which is the choice the moment is about. Marking it one to the
+            // right — after the move, where the curve visibly drops — broke the
+            // screen's primary interaction, because dragging the scrubber onto a
+            // coloured dot then landed on a position no card claims, and the
+            // coach card vanished instead of appearing. The curve still drops
+            // immediately to the right of the dot, which is legible; a dot you
+            // cannot select is not.
+            marks[card.positionIndex] = card.classification
         }
     }
 
@@ -356,26 +490,50 @@ struct ReviewScreen: View {
         HStack(alignment: .top, spacing: 10) {
             ReviewStatPill(
                 label: "Accuracy",
-                value: model.accuracy.map { "\(Int($0.rounded()))%" },
+                value: model.accuracy.map { "\(Int($0.rounded()))%" }
+                    ?? settledPlaceholder,
+                caption: accuracyComparison == nil ? nil : "against opponents near this rating",
                 comparison: accuracyComparison
             )
+            // Both captions exist because the two counts are not the same kind
+            // of thing and nothing else on the screen says so: one excludes
+            // inaccuracies on purpose, and the other is a ceiling of three that
+            // can include a move the analysis picked out as well played.
             ReviewStatPill(
                 label: "Mistakes",
-                value: model.analysisState == .complete ? "\(model.userMistakeCount)" : nil
+                value: model.analysisState == .complete
+                    ? "\(model.userMistakeCount)" : settledPlaceholder,
+                caption: "blunders and mistakes"
             )
             ReviewStatPill(
-                label: "Moments",
-                value: model.analysisState == .complete ? "\(model.momentCards.count)" : nil
+                label: "To review",
+                value: model.analysisState == .complete
+                    ? "\(model.momentCards.count)" : settledPlaceholder,
+                caption: "positions worth studying"
             )
         }
     }
 
+    /// What a stat shows when there is no number and none is coming.
+    ///
+    /// The app's rule, which the summary screen already follows: a skeleton
+    /// means "still on its way", so leaving one pulsing under a notice that says
+    /// the analysis *failed* promises a number that will never arrive. A settled
+    /// pass with nothing to show says so with a dash.
+    ///
+    /// Complete counts as settled too, for the game resigned on move one: it is
+    /// analysed instantly and has no accuracy to report, and the skeleton there
+    /// was waiting on a number that had already not been produced.
+    private var settledPlaceholder: String? {
+        model.analysisState == .failed || model.analysisState == .complete ? "—" : nil
+    }
+
     private var accuracyComparison: ReviewStatComparison? {
-        guard let accuracy = model.accuracy, let average = model.accuracyAverage else { return nil }
+        guard let accuracy = model.accuracy, let reference = model.accuracyReference else { return nil }
         return ReviewStatComparison(
             value: accuracy,
-            reference: average,
-            text: "your avg \(Int(average.rounded()))%"
+            reference: reference.average,
+            text: "avg \(Int(reference.average.rounded()))% · last \(reference.count)"
         )
     }
 
@@ -443,8 +601,15 @@ struct ReviewScreen: View {
                 diagnosis: card.diagnosis,
                 subtitle: "Move \(card.moveNumber) · \(card.classification.title)",
                 question: card.question,
-                suggestedQuestions: model.suggestedQuestions(forMoment: card.id)
+                suggestedQuestions: model.suggestedQuestions(forMoment: card.id),
+                revealedQuestionIDs: model.revealedSuggestionIDs,
+                onToggleQuestion: { model.toggleSuggestion(id: $0) },
+                onReveal: { model.markReviewed(momentID: card.id) },
+                onDrill: appModel.map { app in { habit in app.navigate(toTrain: habit) } }
             )
+            // Keyed on the moment, so the next card opens covered rather than
+            // inheriting the last one's uncovered state.
+            .id(card.id)
             .animation(Motion.contentSwap, value: note)
         }
     }
@@ -462,6 +627,10 @@ struct ReviewScreen: View {
                 rows: model.moveRows,
                 currentPly: model.currentPly,
                 style: style,
+                // The chips and the cost column are the engine's verdict on each
+                // move, which is exactly what the questions above are asking
+                // for. They come back with the rest of the review.
+                showsJudgement: !model.isSelfCheckActive,
                 onSelect: { model.select(index: $0) }
             )
             .padding(.top, 10)
@@ -478,43 +647,152 @@ struct ReviewScreen: View {
         .animation(Motion.standard, value: isMoveListExpanded)
     }
 
+    // MARK: - Handoff
+
+    /// The daily loop's next step, at the end of the review that precedes it.
+    ///
+    /// The review used to end on the move list, which is reference material: the
+    /// user who had just worked through their three moments got no signal that
+    /// they were finished and no idea what followed, and the loop lost its
+    /// momentum at the exact hinge it exists to turn. Named and priced in
+    /// Today's own vocabulary, because it is Today's step — the words have to
+    /// match or the two screens read as two different offers.
+    ///
+    /// Bordered, not filled: the coach card above owns this screen's one accent,
+    /// and a second filled button would make the reader check which of the two
+    /// is the thing they came here to do.
+    ///
+    /// Absent when the day has nothing left in it. "Done for today" belongs on
+    /// Today, where the completed state is already written; inventing extra work
+    /// here to keep a button on screen is the thing the button is against.
+    @ViewBuilder
+    private var handoff: some View {
+        // Not while the self-check is still asking its questions: "Done" before
+        // the review has begun is an exit offered in place of the work.
+        if let nextStep, let appModel, !model.isSelfCheckActive {
+            Button("Done · \(nextStep.title)") {
+                switch nextStep.destination {
+                case .train: appModel.advance(to: .train)
+                case .play: appModel.advance(to: .play)
+                // A coached game is the Play tab started differently, not a
+                // push, so it goes through its own entry point — routing it to
+                // `.play` would open an ordinary game and quietly drop the habit
+                // the step named in its own title.
+                case .playGuided(let habit):
+                    appModel.todayPath.removeAll()
+                    appModel.navigate(toGuidedGame: habit)
+                case .progress: appModel.advance(to: .profile)
+                // `nextStepAfterReview` never returns the review step — a button
+                // pointing at the screen it is drawn on is the dead end this
+                // whole affordance removes — so this is the safe fallback only.
+                case .reviewLatestGame: appModel.selectedTab = .today
+                }
+            }
+            .buttonStyle(.secondaryAction)
+            .padding(.top, 4)
+        }
+    }
+
     // MARK: - Status
 
     /// Honest reporting of where analysis stands. Nothing at all once it is done.
-    private var analysisNotice: ReviewNoticeRow? {
+    ///
+    /// The two unfinished states carry a button, because neither of them is
+    /// something the app reliably gets out of on its own: backgrounding
+    /// suspends the engine and nothing restarts the queue until the next game
+    /// or the next launch, and a failed pass is never picked up again at all.
+    @ViewBuilder
+    private var analysisNotice: some View {
         switch model.analysisState {
         case .complete:
-            nil
+            EmptyView()
         case .pending:
             ReviewNoticeRow(
                 symbol: "clock",
                 title: "Not analysed yet",
-                detail: "Evaluations and moments appear once the post-game pass runs."
+                detail: "Evaluations and moments appear once the post-game pass runs. "
+                    + "It pauses whenever Rookly is in the background.",
+                actionTitle: "Analyse now",
+                action: startAnalysis
             )
         case .running:
             ReviewNoticeRow(
                 symbol: nil,
                 title: "Analysing",
-                detail: "The curve fills in as the engine walks the game.",
+                detail: "The curve fills in as the engine walks the game. "
+                    + "Keep Rookly open — the pass pauses in the background.",
                 showsProgress: true
             )
         case .failed:
             ReviewNoticeRow(
                 symbol: "exclamationmark.triangle",
                 title: "Analysis failed",
-                detail: "The moves are here; the evaluation is not."
+                detail: "The moves are here; the evaluation is not. "
+                    + "Nothing retries this on its own.",
+                actionTitle: "Try the analysis again",
+                action: startAnalysis
             )
+        }
+    }
+
+    /// Runs the pass for this game, now.
+    ///
+    /// Addressed at the game rather than at the queue, deliberately: the queue
+    /// only ever selects rows still marked `pending`, so a failed game — which
+    /// is written `failed` and never looked at again — could not be recovered by
+    /// draining. One transient engine hiccup otherwise removes that game from
+    /// the training loop permanently.
+    private func startAnalysis() {
+        guard let engineService = appModel?.engineService else { return }
+        let gameID = model.gameID
+        Task {
+            guard let service = AnalysisService.shared(engineService: engineService) else { return }
+            await service.analyze(gameID: gameID)
+            await model.reload()
         }
     }
 }
 
 // MARK: - Support views
 
+/// The screen's own shape, drawn while the game is read off disk.
+///
+/// Board, the scrubber's 94pt slot, three pills — the same geometry the real
+/// content lands in, so nothing moves when it arrives.
+private struct ReviewSkeleton: View {
+    var body: some View {
+        GeometryReader { proxy in
+            VStack(spacing: 12) {
+                let side = min(proxy.size.width - 24, proxy.size.height * 0.44)
+
+                SkeletonView(width: side, height: side, cornerRadius: CornerRadius.card)
+
+                SkeletonView(height: 94, cornerRadius: CornerRadius.card)
+                    .padding(.horizontal, 16)
+
+                HStack(alignment: .top, spacing: 10) {
+                    ForEach(0..<3, id: \.self) { _ in
+                        SkeletonView(height: 78, cornerRadius: CornerRadius.card)
+                    }
+                }
+                .padding(.horizontal, 16)
+
+                Spacer(minLength: 0)
+            }
+            .frame(maxWidth: .infinity)
+            .padding(.top, 8)
+        }
+        .accessibilityLabel(Text("Loading this game"))
+    }
+}
+
 /// One number, its label, and the grey chip that puts it in context.
 private struct ReviewStatPill: View {
     let label: String
     /// `nil` until analysis has produced it.
     let value: String?
+    /// What the number counts, for a label that is not self-defining.
+    var caption: String? = nil
     var comparison: ReviewStatComparison? = nil
 
     var body: some View {
@@ -531,6 +809,13 @@ private struct ReviewStatPill: View {
                 // moves when analysis lands.
                 SkeletonView(width: 52, height: 26)
                     .padding(.vertical, 2)
+            }
+
+            if let caption {
+                Text(caption)
+                    .typeRole(.caption, appliesForeground: false)
+                    .foregroundStyle(.tertiary)
+                    .fixedSize(horizontal: false, vertical: true)
             }
 
             if let comparison {
@@ -561,6 +846,7 @@ private struct ReviewStatPill: View {
     /// One phrase, not a number followed by two fragments.
     private var accessibilityText: String {
         var text = "\(label): \(value ?? "still being worked out")"
+        if let caption { text += ", \(caption)" }
         if let comparison { text += ", \(comparison.text)" }
         return text
     }
@@ -573,9 +859,17 @@ struct ReviewStatComparison: Equatable {
     /// The chip's words, e.g. `"your avg 79%"`.
     var text: String
 
-    /// A dead band, because a caret on a 0.2-point difference claims a trend
-    /// that does not exist.
-    static let tolerance = 0.5
+    /// A dead band, because a caret claims a trend and most differences are not
+    /// one.
+    ///
+    /// Three points rather than the half-point it used to be. The accuracy it
+    /// compares is computed from a search of roughly a third of a second a ply,
+    /// and a search that shallow disagrees with itself by more than half a point
+    /// between runs — so a caret at 0.5 was mostly drawing the engine's own
+    /// noise as progress. Three points is not a measured noise floor, which is
+    /// why it is not called one; it is the smallest gap this screen is willing
+    /// to call a direction.
+    static let tolerance = 3.0
 
     var symbolName: String {
         if value - reference > Self.tolerance { return "arrowtriangle.up.fill" }
@@ -628,25 +922,46 @@ private struct ReviewNoticeRow: View {
     var title: String
     var detail: String
     var showsProgress = false
+    /// Present only where there is something the reader can actually do; a
+    /// status line with no action is the generic error the craft doc argues
+    /// against.
+    var actionTitle: String?
+    var action: (() -> Void)?
 
     var body: some View {
-        HStack(spacing: 10) {
-            if showsProgress {
-                ProgressView().controlSize(.small)
-            } else if let symbol {
-                Image(systemName: symbol)
-                    .foregroundStyle(.secondary)
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(spacing: 10) {
+                if showsProgress {
+                    ProgressView().controlSize(.small)
+                } else if let symbol {
+                    Image(systemName: symbol)
+                        .foregroundStyle(.secondary)
+                }
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(title)
+                        .typeRole(.headline)
+                    Text(detail)
+                        .typeRole(.caption)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                Spacer(minLength: 0)
             }
-            VStack(alignment: .leading, spacing: 2) {
-                Text(title)
-                    .typeRole(.headline)
-                Text(detail)
-                    .typeRole(.caption)
-                    .fixedSize(horizontal: false, vertical: true)
+
+            if let actionTitle, let action {
+                Button(actionTitle) { action() }
+                    .typeRole(.caption, appliesForeground: false)
+                    .foregroundStyle(Palette.accent.dynamic)
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 7)
+                    .background(
+                        RoundedRectangle(cornerRadius: CornerRadius.chip, style: .continuous)
+                            .strokeBorder(Palette.accent.dynamic.opacity(0.45), lineWidth: 2)
+                    )
+                    .buttonStyle(.pressable)
             }
-            Spacer(minLength: 0)
         }
         .padding(12)
+        .frame(maxWidth: .infinity, alignment: .leading)
         .elevation(.raised, cornerRadius: CornerRadius.card)
     }
 }

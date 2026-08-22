@@ -23,6 +23,13 @@ struct ReviewMoveList: View {
     /// The ply the board is standing on.
     let currentPly: Int?
     let style: BoardStyle
+    /// Whether the engine's judgement of each move may be shown.
+    ///
+    /// False while the self-check is still asking. "Where did you lose
+    /// material?" is answered in one tap by expanding this table and reading
+    /// the Blunder chip, and a quiz the user learns to shortcut in their first
+    /// game removes the most valuable mechanic on the screen.
+    var showsJudgement: Bool = true
     var onSelect: (Int) -> Void
 
     @Environment(\.colorScheme) private var colorScheme
@@ -37,11 +44,11 @@ struct ReviewMoveList: View {
                     .typeRole(.caption)
             } else {
                 VStack(spacing: 0) {
+                    headerRow
                     ForEach(Array(rows.enumerated()), id: \.element.id) { offset, row in
-                        if offset > 0 {
-                            Divider()
-                                .padding(.leading, 14)
-                        }
+                        Divider()
+                            .padding(.leading, 14)
+                            .opacity(offset == 0 ? 0.6 : 1)
                         rowView(row)
                     }
                 }
@@ -49,8 +56,58 @@ struct ReviewMoveList: View {
                     RoundedRectangle(cornerRadius: 16, style: .continuous)
                         .fill(.quaternary)
                 )
+
+                legend
             }
         }
+    }
+
+    /// Names the columns.
+    ///
+    /// Without it the table puts a White-relative evaluation next to a
+    /// mover-relative cost with nothing to say they are measured from different
+    /// sides, which is how a player of Black ends up reading their own good move
+    /// as a number going the wrong way.
+    private var headerRow: some View {
+        HStack(spacing: 10) {
+            Text("Move")
+                .frame(width: 96, alignment: .leading)
+            Spacer(minLength: 0)
+            Text("After")
+                .frame(width: 52, alignment: .trailing)
+            if showsJudgement {
+                Text("Cost")
+                    .frame(width: 44, alignment: .trailing)
+            }
+        }
+        .typeRole(.label)
+        .padding(.horizontal, 14)
+        .padding(.vertical, 7)
+        .accessibilityHidden(true)
+    }
+
+    private var legend: some View {
+        Text(legendText)
+            .typeRole(.caption)
+            .fixedSize(horizontal: false, vertical: true)
+    }
+
+    private var legendText: String {
+        var text = "After: the position once the move is played, always from White's side."
+        if showsJudgement {
+            text += " Cost: what the move cost whoever played it, in pawns."
+            // A forced mate at one end of a move has no pawn value — inverting
+            // the stored curve there returns the clamp, about fourteen pawns —
+            // so the cell says "mate" instead of printing a number that means
+            // nothing. Explained only when one is actually on screen.
+            if rows.contains(where: { $0.loss == ReviewMoveCost.allowedMate.label }) {
+                text += " mate: the move turned a forced mate on or off."
+            }
+        }
+        if rows.contains(where: { $0.evalAfter?.hasPrefix("#") == true }) {
+            text += " #4 W: White mates in four."
+        }
+        return text
     }
 
     @ViewBuilder
@@ -63,7 +120,7 @@ struct ReviewMoveList: View {
                 .monospacedDigit()
                 .frame(width: 96, alignment: .leading)
 
-            if let chip = row.chip {
+            if showsJudgement, let chip = row.chip {
                 ClassificationBadge(kind: chip, size: .regular, style: style)
             }
 
@@ -74,10 +131,12 @@ struct ReviewMoveList: View {
                 .foregroundStyle(row.evalAfter == nil ? .tertiary : .primary)
                 .frame(width: 52, alignment: .trailing)
 
-            Text(row.loss ?? "")
-                .font(.caption.monospacedDigit())
-                .foregroundStyle(lossColor(for: row))
-                .frame(width: 44, alignment: .trailing)
+            if showsJudgement {
+                Text(row.loss ?? "")
+                    .font(.caption.monospacedDigit())
+                    .foregroundStyle(lossColor(for: row))
+                    .frame(width: 44, alignment: .trailing)
+            }
         }
         .padding(.horizontal, 14)
         .padding(.vertical, 9)

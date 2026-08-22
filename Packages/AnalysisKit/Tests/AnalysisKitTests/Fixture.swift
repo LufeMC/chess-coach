@@ -91,17 +91,23 @@ enum Fixture {
 
     /// A moment with only the fields the selector reads, so selection tests do
     /// not have to invent an engine result.
+    ///
+    /// - parameter deltaEP: What the move cost. Separate from `total` on
+    ///   purpose: `total` is the selection score, and the two disagreeing is
+    ///   exactly the case the game verdict has to get right.
     static func moment(
         ply: Int,
         causeTag: CauseTag,
         total: Double,
+        deltaEP: Double = 0.1,
+        phase: Phase = .middlegame,
         kind: MomentKind = .mistake
     ) -> Moment {
         // `total` is severity × learnability × relevance; keep the other two at 1
         // so the caller controls the product directly.
         Moment(
             ply: ply,
-            phase: .middlegame,
+            phase: phase,
             fenBefore: Position.standard.fen,
             sideToMove: .white,
             playedSAN: "e4",
@@ -112,8 +118,8 @@ enum Fixture {
             cpAfter: -100,
             winPctBefore: 50,
             winPctAfter: 40,
-            deltaEP: 0.1,
-            judgment: .inaccuracy,
+            deltaEP: deltaEP,
+            judgment: EvalMath.judgment(deltaEP: deltaEP),
             criticalityGap: 0.15,
             detector: nil,
             causeTag: causeTag,

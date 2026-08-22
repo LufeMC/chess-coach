@@ -23,7 +23,29 @@ final class ProfileModel {
     /// Non-`nil` when the load failed. Surfaced as a line of text rather than an
     /// alert: a profile that cannot load is not an emergency, and an alert
     /// blocks the user out of a screen that still has a usable ladder on it.
+    ///
+    /// One sentence the user can act on, never the thrown value. A caption
+    /// reading `SQLiteError(resultCode: 11)` tells them nothing they can do and
+    /// costs the rest of the screen its credibility.
     private(set) var loadError: String?
+
+    /// Whether the last load could not read the stored history.
+    ///
+    /// Kept apart from "there is nothing yet" because the two produce the same
+    /// empty screen and only one of them is the truth. A user with forty games
+    /// behind a failed read must not be told they have never played.
+    private(set) var loadFailed = false
+
+    /// True until the first load finishes.
+    ///
+    /// The first frame renders ``ProfileSnapshot/empty()`` — rung 1, every skill
+    /// unmeasured — while `load()` replays up to twenty games behind it. For a
+    /// player calibrated onto rung 3 that is the app appearing to forget his
+    /// placement once per launch. Saying "measuring" for the second it takes is
+    /// both true and not a claim about his chess.
+    var isMeasuring: Bool { isLoading && !hasLoaded }
+
+    private var hasLoaded = false
 
     var metric: ProfileChartMetric = .rating {
         didSet { if metric != oldValue { rangeOffset = 0 } }
@@ -62,7 +84,13 @@ final class ProfileModel {
     ) {
         self.loader = loader
         self.metricsService = metricsService
-        self.ladder = ladder
+        // Criteria this build has no detector for are dropped before the ladder
+        // is ever drawn, rather than rendered as rows that wait forever. The
+        // set lives with the computer that would produce them; the pure logic
+        // layer takes it as data.
+        self.ladder = CurriculumLadderState.measurable(
+            ladder, unsupported: MetricComputer.unsupportedMetrics
+        )
     }
 
     /// Preview/test seam: a model with a fixed snapshot and no database.
@@ -71,6 +99,7 @@ final class ProfileModel {
         self.metricsService = nil
         self.ladder = Curriculum.default
         self.snapshot = snapshot
+        self.hasLoaded = true
     }
 
     static func defaultMetricsService() -> MetricsService? {
@@ -96,7 +125,9 @@ final class ProfileModel {
 
     /// Whether the chart has enough plotted points to be worth drawing.
     var seriesState: ProfileMeasurementState {
-        .forSeries(pointCount: series.points.count, noun: metric.pointNoun)
+        if isMeasuring { return .measuring }
+        if loadFailed { return .unreadable }
+        return .forSeries(pointCount: series.points.count, noun: metric.pointNoun)
     }
 
     /// The sentence under the headline number, saying what the chart means.
@@ -122,7 +153,13 @@ final class ProfileModel {
     var leakTrends: [String: LeakTrend] {
         var trends: [String: LeakTrend] = [:]
         for (tag, occurrences) in snapshot.occurrences {
-            trends[tag] = LeakTrend.make(from: occurrences, now: snapshot.generatedAt)
+            trends[tag] = LeakTrend.make(
+                from: occurrences,
+                now: snapshot.generatedAt,
+                // The window the loader actually read, so the sparkline's span
+                // is evidence rather than a nominal ninety days it never had.
+                observedSince: snapshot.occurrenceWindowStart
+            )
         }
         return trends
     }
@@ -139,7 +176,10 @@ final class ProfileModel {
 
     func load() async {
         isLoading = true
-        defer { isLoading = false }
+        defer {
+            isLoading = false
+            hasLoaded = true
+        }
 
         // Recompute first, then read: the ladder and the leak table must
         // describe the same instant as the numbers behind them.
@@ -149,10 +189,12 @@ final class ProfileModel {
         let chart: ProfileChartData
         do {
             chart = try await loader?.load(now: now) ?? .empty
-            loadError = metricsService?.lastError
+            loadFailed = false
+            loadError = metricsService?.lastError.map { _ in Self.loadErrorMessage }
         } catch {
             chart = .empty
-            loadError = String(describing: error)
+            loadFailed = true
+            loadError = Self.loadErrorMessage
         }
 
         // A pull-to-refresh must not close the section the user just opened —
@@ -174,8 +216,10 @@ final class ProfileModel {
             leaks: curriculum.leaks,
             series: chart.series,
             occurrences: chart.occurrences,
+            occurrenceWindowStart: chart.occurrenceWindowStart,
             leakWindowGames: chart.leakWindowGames,
             gamesAvailable: chart.gamesAvailable,
+            historyUnreadable: loadFailed,
             ladder: ladder,
             now: now
         )
@@ -200,4 +244,12 @@ final class ProfileModel {
 
     /// Whether the user has opened or closed a section themselves.
     private var hasToggledRung = false
+
+    /// The one thing worth saying about a failed read.
+    ///
+    /// Names the consequence and the retry, and says what is *not* wrong: the
+    /// games are still on disk, and a user who thinks a failed chart means lost
+    /// history has been told something false by an error message.
+    static let loadErrorMessage =
+        "Couldn't read your history — pull down to retry. Your games are safe; the chart just can't reach them."
 }

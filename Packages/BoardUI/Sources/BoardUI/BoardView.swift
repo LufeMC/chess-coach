@@ -30,17 +30,22 @@ public struct BoardView: View {
   private let interaction: BoardInteraction
   private let highlights: [SquareHighlight]
   private let arrows: [BoardArrow]
+  private let materialPerspective: Piece.Color?
   private let style: BoardStyle
 
   @State private var model: BoardModel
   @Environment(\.colorScheme) private var colorScheme
 
+  /// - parameter materialPerspective: Whose side the capture flourish counts
+  ///   from, and an explicit opt in to the flourish on a board the caller drives
+  ///   rather than the user. See ``emitsMaterialFeedback``.
   public init(
     position: Position,
     orientation: Piece.Color = .white,
     interaction: BoardInteraction = .locked,
     highlights: [SquareHighlight] = [],
     arrows: [BoardArrow] = [],
+    materialPerspective: Piece.Color? = nil,
     style: BoardStyle = .default
   ) {
     self.position = position
@@ -48,6 +53,7 @@ public struct BoardView: View {
     self.interaction = interaction
     self.highlights = highlights
     self.arrows = arrows
+    self.materialPerspective = materialPerspective
     self.style = style
     _model = State(initialValue: BoardModel(position: position, orientation: orientation))
   }
@@ -64,8 +70,12 @@ public struct BoardView: View {
     // The board is always square; letting it stretch would put the pieces on an
     // oval grid, and every drop target would be wrong.
     .aspectRatio(1, contentMode: .fit)
-    .onAppear { model.emitsMaterialFeedback = emitsMaterialFeedback }
+    .onAppear {
+      model.emitsMaterialFeedback = emitsMaterialFeedback
+      model.materialPerspective = materialPerspective
+    }
     .onChange(of: emitsMaterialFeedback) { _, newValue in model.emitsMaterialFeedback = newValue }
+    .onChange(of: materialPerspective) { _, newValue in model.materialPerspective = newValue }
     .onChange(of: position) { _, newValue in model.update(position: newValue) }
     .onChange(of: orientation) { _, newValue in model.orientation = newValue }
     .modifier(BoardFeedback(model: model))
@@ -174,13 +184,25 @@ public struct BoardView: View {
 
   /// Whether captures on this board announce what they were worth.
   ///
-  /// Two gates, and both have to open. The style flag is the caller's switch;
-  /// the interaction mode is the board's own, because a review scrubber and a
-  /// 150pt filmstrip thumbnail both replay captures constantly and neither
-  /// wants rings thrown across it every time the reader drags the scrubber.
-  /// Material feedback is for a board somebody is playing on.
+  /// The style flag is the caller's switch, and it has to be on. The second half
+  /// is the board's own guess at whether anyone is playing here, because a
+  /// review scrubber and a 150pt filmstrip thumbnail both replay captures
+  /// constantly and neither wants rings thrown across it every time the reader
+  /// drags the scrubber.
+  ///
+  /// Guessing from `interaction.allowsMoves` alone was wrong in one important
+  /// direction: a playing screen hands the board `.replay` while the *opponent*
+  /// is to move, so every capture the opponent made was silently skipped and
+  /// only the user's own gains were ever marked. That inverts the pedagogy —
+  /// `MaterialDelta` calls the red `−1` on the reply "the actual lesson" — and
+  /// counting only your winnings is the habit the flourish exists to break.
+  ///
+  /// So naming a `materialPerspective` also opens the gate: a caller that knows
+  /// whose material to count is by definition a board somebody is playing on,
+  /// and it is the same caller that has to name it to get the sign right across
+  /// a board flip. Boards that name nothing keep the old behaviour exactly.
   private var emitsMaterialFeedback: Bool {
-    style.showsMaterialFeedback && interaction.allowsMoves
+    style.showsMaterialFeedback && (interaction.allowsMoves || materialPerspective != nil)
   }
 
   @ViewBuilder
@@ -301,6 +323,50 @@ public struct BoardView: View {
 
 // MARK: - Haptics
 
+/// Whether the board may produce haptics.
+///
+/// The app owns this switch, not the package: the settings screen has a
+/// Haptics toggle whose caption names the board's own feedbacks by hand, and a
+/// toggle that reached the tab bar and the clock but not the board was the
+/// screen contradicting itself. Defaults to `true` so a board dropped into a
+/// preview, or into a host that has no such setting, behaves as it always did.
+public struct BoardHapticsEnabledKey: EnvironmentKey {
+  public static let defaultValue = true
+}
+
+extension EnvironmentValues {
+  public var boardHapticsEnabled: Bool {
+    get { self[BoardHapticsEnabledKey.self] }
+    set { self[BoardHapticsEnabledKey.self] = newValue }
+  }
+}
+
+/// The board events worth a buzz, and what each one feels like.
+///
+/// Split out of the modifier so the gate can be asserted on in a test: a board
+/// that quietly stopped honouring the setting would otherwise only be findable
+/// by holding the phone with haptics off and playing a game.
+enum BoardHaptic: CaseIterable {
+  case lift
+  case move
+  case rejection
+  case capture
+  case check
+
+  /// The feedback to play, or `nil` — which `sensoryFeedback` reads as "play
+  /// nothing" — when the app has haptics switched off.
+  func feedback(enabled: Bool) -> SensoryFeedback? {
+    guard enabled else { return nil }
+    switch self {
+    case .lift: return .impact(weight: .light, intensity: 0.5)
+    case .move: return .impact(weight: .medium, intensity: 0.7)
+    case .rejection: return .impact(flexibility: .rigid, intensity: 0.8)
+    case .capture: return .impact(weight: .heavy, intensity: 0.9)
+    case .check: return .warning
+    }
+  }
+}
+
 /// Sensory feedback, isolated so `BoardView.body` does not sprout `#if os` forks.
 ///
 /// The budget is the design. A 40-move game that buzzes twice a move feels
@@ -322,14 +388,19 @@ private struct BoardFeedback: ViewModifier {
 
   let model: BoardModel
 
+  /// Read rather than passed in, so every board in the app is gated by the one
+  /// value the app sets at the root — including the boards inside thumbnails
+  /// and drills that no screen thinks of as "the board".
+  @Environment(\.boardHapticsEnabled) private var isEnabled
+
   func body(content: Content) -> some View {
     #if os(iOS)
       content
-        .sensoryFeedback(.impact(weight: .light, intensity: 0.5), trigger: model.liftTicks)
-        .sensoryFeedback(.impact(weight: .medium, intensity: 0.7), trigger: model.moveTicks)
-        .sensoryFeedback(.impact(flexibility: .rigid, intensity: 0.8), trigger: model.rejectionTicks)
-        .sensoryFeedback(.impact(weight: .heavy, intensity: 0.9), trigger: model.captureTicks)
-        .sensoryFeedback(.warning, trigger: model.checkTicks)
+        .sensoryFeedback(trigger: model.liftTicks) { _, _ in BoardHaptic.lift.feedback(enabled: isEnabled) }
+        .sensoryFeedback(trigger: model.moveTicks) { _, _ in BoardHaptic.move.feedback(enabled: isEnabled) }
+        .sensoryFeedback(trigger: model.rejectionTicks) { _, _ in BoardHaptic.rejection.feedback(enabled: isEnabled) }
+        .sensoryFeedback(trigger: model.captureTicks) { _, _ in BoardHaptic.capture.feedback(enabled: isEnabled) }
+        .sensoryFeedback(trigger: model.checkTicks) { _, _ in BoardHaptic.check.feedback(enabled: isEnabled) }
     #else
       content
     #endif

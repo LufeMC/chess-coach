@@ -336,8 +336,28 @@ extension MetricsService {
         // Load exactly as far back as the widest window the ladder names — no
         // further. A user with three hundred games does not want three hundred
         // board replays to see their progress ring.
+        //
+        // Only games the analysis pass finished. Every rate on Today and Profile
+        // is `causes / userMoves`, and the two halves come from different
+        // places: `userMoves` is counted off the move list, which exists from
+        // the moment the game is saved, while the causes come from moments,
+        // which only exist after analysis. A pending, failed or half-finished
+        // game therefore contributes a full denominator and no numerator, and
+        // every leak rate is pulled toward zero by exactly the games nobody has
+        // looked at yet — so a backlog reads as improvement, and the curriculum
+        // promotes on it.
+        //
+        // Dropping them costs nothing real: an unanalysed game has no moments
+        // and no evals, so it was never contributing evidence, only dilution.
+        // The window is taken *after* filtering so "last 20 games" means twenty
+        // games that were actually measured.
         let horizon = maximumWindowGames(in: ladder)
-        let recent = try games.recent(limit: horizon)
+        let recent = Array(
+            try games
+                .recent(limit: horizon * Self.unanalysedGameAllowance)
+                .filter { $0.analysis == .complete }
+                .prefix(horizon)
+        )
 
         var analysed: [AnalysedGame] = []
         analysed.reserveCapacity(recent.count)
@@ -526,6 +546,17 @@ extension MetricsService {
             daysAtRung: daysAtRung
         )
     }
+
+    /// How much deeper than the window to read, so the window can still be
+    /// filled once unanalysed games are dropped.
+    ///
+    /// A bound rather than an unlimited scan: the analysis queue drains in the
+    /// background, so a handful of recent games being unanalysed is normal and a
+    /// long backlog is not. Reading three windows' worth covers the normal case
+    /// and refuses to replay a user's whole history for the pathological one —
+    /// where the honest answer is a smaller sample, which the sample-size
+    /// disclosures on Profile already say out loud.
+    nonisolated static let unanalysedGameAllowance = 3
 
     /// The widest `lastGames` window the ladder asks for.
     nonisolated static func maximumWindowGames(in ladder: [Rung]) -> Int {

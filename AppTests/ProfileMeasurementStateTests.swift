@@ -154,22 +154,45 @@ struct ProfileMeasurementStateTests {
 @Suite("Metric formatting and window round-trip")
 struct ProfileNumbersTests {
 
-    @Test("Values format at a precision that distinguishes them from a threshold")
+    @Test("Each style writes its values in the unit the reader expects")
     func formatting() {
-        #expect(formatMetricValue(0.8) == "0.8")
-        #expect(formatMetricValue(0.55) == "0.55")
-        #expect(formatMetricValue(1.0) == "1.0")
-        #expect(formatMetricValue(4) == "4.0")
-        #expect(formatMetricValue(12) == "12")
-        #expect(formatMetricValue(1350) == "1350")
-        #expect(formatMetricValue(0) == "0.0")
+        #expect(MetricPresentation.Style.decimal.format(0.8) == "0.8")
+        #expect(MetricPresentation.Style.decimal.format(0.55) == "0.55")
+        #expect(MetricPresentation.Style.decimal.format(1.0) == "1.0")
+        #expect(MetricPresentation.Style.rate.format(0.55) == "55%")
+        #expect(MetricPresentation.Style.percentage.format(85) == "85%")
+        #expect(MetricPresentation.Style.count.format(1350) == "1350")
     }
 
-    @Test("Comparison symbols match the domain's three forms")
-    func symbols() {
-        #expect(MetricComparison.lessThan.symbol == "<")
-        #expect(MetricComparison.lessThanOrEqual.symbol == "≤")
-        #expect(MetricComparison.greaterThanOrEqual.symbol == "≥")
+    @Test("A metric names itself, its unit and what one sample of it is")
+    func presentation() {
+        let hanging = MetricKey.hangingPiecePer100.presentation
+        #expect(hanging.formatted(0.8) == "0.8 per 100 moves")
+        #expect(hanging.sampleNoun == "games")
+
+        // The gates that are not measured by playing another game are exactly
+        // the ones the ladder used to mislabel.
+        #expect(MetricKey.criticalMomentHitRate.presentation.sampleNoun == "critical moments")
+        #expect(MetricKey.kqkDrillCleanStreak.presentation.sampleSource == "Train › Endgames")
+        #expect(
+            MetricKey.puzzleThemeSuccess(.backRankMate, ratingFloor: 1200).presentation.name
+                == "Back-rank mates at 1200+"
+        )
+    }
+
+    @Test("A comparison states the target as something to reach")
+    func comparisons() {
+        #expect(MetricComparison.lessThan.need == "need under")
+        #expect(MetricComparison.lessThanOrEqual.need == "need at most")
+        #expect(MetricComparison.greaterThanOrEqual.need == "need at least")
+    }
+
+    @Test("An unreadable history never asserts that nothing was played")
+    func unreadableIsNotEmpty() {
+        #expect(ProfileMeasurementState.unreadable.message?.contains("retry") == true)
+        #expect(ProfileMeasurementState.unreadable != .nothingYet(noun: "analysed games"))
+        #expect(!ProfileMeasurementState.unreadable.isMeasured)
+        #expect(ProfileMeasurementState.measuring.message == "Measuring your recent games…")
     }
 
     @Test("Every window round-trips through its stored string")

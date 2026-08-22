@@ -33,7 +33,14 @@ struct CalibrationHeader: View {
 
     init(progress: CalibrationProgress, step: CalibrationStep? = nil) {
         self.progress = progress
-        self.step = step ?? progress.phase.step
+        let resolved = step ?? progress.phase.step
+        self.step = resolved
+        // Open on the question and closed thereafter. A 9pt tertiary chevron
+        // beside a progress label is not read as tappable by anyone who is not
+        // looking for it, so on the one screen with room for the list the list
+        // is simply there — and the line it carries ("nothing here is practice")
+        // reaches the nervous first-run user it was written for.
+        _isShowingSteps = State(initialValue: resolved == .question)
     }
 
     var body: some View {

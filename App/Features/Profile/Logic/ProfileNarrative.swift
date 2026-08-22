@@ -105,7 +105,7 @@ enum ProfileNarrative {
 
         let missing = minimumPointsToInterpret - series.points.count
         if missing > 0 {
-            let noun = missing == 1 ? metric.pointNounSingular : metric.pointNoun
+            let noun = missing == 1 ? metric.trendNounSingular : metric.trendNoun
             return "\(missing) more \(noun) before this is a trend."
         }
 
@@ -168,8 +168,13 @@ enum ProfileNarrative {
     /// What the most recent period says about the whole window.
     ///
     /// The two facts are deliberately combined into one sentence rather than
-    /// listed: "up 62, last stretch down 7%" is two numbers the reader has to
+    /// listed: "up 62, last period down 7%" is two numbers the reader has to
     /// reconcile, and reconciling them is the sentence's job.
+    ///
+    /// "Period", not "stretch". The bars on the plot are period averages and the
+    /// caption under them says so, which makes the sentence and the picture the
+    /// same object; "stretch" named nothing on screen and left the reader to
+    /// work out that the four labelled bars were what it meant.
     static func recentStretch(delta: Double, overall: Direction) -> String {
         let percent = (delta * 100).rounded()
         let recent = Direction.of(percent, threshold: 1)
@@ -177,23 +182,26 @@ enum ProfileNarrative {
 
         switch (overall, recent) {
         case (.up, .up):
-            return "The most recent stretch sits \(size) above the one before it, so the climb is current rather than history."
+            return "The latest period averages \(size) above the one before it, so the climb is current rather than history."
         case (.up, .down):
-            return "The most recent stretch sits \(size) below the one before it, so most of that gain is older than it looks."
+            return "The latest period averages \(size) below the one before it, so most of that gain is older than it looks."
         case (.up, .level):
-            return "The most recent stretch sits level with the one before it, so the climb has paused rather than reversed."
+            return "The latest period averages level with the one before it, so the climb has paused rather than reversed."
         case (.down, .up):
-            return "The most recent stretch sits \(size) above the one before it, so the fall has already turned."
+            return "The latest period averages \(size) above the one before it, so the fall has already turned."
         case (.down, .down):
-            return "The most recent stretch sits \(size) below the one before it, so it has not turned yet."
+            return "The latest period averages \(size) below the one before it, so it has not turned yet."
         case (.down, .level):
-            return "The most recent stretch sits level with the one before it, so the fall has stopped."
+            return "The latest period averages level with the one before it, so the fall has stopped."
         case (.level, .up):
-            return "The most recent stretch sits \(size) above the one before it, so the flat line is ending on the up side."
+            return "The latest period averages \(size) above the one before it, so the flat line is ending on the up side."
         case (.level, .down):
-            return "The most recent stretch sits \(size) below the one before it, so the flat line is ending on the down side."
+            return "The latest period averages \(size) below the one before it, so the flat line is ending on the down side."
         case (.level, .level):
-            return "Each stretch sits within a point or two of the last — a plateau rather than a swing."
+            // Not "a point or two": the level band is a 1% delta, which on a
+            // 1200 rating is a dozen points and on an accuracy percentage is
+            // not points at all.
+            return "Each period averages within 1% of the last — a plateau rather than a swing."
         }
     }
 }

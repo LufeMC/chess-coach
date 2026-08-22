@@ -58,6 +58,23 @@ struct ResultBanner: View {
     /// board that jumps six points when the banner appears undoes the work.
     static let height: CGFloat = 92
 
+    /// The longest message the copy builders are allowed to produce.
+    ///
+    /// Published so that when two clauses compete for the same lines it is a
+    /// *copy* decision which one is dropped, rather than the layout deciding by
+    /// cutting one of them off mid-word. The competition is real: a miss can
+    /// now carry both the answer's own mechanism and the refutation of the move
+    /// that was played — see `PuzzleSessionModel.explainWithEngine`.
+    ///
+    /// The number is the length of the longest sentence the app already builds,
+    /// not a measurement of four lines: four lines of 17pt body text in the
+    /// width left over after the glyph, the button and the padding is nearer
+    /// 115, and the longest stored-line explanation already runs past that.
+    /// That overflow predates this constant and is a copy problem to solve in
+    /// the clauses themselves; what this stops is the refutation making it
+    /// worse.
+    static let messageBudget = 140
+
     let verdict: PuzzleSessionModel.Verdict
     let continueTitle: String
     let onContinue: () -> Void
@@ -82,8 +99,14 @@ struct ResultBanner: View {
                 // the one failure this component cannot afford: the sentence
                 // is the entire feature. The copy above was shortened at the
                 // same time, so four lines is now headroom rather than the
-                // normal case — the longest message the app can build is 115
-                // characters and the median is 71.
+                // normal case — the median message is 71 characters.
+                //
+                // The ceiling is held at ``messageBudget`` by the builders
+                // rather than by this modifier. A miss can now carry both the
+                // answer's mechanism and the refutation of the move that was
+                // played, and those two together would run past four lines —
+                // so the model drops one rather than letting the layout cut
+                // one of them off mid-clause.
                 //
                 // The symmetry rule is untouched: both outcomes reserve four,
                 // so the banner is still a fixed height and the button still

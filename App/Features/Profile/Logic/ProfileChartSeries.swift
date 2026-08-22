@@ -44,14 +44,29 @@ enum ProfileChartMetric: String, CaseIterable, Identifiable, Sendable, Hashable 
         }
     }
 
+    /// What the "not a trend yet" note counts.
+    ///
+    /// Not ``pointNoun``. The rating series is stored one sample per day the
+    /// value stood still plus one per time it moved, so three games in an
+    /// evening add one point and three days away add three. "1 more game" there
+    /// is a promise the data cannot keep — the user plays one and the note does
+    /// not move. Accuracy genuinely is one point per game and keeps its noun.
+    var trendNoun: String {
+        switch self {
+        case .rating: return "days of play"
+        case .accuracy: return "games"
+        case .puzzles: return "days of puzzles"
+        }
+    }
+
     /// The same noun for a count of one. Spelled out rather than derived by
     /// trimming an `s`, so an irregular plural added later cannot break it
     /// silently.
-    var pointNounSingular: String {
+    var trendNounSingular: String {
         switch self {
-        case .rating: return "game"
+        case .rating: return "day of play"
         case .accuracy: return "game"
-        case .puzzles: return "session"
+        case .puzzles: return "day of puzzles"
         }
     }
 
@@ -80,11 +95,32 @@ enum ProfileChartMetric: String, CaseIterable, Identifiable, Sendable, Hashable 
     ///
     /// Split off the value because a 44pt `%` is a unit shouting louder than
     /// the measurement it qualifies.
+    ///
+    /// The playing rating is named for the app because it is the app's own
+    /// scale. A club player with a real rating elsewhere otherwise reads "1187
+    /// rating" as a claim about the number they already have, and the one
+    /// sentence that ever framed it lives on the calibration screen they see
+    /// once.
     var unit: String {
         switch self {
-        case .rating: return "rating"
+        case .rating: return "Rookly rating"
         case .accuracy: return "% accuracy"
         case .puzzles: return "puzzle rating"
+        }
+    }
+
+    /// The one line that says what scale the number is on.
+    ///
+    /// `nil` where the unit already carries it: nobody mistakes an accuracy
+    /// percentage for a rating they hold somewhere else.
+    var scaleNote: String? {
+        switch self {
+        case .rating:
+            return "Measured against Rookly's engine opponents — not your club or online rating."
+        case .puzzles:
+            return "From the puzzles you solve here. It is not a game rating."
+        case .accuracy:
+            return nil
         }
     }
 
@@ -222,11 +258,13 @@ struct ProfileChartSeries: Sendable, Hashable {
 
     /// The middle 80% of the plotted values.
     ///
-    /// Deliberately descriptive rather than normative. "Typical" here means
-    /// "where *your* values usually sit in this window", computed from what is
-    /// on screen — not a population norm, because no population data exists in
-    /// this app and inventing one would be the single most misleading number
-    /// the screen could carry.
+    /// Deliberately descriptive rather than normative: where *your* values
+    /// usually sit in this window, computed from what is on screen — not a
+    /// population norm, because no population data exists in this app and
+    /// inventing one would be the single most misleading number the screen
+    /// could carry. Labelled "Your range" for that reason; "Typical" beside a
+    /// user's own figure invites exactly the comparison against other players
+    /// that this range refuses to make.
     var typicalRange: ClosedRange<Double>?
 
     /// Most recent point in the window: the headline value and its date.

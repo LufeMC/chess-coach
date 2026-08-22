@@ -3,9 +3,7 @@
 //  ChessCoach
 //
 
-import BoardUI
-import ChessKit
-import SwiftUI
+import Foundation
 import TrainingCore
 
 /// How a drill family presents itself on the Train screen.
@@ -13,6 +11,16 @@ import TrainingCore
 /// The catalogue in `EndgameDrills.swift` is the service's: it owns the
 /// positions, the move budgets and the pass criteria. This is only the wording,
 /// which belongs with the screen that shows it.
+///
+/// ## There is no card here any more
+///
+/// The file is named for a 2-up grid of drill tiles that the Train tab no longer
+/// has: drills arrive inside a set, chosen by `ConceptScheduler`, rather than as
+/// a second thing to pick from a shelf. The tile, its board thumbnail and its
+/// mastery ring were left behind compiling and unreachable, which is worse than
+/// deleting them — dead UI reads as a surface that exists and reviews as one
+/// that is merely broken. The mastery *number* did not go with them: it is the
+/// record on the "Your training" row, built from ``DrillMastery`` below.
 ///
 /// Every entry is a **named pattern** — `Lucena`, `Philidor`, `Two bishops` —
 /// and never a numbered level. A level number tells the user how far through a
@@ -30,15 +38,6 @@ struct DrillFamilyPresentation: Sendable, Hashable, Identifiable {
     var teaches: String
 
     var id: EndgameDrillKind { kind }
-
-    /// The family's first position, for the card's thumbnail.
-    ///
-    /// Read from the service's catalogue rather than duplicated here: a
-    /// thumbnail showing a position the drill does not actually start from is a
-    /// lie the user only discovers after tapping.
-    var thumbnailPosition: Position? {
-        EndgameDrill.drills(kind: kind).first.flatMap { Position(fen: $0.fen) }
-    }
 
     static let all: [DrillFamilyPresentation] = [
         DrillFamilyPresentation(
@@ -86,6 +85,10 @@ struct DrillMastery: Sendable, Hashable {
     var cleanStreak: Int
     /// Clean runs the curriculum asks for.
     var required: Int
+    /// Whether the streak counts whole *sets* rather than single positions,
+    /// which is how the KPK gate is measured — six positions to a set, and the
+    /// set is clean only if every one of them was.
+    var countsSets: Bool = false
 
     var fraction: Double {
         guard required > 0 else { return 0 }
@@ -94,129 +97,9 @@ struct DrillMastery: Sendable, Hashable {
 
     var isMastered: Bool { cleanStreak >= required }
 
-    /// `2 of 3 clean`.
-    var label: String { "\(min(cleanStreak, required)) of \(required) clean" }
-}
-
-/// One drill family, as a tile in the 2-up grid.
-///
-/// Endgame drills are a *separate entry* rather than items mixed into the puzzle
-/// queue, and that is a real distinction rather than a filing convenience: a
-/// puzzle is one move to find, a drill is a technique played out against an
-/// engine for twenty moves. Interleaving them would mean the ten-puzzle counter
-/// silently sometimes meant ten minutes and sometimes forty.
-///
-/// The tile is a thumbnail, a name and a mastery ring, and the whole card is the
-/// control — a `Select` button inside a card the size of a thumb is a smaller
-/// target than the card it sits in.
-///
-/// ``DrillFamilyPresentation/teaches`` is carried as the accessibility hint
-/// rather than rendered. Two columns leave about 150pt of width, which truncates
-/// those sentences mid-word, and half a teaching sentence teaches nothing; the
-/// name plus the position is what a tile is for, and the sentence is read once
-/// and remembered.
-struct EndgameDrillCard: View {
-
-    let family: DrillFamilyPresentation
-    let mastery: DrillMastery
-    let onSelect: () -> Void
-
-    var body: some View {
-        Button(action: onSelect) {
-            VStack(alignment: .leading, spacing: 10) {
-                thumbnail
-
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(family.title)
-                        .typeRole(.headline)
-                        .lineLimit(1)
-                    Text(family.classifier)
-                        .typeRole(.caption)
-                        .lineLimit(1)
-                }
-
-                HStack(spacing: 8) {
-                    MasteryRing(mastery: mastery)
-                    Text(mastery.label)
-                        .typeRole(.caption, monospacedDigits: true)
-                        .lineLimit(1)
-                }
-            }
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .padding(12)
-            .elevation(.raised, cornerRadius: CornerRadius.card)
-        }
-        .buttonStyle(.pressable)
-        .accessibilityElement(children: .combine)
-        .accessibilityLabel("\(family.title), \(mastery.label)")
-        .accessibilityHint(family.teaches)
+    /// `2 of 3 clean`, or `1 of 2 clean sets`.
+    var label: String {
+        let unit = countsSets ? "clean sets" : "clean"
+        return "\(min(cleanStreak, required)) of \(required) \(unit)"
     }
-
-    @ViewBuilder
-    private var thumbnail: some View {
-        if let position = family.thumbnailPosition {
-            // Hit testing off, so a tap anywhere on the tile reaches the button
-            // rather than being swallowed by a board that cannot be played.
-            // A still thumbnail: material feedback animates a capture that
-            // is not happening here, and a grid of tiles twitching as they
-            // scroll reads as a rendering bug.
-            BoardView(position: position, style: BoardAppearance.shared.style.showingMaterialFeedback(false))
-                .allowsHitTesting(false)
-        } else {
-            RoundedRectangle(cornerRadius: CornerRadius.chip, style: .continuous)
-                .fill(Palette.surfaceSunken.dynamic)
-                .aspectRatio(1, contentMode: .fit)
-        }
-    }
-}
-
-/// Mastery of one drill family, as a ring.
-///
-/// A ring is right here and wrong for a rating: this is a genuine 0-to-1 share
-/// of a small, named requirement — two clean runs, or six — and the count sits
-/// beside it in words. The completed state fills the ring and drops a check
-/// inside it, the same mark a completed day carries on Today, rather than
-/// turning green: green is the eval bar's "advantage gained" and would be a
-/// third meaning for one token.
-private struct MasteryRing: View {
-
-    let mastery: DrillMastery
-
-    private let size: CGFloat = 18
-
-    var body: some View {
-        ZStack {
-            Circle()
-                .strokeBorder(Palette.surfaceSunken.dynamic, lineWidth: 2.5)
-
-            Circle()
-                .trim(from: 0, to: mastery.fraction)
-                .stroke(Palette.accent.dynamic, style: StrokeStyle(lineWidth: 2.5, lineCap: .round))
-                .rotationEffect(.degrees(-90))
-
-            if mastery.isMastered {
-                Image(systemName: "checkmark")
-                    .font(.system(size: 8, weight: .bold))
-                    .foregroundStyle(Palette.accent.dynamic)
-            }
-        }
-        .frame(width: size, height: size)
-        .accessibilityHidden(true)
-    }
-}
-
-#Preview {
-    LazyVGrid(columns: [GridItem(.flexible(), spacing: 12), GridItem(.flexible(), spacing: 12)], spacing: 12) {
-        EndgameDrillCard(
-            family: DrillFamilyPresentation.all[4],
-            mastery: DrillMastery(cleanStreak: 1, required: 2),
-            onSelect: {}
-        )
-        EndgameDrillCard(
-            family: DrillFamilyPresentation.all[3],
-            mastery: DrillMastery(cleanStreak: 6, required: 6),
-            onSelect: {}
-        )
-    }
-    .padding()
 }

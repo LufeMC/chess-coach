@@ -201,7 +201,9 @@ struct LeakDiagnosisTests {
             windowGames: 40
         )
         #expect(diagnosis?.shape == .clean)
-        #expect(diagnosis?.shape.word == "Clean")
+        // The word states how many holes there are, like the other two shapes.
+        // "Clean" sat beside a figure and read as a grade on the player.
+        #expect(diagnosis?.shape.word == "Nothing much")
     }
 
     @Test("One dominant cause is called out as the only thing worth working")
@@ -249,8 +251,11 @@ struct LeakDiagnosisTests {
         let withHabit = Self.rows([(.hungMovedPiece, 0.4)], habit: .blunderCheck)[0]
         #expect(LeakTable.trainActionTitle(for: withHabit) == "Train blunder-checking")
 
+        // No habit, no button. The handoff to Train carries the habit and
+        // nothing else, so a title here would put a filled call to action in
+        // front of a tab switch that opens no session.
         let unmapped = Self.rows([(CauseTag("someFutureCause"), 0.4)])[0]
-        #expect(LeakTable.trainActionTitle(for: unmapped) == "Train this pattern")
+        #expect(LeakTable.trainActionTitle(for: unmapped) == nil)
     }
 
     @Test("Every cause carries a line explaining itself, known or not")
@@ -360,7 +365,9 @@ struct ProfilePendingNoteTests {
             now: Self.now
         )
         let note = try! #require(ProfileNarrative.pendingNote(for: series, metric: .rating))
-        #expect(note == "1 more game before this is a trend.")
+        // The rating series counts stored observations — one a day the value
+        // stood still, one per move — so the noun is days of play, not games.
+        #expect(note == "1 more day of play before this is a trend.")
     }
 
     @Test("The count is pluralised")
@@ -371,7 +378,7 @@ struct ProfilePendingNoteTests {
             now: Self.now
         )
         let note = try! #require(ProfileNarrative.pendingNote(for: series, metric: .rating))
-        #expect(note == "2 more games before this is a trend.")
+        #expect(note == "2 more days of play before this is a trend.")
     }
 
     @Test("Enough points but too little time says so instead")

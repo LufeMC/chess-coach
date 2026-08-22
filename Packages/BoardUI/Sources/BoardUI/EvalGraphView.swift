@@ -32,6 +32,18 @@ public struct EvalPoint: Identifiable, Hashable, Sendable {
 /// The Y axis is labelled **Winning / Equal / Losing**, not `+2.5`. Nobody
 /// reading their own game needs three decimal places of centipawn; they need to
 /// know when it went wrong, and words say that faster than numbers.
+///
+/// ## Nothing draws this yet
+///
+/// Worth saying plainly, because its absence looks like a bug when you find the
+/// component and go hunting for the screen. Review draws `ReviewScrubber`
+/// instead: the graph there is *dragged*, so it is a 94pt control rather than a
+/// 190pt chart, and it is deliberately never flipped to the reader's colour — two
+/// games with the same shape have to look like the same object. What this
+/// component was really carrying is the idea that the reader should be told in
+/// words which way the position is going, and Review now does that under the
+/// board (`ReviewEvalReading`) rather than on the axis. This is kept for the
+/// larger, undraggable chart a Mac or iPad layout would want.
 public struct EvalGraphView: View {
 
   private let points: [EvalPoint]

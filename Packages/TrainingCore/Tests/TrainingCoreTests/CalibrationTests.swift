@@ -83,6 +83,46 @@ struct CalibrationTests {
         )
         // 800 - 320 = 480, clamped up to the floor of the credible range.
         #expect(weak.rating == 700)
+
+        let absurd = CalibrationCombiner.gameSideEstimate(
+            games: [
+                CalibrationGame(opponentRating: 2_200, outcome: .win),
+                CalibrationGame(opponentRating: 2_200, outcome: .win),
+                CalibrationGame(opponentRating: 2_200, outcome: .win),
+                CalibrationGame(opponentRating: 2_200, outcome: .win),
+                CalibrationGame(opponentRating: 2_200, outcome: .loss)
+            ],
+            tuning: .default
+        )
+        // 2200 + 240 = 2440, clamped down to the ceiling.
+        #expect(absurd.rating == 2_000)
+    }
+
+    @Test("The ceiling is the top of the curriculum, so a strong placement is not shaved")
+    func ceilingReachesTheCurriculumsTop() {
+        // The calibration ladder walks +100 a win from the *competitive* seed of
+        // 1500, so this is the strongest record the flow can actually produce
+        // without sweeping. It scores out at 1940, and the old 1900 ceiling
+        // clipped it — leaving the diagnostic unable to express the rating the
+        // curriculum's top rung runs to, while the clean-sweep branch happily
+        // reported higher by another route.
+        let strong = CalibrationCombiner.gameSideEstimate(
+            games: [
+                CalibrationGame(opponentRating: 1_500, outcome: .win),
+                CalibrationGame(opponentRating: 1_600, outcome: .win),
+                CalibrationGame(opponentRating: 1_700, outcome: .win),
+                CalibrationGame(opponentRating: 1_800, outcome: .win),
+                CalibrationGame(opponentRating: 1_900, outcome: .loss)
+            ],
+            tuning: .default
+        )
+        // mean 1700, (4-1)/5 * 400 = +240.
+        #expect(abs(strong.rating - 1_940) < 1e-9)
+        #expect(!strong.ceilingNotFound)
+
+        // And the ceiling is the top of rung 4's band, not a number of its own.
+        let ceiling = DomainTuning.default.calibration.gameRatingRange.upperBound
+        #expect(ceiling == Double(Curriculum.default[3].ratingBand.upperBound))
     }
 
     // MARK: - Puzzle side
@@ -104,6 +144,21 @@ struct CalibrationTests {
 
     // MARK: - Fusion
 
+    /// Converting a puzzle rating into a statement about playing strength is
+    /// itself uncertain, and the fusion used to be told it was exact.
+    @Test("The puzzle side enters the fusion carrying the conversion's error too")
+    func conversionUncertaintyIsAdded() {
+        let widened = CalibrationCombiner.playingScaleSigma(puzzleSigma: 100, conversionSigma: 100)
+        // Quadrature, not addition: 100 and 100 make 141, not 200.
+        #expect(abs(widened - 141.4213562373095) < 1e-9)
+        #expect(widened > 100)
+
+        // An exact conversion would leave the puzzle side untouched, which is
+        // what the code did before and what this guards against returning to.
+        #expect(CalibrationCombiner.playingScaleSigma(puzzleSigma: 100, conversionSigma: 0) == 100)
+        #expect(CalibrationCombiner.puzzleConversionSigma > 0)
+    }
+
     @Test("The combined estimate sits between the two inputs and is more certain than either")
     func precisionWeighting() {
         let estimate = CalibrationCombiner.estimate(
@@ -116,24 +171,31 @@ struct CalibrationTests {
         #expect(estimate.rating > low)
         #expect(estimate.rating < high)
 
-        // The whole point of two measurements: the fused error bar is tighter
-        // than either input's.
+        // The point of two measurements: the fused error bar is tighter than
+        // either of the two the fusion was actually given. `puzzleSigma` is not
+        // one of those — it is the Glicko deviation on the puzzle scale, and the
+        // number that entered the fusion is that widened by the conversion's own
+        // error. So the fused sigma beats the game side and legitimately comes
+        // out above the raw puzzle deviation.
+        let fusedPuzzleSigma = CalibrationCombiner.playingScaleSigma(puzzleSigma: estimate.puzzleSigma)
         #expect(estimate.sigma < estimate.gameSigma)
-        #expect(estimate.sigma < estimate.puzzleSigma)
+        #expect(estimate.sigma < fusedPuzzleSigma)
+        #expect(estimate.sigma > estimate.puzzleSigma)
 
-        #expect(abs(estimate.rating - 1133.1291775249174) < 1e-9)
-        #expect(abs(estimate.sigma - 88.81626133859152) < 1e-9)
+        #expect(abs(estimate.rating - 1166.6103536093365) < 1e-9)
+        #expect(abs(estimate.sigma - 111.92998934838272) < 1e-9)
     }
 
     @Test("The more certain measurement pulls harder")
     func weightFollowsCertainty() {
-        // The puzzle side has the smaller sigma here (about 102 vs 180), so the
+        // The puzzle side still enters more certain than the games (about 143
+        // after the conversion's error is folded in, against 180), so the
         // combined estimate must land closer to it.
         let estimate = CalibrationCombiner.estimate(
             games: games([.win, .win, .win, .loss, .loss]),
             puzzles: puzzles(solved: 14, of: 20)
         )
-        #expect(estimate.puzzleSigma < estimate.gameSigma)
+        #expect(CalibrationCombiner.playingScaleSigma(puzzleSigma: estimate.puzzleSigma) < estimate.gameSigma)
         let toPuzzle = abs(estimate.rating - estimate.puzzleEstimate)
         let toGame = abs(estimate.rating - estimate.gameEstimate)
         #expect(toPuzzle < toGame)

@@ -30,6 +30,9 @@ struct OpponentPresenceView: View {
     @State private var pulse = false
 
     private var isSpeaking: Bool { line.kind == .speech }
+    /// The coach's verdict shares the slot but not the voice: no quotes, no
+    /// breathing, and the standing text weight rather than the opponent's.
+    private var isCoach: Bool { line.kind == .coach }
 
     var body: some View {
         HStack(alignment: .top, spacing: 12) {
@@ -71,7 +74,7 @@ struct OpponentPresenceView: View {
 
             Text(displayText)
                 .typeRole(.body, appliesForeground: false)
-                .foregroundStyle(isSpeaking ? AnyShapeStyle(.primary) : AnyShapeStyle(.secondary))
+                .foregroundStyle(isSpeaking || isCoach ? AnyShapeStyle(.primary) : AnyShapeStyle(.secondary))
                 .contentTransition(.opacity)
                 .lineSpacing(2)
                 .lineLimit(2)
@@ -91,9 +94,9 @@ struct OpponentPresenceView: View {
         // hundred years, and it needs no fill, no border and no tail.
         .overlay(alignment: .leading) {
             Capsule()
-                .fill(isSpeaking ? Palette.accent.dynamic : Palette.hairline.dynamic)
+                .fill(isSpeaking || isCoach ? Palette.accent.dynamic : Palette.hairline.dynamic)
                 .frame(width: 3)
-                .animation(Motion.crossfade, value: isSpeaking)
+                .animation(Motion.crossfade, value: line.kind == .trait)
         }
         // A slow breath on the line while they think, and nothing else on the
         // screen moving. Not a spinner, not a shimmer, not a loop the eye can
@@ -111,6 +114,8 @@ struct OpponentPresenceView: View {
     }
 
     private var displayText: String {
+        // Quotes are the marker for "these are their words". The coach's verdict
+        // is the app's own voice and takes none.
         isSpeaking ? "\u{201C}\(line.text)\u{201D}" : line.text
     }
 }
@@ -176,6 +181,24 @@ struct OpponentAvatar: View {
 /// A level integer invites grinding; a personality invites playing. The traits
 /// are also the standing content of the opponent's line, so they have to read as
 /// a description of a player rather than as a difficulty setting in prose.
+///
+/// ## Why every trait is about horizon and error rate
+///
+/// Because that is all `Humanizer` implements, and the trait is the only
+/// scouting the user gets. These lines used to describe playing *styles* —
+/// material greed, king neglect, early trades, sharp openings, endgame squeezes
+/// — and not one of them was true: the profiles differ only in search depth,
+/// softmax temperature, blunder probability, opening randomness and MultiPV
+/// width. A 1200 who prepared to punish Mira's king or to avoid Oscar's trades
+/// was preparing against a player who did not exist, and the post-game review
+/// could never corroborate the claim, because there was nothing there to find.
+///
+/// Depth is the one lever with a plain-English translation, and `Humanizer`'s
+/// own argument for it supplies the wording: a weak player misses a three-move
+/// tactic because they did not look three moves ahead. So each line names the
+/// horizon the profile is capped at and what its blunder rate means for the
+/// person on the other side — both properties the model actually has, both
+/// things the user can act on, and both visible in the game afterwards.
 enum OpponentRoster {
     struct Opponent: Sendable, Hashable {
         var name: String
@@ -184,13 +207,13 @@ enum OpponentRoster {
     }
 
     private static let roster: [Opponent] = [
-        Opponent(name: "Mira", trait: "grabs material, forgets her king", rating: 850),
-        Opponent(name: "Oscar", trait: "trades early, hates pressure", rating: 1050),
-        Opponent(name: "Petra", trait: "solid, punishes loose pieces", rating: 1250),
-        Opponent(name: "Dane", trait: "sharp openings, drifts later", rating: 1450),
-        Opponent(name: "Ines", trait: "positional, squeezes endgames", rating: 1650),
-        Opponent(name: "Kolya", trait: "tactical, rarely misses a shot", rating: 1900),
-        Opponent(name: "Vera", trait: "no weaknesses to speak of", rating: 2150),
+        Opponent(name: "Mira", trait: "looks two moves ahead; hands you something most games", rating: 850),
+        Opponent(name: "Oscar", trait: "looks three moves ahead; still misses short tactics", rating: 1050),
+        Opponent(name: "Petra", trait: "four moves ahead; the free pieces are mostly gone", rating: 1250),
+        Opponent(name: "Dane", trait: "finds the short tactics; the long ones get past him", rating: 1450),
+        Opponent(name: "Ines", trait: "five moves ahead, and seldom in a hurry", rating: 1650),
+        Opponent(name: "Kolya", trait: "six moves ahead; almost nothing is free", rating: 1900),
+        Opponent(name: "Vera", trait: "calculates past your horizon; leave nothing loose", rating: 2150),
     ]
 
     static func opponent(forRating rating: Int) -> Opponent {
@@ -205,7 +228,7 @@ enum OpponentRoster {
     VStack(alignment: .leading, spacing: 28) {
         OpponentPresenceView(
             opponent: OpponentRoster.opponent(forRating: 1050),
-            line: OpponentLine(text: "trades early, hates pressure", kind: .trait)
+            line: OpponentLine(text: "looks three moves ahead; still misses short tactics", kind: .trait)
         )
         OpponentPresenceView(
             opponent: OpponentRoster.opponent(forRating: 1050),

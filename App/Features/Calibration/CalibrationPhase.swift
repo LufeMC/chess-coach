@@ -86,9 +86,9 @@ enum CalibrationStep: Int, CaseIterable, Sendable, Hashable, Identifiable {
     var contribution: String {
         switch self {
         case .question: "Sets the difficulty the first game starts at."
-        case .games: "Measures playing strength directly, with wide error."
-        case .puzzles: "Measures tactics precisely, then converts to the playing scale."
-        case .result: "Both halves, combined into one rating and a starting rung."
+        case .games: "How you actually play — the rough half."
+        case .puzzles: "How sharp your tactics are — the precise half."
+        case .result: "One rating, and where your training starts."
         }
     }
 }
@@ -99,7 +99,7 @@ enum CalibrationStep: Int, CaseIterable, Sendable, Hashable, Identifiable {
 ///
 /// Twenty-five items behind a single bar is the worst of both worlds: each item
 /// moves it four percent, so it looks stuck, and it flattens two genuinely
-/// different kinds of work — five ten-minute games and twenty ten-second puzzles
+/// different kinds of work — five 15-minute games and twenty ten-second puzzles
 /// — into one undifferentiated length. `Docs/design-conventions.md` lists that
 /// exact pattern as one to avoid.
 ///

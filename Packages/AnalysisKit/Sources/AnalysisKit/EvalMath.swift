@@ -57,6 +57,26 @@ public enum EvalMath {
     public static let accuracyC = -3.166_9
 
     /// Expected-points-loss thresholds for the judgment classes.
+    ///
+    /// Exact boundaries with no margin for search noise, and that is a deliberate
+    /// choice rather than an oversight. The scores they classify come from a
+    /// 120k–1.5M-node MultiPV-2 search whose reached depth varies by device and
+    /// by position, and the search is multi-threaded with a transposition table
+    /// carried across plies — so the same game re-analysed can land on the other
+    /// side of a boundary. In practice that only moves the smallest class:
+    /// blunders are ~350cp swings and are stable at any budget the app uses,
+    /// while an Inaccuracy chip can come back as Ok, or as a Mistake, on a
+    /// re-run. The training path does not ride on the chip — moments are ranked
+    /// and selected on the continuous `deltaEP` (``MomentBuilder``), so a
+    /// borderline move keeps its place in the review either way — and widening
+    /// the boundaries here would silently re-tune every threshold in the app,
+    /// since criticality, severity and accuracy are all expressed in the same
+    /// unit against these same constants.
+    ///
+    /// What is genuinely missing is a measured record of the depth reached per
+    /// device, which would say how wide that band actually is. Until that exists
+    /// the chip is best read as "roughly this bad", which is how the copy in
+    /// ``MomentExplainer`` now words every magnitude it prints.
     public static let inaccuracyThreshold = 0.10
     public static let mistakeThreshold = 0.20
     public static let blunderThreshold = 0.30

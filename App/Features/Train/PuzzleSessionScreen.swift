@@ -6,12 +6,14 @@
 import BoardUI
 import ChessKit
 import SwiftUI
+import TrainingCore
 
 /// The solve surface: ten puzzles, one board, a banner between them.
 struct PuzzleSessionScreen: View {
 
     @State private var model: PuzzleSessionModel
     @Environment(\.dismiss) private var dismiss
+    @Environment(\.scenePhase) private var scenePhase
 
     /// True while the opponent's setup move is playing.
     ///
@@ -23,8 +25,32 @@ struct PuzzleSessionScreen: View {
     /// also how a real game would have shown it to them.
     @State private var isPlayingSetupMove = false
 
-    init(model: PuzzleSessionModel) {
+    /// Handed the drill the set's concept earned, and only when the user asks
+    /// for it on the summary.
+    ///
+    /// The Train screen used to read `pendingDrill` off the model when the
+    /// cover closed, however it closed — so a user who left at puzzle two
+    /// because they were out of time was answered with a second full-screen
+    /// board. Closing a set is a signal, and the app was ignoring it.
+    private let onDrillRequested: (EndgameDrillKind) -> Void
+
+    /// The habit this set is weighted toward, named on screen.
+    ///
+    /// Passed in rather than read off the model, which holds the focus
+    /// privately. It is the line that was missing from both ends of the
+    /// handoff: the user taps "Train blunder-checking" on Profile, the tab
+    /// switches, a board opens with an empty title, and nothing anywhere says
+    /// the tap did what it promised.
+    private let focusName: String?
+
+    init(
+        model: PuzzleSessionModel,
+        focusName: String? = nil,
+        onDrillRequested: @escaping (EndgameDrillKind) -> Void = { _ in }
+    ) {
         _model = State(initialValue: model)
+        self.focusName = focusName
+        self.onDrillRequested = onDrillRequested
     }
 
     var body: some View {
@@ -36,18 +62,66 @@ struct PuzzleSessionScreen: View {
             case let .unavailable(message):
                 unavailable(message)
             case .summary:
-                SessionSummaryView(
-                    progress: model.progress,
-                    missed: model.missed,
-                    onContinue: { dismiss() }
-                )
+                summary
             case let .teaching(concept):
                 ConceptLessonView(concept: concept) { model.beginConceptExercise() }
             case .solving, .verdict:
                 solving
             }
         }
+        // The close button belongs to the cover, not to one stage of it. It
+        // used to hang off `solving` alone, which meant a session that failed
+        // to build, or hung loading, or opened on a lesson the user did not
+        // want, had no exit at all — a full-screen cover cannot be swiped away.
+        .toolbar {
+            ToolbarItem(placement: .cancellationAction) {
+                Button { dismiss() } label: { Image(systemName: "xmark") }
+                    .foregroundStyle(.secondary)
+                    .accessibilityLabel("Close the set")
+            }
+        }
         .task { await model.start() }
+        // The set's clock stops with the app. Nobody solves a puzzle from the
+        // lock screen, and counting the phone call that interrupted the set as
+        // time spent on it turns the summary's `Time` into a reading of how long
+        // the user left the app open.
+        .onChange(of: scenePhase) { _, phase in
+            if phase == .active {
+                model.resumeClock()
+            } else {
+                model.pauseClock()
+            }
+        }
+    }
+
+    // MARK: Summary
+
+    /// The end of the set, with the next step named.
+    private var summary: some View {
+        SessionSummaryView(
+            progress: model.progress,
+            missed: model.missed,
+            nextStep: nextStep,
+            isCalculationSet: model.isCalculationSet,
+            onContinue: {
+                if let kind = model.pendingDrill { onDrillRequested(kind) }
+                dismiss()
+            },
+            onDefer: model.pendingDrill == nil ? nil : { dismiss() }
+        )
+    }
+
+    private var nextStep: SessionSummaryView.NextStep {
+        guard let kind = model.pendingDrill else { return .backToTrain }
+        let drills = EndgameDrill.drills(kind: kind)
+        return .drill(
+            title: DrillFamilyPresentation.all.first { $0.kind == kind }?.title ?? "endgame",
+            positions: max(1, drills.count),
+            moveBudget: EndgameDrillTuning.default.moveBudget(
+                for: kind,
+                curriculum: DomainTuning.default.curriculum
+            )
+        )
     }
 
     // MARK: Solving
@@ -58,10 +132,24 @@ struct PuzzleSessionScreen: View {
             // it: it is the first thing to read and the last thing to re-read,
             // and a board that starts at the top edge leaves the user hunting
             // for whose move it is.
-            Text(model.taskLine)
-                .typeRole(.headline)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .padding(.horizontal, 16)
+            VStack(alignment: .leading, spacing: 2) {
+                // The mode outranks the habit, and never joins it: a calculation
+                // set carries no weekly focus, so the two can never both be
+                // true, and a caller that passed a stale focus name in would
+                // otherwise label a theme-blind set as weighted toward one.
+                if let mode = model.modeNote {
+                    Text(mode)
+                        .typeRole(.caption)
+                } else if let focusName {
+                    Text("Weighted toward \(focusName.lowercased())")
+                        .typeRole(.caption)
+                }
+                Text(model.taskLine)
+                    .typeRole(.headline)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.horizontal, 16)
 
             board
                 .padding(.horizontal, 12)
@@ -89,12 +177,13 @@ struct PuzzleSessionScreen: View {
             ToolbarItem(placement: .principal) {
                 SessionProgressBar(progress: model.progress, label: model.progressLabel)
             }
-            ToolbarItem(placement: .cancellationAction) {
-                Button { dismiss() } label: { Image(systemName: "xmark") }
-                    .foregroundStyle(.secondary)
-            }
         }
-        .task(id: model.planOnScreen?.id) { await playSetupMove() }
+        // Keyed on the model's own identity rather than on the plan, because
+        // the set's concept exercise has no plan behind it — it is not an SRS
+        // card — and `planOnScreen?.id` was therefore `nil` for it both before
+        // and after, so the animation never ran on the one item the user meets
+        // first.
+        .task(id: model.itemIdentity) { await playSetupMove() }
     }
 
     /// You on the left, the opponent on the right — the solver's row first,
@@ -140,6 +229,12 @@ struct PuzzleSessionScreen: View {
         // that ten of them do not add a minute to the session.
         try? await Task.sleep(for: .milliseconds(380))
         isPlayingSetupMove = false
+        // The board only becomes the user's now, so this is where the solve
+        // clock starts. Those 380ms are the app's animation, not the user's
+        // thinking, and `AutoGrader` reads latency both absolutely and against
+        // a band median — so counting them makes every item look slower than it
+        // was and inflates the median they are all measured against.
+        model.markPositionInteractive()
     }
 
     private var interaction: BoardInteraction {
@@ -208,40 +303,100 @@ struct PuzzleSessionScreen: View {
         model.progress.completed >= model.progress.displayTotal
     }
 
+    /// The two ways out of a puzzle, both of them priced on the label.
+    ///
+    /// Neither is free and neither used to say so. The hint button spends the
+    /// attempt the moment it is tapped — `AutoGrader` grades any hint `.again`
+    /// — and "Skip" is graded as a failure outright. A user who learns that
+    /// from the summary's `Hints` row has already spent the cost twice, and
+    /// "Skip" in every other app on the phone means "come back to it later, no
+    /// penalty".
+    ///
+    /// The first tap buys a nudge and the second the arrow, so the row also
+    /// carries whatever the nudge said. It stays inside the banner's reserved
+    /// height, which is what keeps the board from moving when a verdict
+    /// replaces it.
     private var solveActions: some View {
-        HStack {
-            Button {
-                model.revealHint()
-            } label: {
-                Label("Reveal", systemImage: "lightbulb")
-                    .typeRole(.body, appliesForeground: false)
+        VStack(alignment: .leading, spacing: 8) {
+            if let nudge = model.hintText {
+                Text(nudge)
+                    .typeRole(.caption)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .lineLimit(2)
+                    .frame(maxWidth: .infinity, alignment: .leading)
             }
-            .buttonStyle(.plain)
-            .foregroundStyle(.secondary)
-            .disabled(model.hintMove != nil)
 
-            Spacer()
+            Spacer(minLength: 0)
 
-            Button {
-                Task { await model.skip() }
-            } label: {
-                Text("Skip")
-                    .typeRole(.body, appliesForeground: false)
+            HStack {
+                Button {
+                    model.revealHint()
+                    announceHint()
+                } label: {
+                    Label(hintTitle, systemImage: "lightbulb")
+                        .typeRole(.caption, appliesForeground: false)
+                }
+                .buttonStyle(.plain)
+                .foregroundStyle(.secondary)
+                .disabled(model.hintLevel == .answer)
+
+                Spacer()
+
+                Button {
+                    Task { await model.skip() }
+                } label: {
+                    Text("Give up · counts as missed")
+                        .typeRole(.caption, appliesForeground: false)
+                }
+                .buttonStyle(.plain)
+                .foregroundStyle(.secondary)
             }
-            .buttonStyle(.plain)
-            .foregroundStyle(.secondary)
         }
         // The same height the banner occupies, so swapping one for the other
         // does not move the board.
-        .frame(height: ResultBanner.height)
+        .frame(height: ResultBanner.height, alignment: .bottom)
         .padding(.horizontal, 4)
     }
 
+    /// What the hint button is offering next.
+    ///
+    /// Both rungs carry the same price on the label because they carry the same
+    /// price: the attempt is spent on the first tap either way.
+    private var hintTitle: String {
+        switch model.hintLevel {
+        case .none: "Hint · counts as missed"
+        case .nudge: "Show the answer"
+        case .answer: "Answer shown"
+        }
+    }
+
+    /// Says the hint out loud.
+    ///
+    /// The arrow is drawn on a `Canvas`, which is nothing at all to a VoiceOver
+    /// user — so the one control whose whole purpose is to hand over help used
+    /// to hand over silence, having already spent the attempt.
+    private func announceHint() {
+        if model.hintLevel == .nudge, let nudge = model.hintText {
+            AccessibilityNotification.Announcement(nudge).post()
+            return
+        }
+        guard let move = PuzzleReason.description(ofMove: model.hintMove, in: model.position) else { return }
+        AccessibilityNotification.Announcement("The answer is \(move).").post()
+    }
+
+    /// The session could not be built.
+    ///
+    /// Titled for the failure rather than for the day: "No puzzles today" says
+    /// the app chose not to serve any, which is not what happened and leaves
+    /// the user with nothing to try.
     private func unavailable(_ message: String) -> some View {
         ContentUnavailableView {
-            Label("No puzzles today", systemImage: "square.grid.3x3")
+            Label("Training could not start", systemImage: "square.grid.3x3")
         } description: {
             Text(message)
+        } actions: {
+            Button("Back to Train") { dismiss() }
+                .buttonStyle(.secondaryAction)
         }
     }
 }

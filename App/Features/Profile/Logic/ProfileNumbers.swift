@@ -15,32 +15,20 @@ import TrainingCore
 // The views and the store reads live one directory up and map database rows
 // into these types at the boundary.
 
-/// Formats a metric value for display next to its threshold.
-///
-/// The curriculum's thresholds span four orders of magnitude — `1.0` hanging
-/// pieces per 100 moves, `0.55` clean-retry rate, `1350` ladder rating — so a
-/// fixed decimal count is wrong for at least one of them. Rule: large values
-/// are whole numbers, small ones keep enough decimals to distinguish them from
-/// their threshold, and trailing zeros are trimmed so `0.80` reads as `0.8`.
-func formatMetricValue(_ value: Double) -> String {
-    if abs(value) >= 100 || value == value.rounded() && abs(value) >= 10 {
-        return String(format: "%.0f", value)
-    }
-    let two = String(format: "%.2f", value)
-    if two.hasSuffix("0") {
-        return String(two.dropLast())
-    }
-    return two
-}
-
 extension MetricComparison {
 
-    /// The mathematical symbol, for the `0.8 / < 1.0` measurement text.
-    var symbol: String {
+    /// The threshold stated as what the user has to reach, for the
+    /// `Hanging pieces 0.8 per 100 moves · need under 1.0` measurement text.
+    ///
+    /// Words rather than `<` / `≥`. The symbols are compact and exact, and they
+    /// are also the reason the row read as a database dump: a ladder row is the
+    /// app telling someone what to aim at, and "need under 1.0" is that
+    /// sentence where "< 1.0" is its notation.
+    var need: String {
         switch self {
-        case .lessThan: return "<"
-        case .lessThanOrEqual: return "≤"
-        case .greaterThanOrEqual: return "≥"
+        case .lessThan: return "need under"
+        case .lessThanOrEqual: return "need at most"
+        case .greaterThanOrEqual: return "need at least"
         }
     }
 }

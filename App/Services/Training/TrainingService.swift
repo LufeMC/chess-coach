@@ -3,8 +3,10 @@
 //  ChessCoach
 //
 
+import AnalysisKit
 import Database
 import Foundation
+import OSLog
 import Observation
 import TrainingCore
 
@@ -132,26 +134,74 @@ final class TrainingService {
                 focus: focus,
                 now: now
             )
-            session = loaded.session
-            summary.puzzleRating = loaded.rating
-            itemIndex = 0
-            flaggedItemIDs = []
-            failedCardIDs = []
-            retriesAppended = false
-            pendingCandidates = [:]
-
-            // Retired cards must be taken out of rotation or they come back
-            // tomorrow forever. Pushing the due date out is preferred to
-            // deleting: the review history is the evidence the ladder was
-            // completed, and deleting it would make the card look brand new if
-            // the same puzzle is ever served again.
-            try? await Self.retire(cardIDs: loaded.session.retired, srs: srs, now: now)
-
-            phase = session.items.isEmpty ? .finished : .solving
-            beginCurrentItem()
+            await adopt(loaded, now: now)
         } catch {
-            phase = .failed(String(describing: error))
+            // The raw error is for the log, never for the screen. A user who
+            // opens Train and is shown `SQLite error 11: database disk image is
+            // malformed` has been handed a fault report instead of a sentence,
+            // and the one thing they can actually do about it — close the app
+            // and come back — is the thing it does not say.
+            AppLog.persistence.error("training session load failed: \(String(describing: error), privacy: .public)")
+            phase = .failed("The puzzle database could not be opened. Close the app and open it again.")
         }
+    }
+
+    /// Builds and starts the calculation set: a short run of puzzles from a band
+    /// above the user, worked slowly.
+    ///
+    /// A separate entry point rather than a flag on ``startSession(focus:)``
+    /// because the two sessions share only the solve surface. This one reads no
+    /// due cards, asks no scheduler, admits no new cards and carries no weekly
+    /// focus — the week's habit is a bias applied to *recognition* material, and
+    /// weighting a calculation band toward one motif would narrow the search the
+    /// set exists to make the user do.
+    func startCalculationSet() async {
+        guard phase != .loading else { return }
+        phase = .loading
+        // Not the week's focus, and not stale either: the header reads this to
+        // decide whether to name a habit, and leaving the last session's focus
+        // in place would label a theme-blind set as weighted toward something.
+        focus = nil
+
+        let now = clock()
+        do {
+            let loaded = try await Self.loadCalculationSet(
+                corpus: corpus,
+                metrics: metrics,
+                settings: settings,
+                tuning: tuning
+            )
+            await adopt(loaded, now: now)
+        } catch {
+            AppLog.persistence.error("calculation set load failed: \(String(describing: error), privacy: .public)")
+            phase = .failed("The puzzle database could not be opened. Close the app and open it again.")
+        }
+    }
+
+    /// Takes ownership of a freshly loaded queue.
+    ///
+    /// Shared by both entry points so a queue can never be adopted half-reset —
+    /// a leftover `failedCardIDs` or `pendingCandidates` from the previous
+    /// session would append a retry for a card this queue does not contain, or
+    /// admit a card for a puzzle the user answered an hour ago.
+    private func adopt(_ loaded: LoadedSession, now: Date) async {
+        session = loaded.session
+        summary.puzzleRating = loaded.rating
+        itemIndex = 0
+        flaggedItemIDs = []
+        failedCardIDs = []
+        retriesAppended = false
+        pendingCandidates = [:]
+
+        // Retired cards must be taken out of rotation or they come back
+        // tomorrow forever. Pushing the due date out is preferred to
+        // deleting: the review history is the evidence the ladder was
+        // completed, and deleting it would make the card look brand new if
+        // the same puzzle is ever served again.
+        try? await Self.retire(cardIDs: loaded.session.retired, srs: srs, now: now)
+
+        phase = session.items.isEmpty ? .finished : .solving
+        beginCurrentItem()
     }
 
     private func beginCurrentItem() {
@@ -163,6 +213,10 @@ final class TrainingService {
         var built = item.presented.machine(retryPolicy: item.retryPolicy)
         built?.start()
         machine = built
+        // A floor, not the real reading. The UI calls `startLatencyClock()`
+        // when the position becomes solvable and overwrites this; a driver with
+        // no UI in front of it — a self-test, a headless run — would otherwise
+        // report a latency of zero, which `AutoGrader` reads as `.easy`.
         itemStartedAt = clock()
         lastRejection = nil
 
@@ -195,6 +249,16 @@ final class TrainingService {
         return result
     }
 
+    /// Restarts the latency clock for the item on screen.
+    ///
+    /// See ``PuzzleSessionDriver/markItemShown()`` for why the service cannot
+    /// decide this moment for itself: it advances to the next item inside the
+    /// call that grades the previous one, long before that position is in front
+    /// of anybody.
+    func startLatencyClock() {
+        itemStartedAt = clock()
+    }
+
     /// Reveals the answer for the current item.
     ///
     /// The attempt is already lost — `AutoGrader` grades any hint `.again` — but
@@ -220,12 +284,47 @@ final class TrainingService {
         await finishCurrentItem()
     }
 
+    /// Drops the same-day retry for a card whose "wrong" move the engine went on
+    /// to rate as good as the stored one.
+    ///
+    /// Only reachable for a position mined from the user's own game, where the
+    /// stored answer is whatever the analysis pass liked best rather than the
+    /// only move that holds the result — see
+    /// ``PuzzleMoveComparison/verdict(answer:played:answerIsForced:)``. The
+    /// grade has already been written by then and is left alone: the card is one
+    /// the user should see again, and the engine's 40k-node opinion is not
+    /// strong enough to overturn a review. Handing the same position back twenty
+    /// seconds later is a different matter — the app has just told them their
+    /// move was equal, and the only thing a retry can teach there is to produce
+    /// the stored move instead of the one the position rates the same.
+    func creditEquivalentAnswer(cardID: SRSCard.ID) {
+        failedCardIDs.removeAll { $0 == cardID }
+        guard retriesAppended else { return }
+        // The retries are already in the queue, so the withdrawal has to reach
+        // the queue too. Only items the user has not arrived at yet: removing
+        // one at or behind the cursor would renumber the set under them.
+        var items = session.items
+        var index = items.count - 1
+        while index > itemIndex {
+            if items[index].kind == .relearn(cardID: cardID) { items.remove(at: index) }
+            index -= 1
+        }
+        session.items = items
+    }
+
     private func finishCurrentItem() async {
         guard let item = currentItem, let current = machine else { return }
 
         let now = clock()
         let latency = itemStartedAt.map { now.timeIntervalSince($0) * 1000 } ?? 0
-        let band = TrainingVocabulary.latencyBand(forRating: item.presented.item.rating)
+        // A position mined from the user's own game carries no corpus rating,
+        // and grading its latency against band 0 — a seven-second median — made
+        // every one of them read as slow. The user's own rating is the nearest
+        // honest stand-in for "how hard should this have been for them".
+        let ratingForBand = item.presented.item.rating > 0
+            ? item.presented.item.rating
+            : Int(summary.puzzleRating.rating.rounded())
+        let band = TrainingVocabulary.latencyBand(forRating: ratingForBand)
         let bandMedian = metrics.value(
             TrainingMetricKeys.latencyMedian(band: band),
             default: LatencyBandMedian.seed(band: band)
@@ -323,7 +422,15 @@ final class TrainingService {
         // has a card, and a relearn item is a second look at that same card.
         guard case .fresh = item.kind else { return }
         let flagged = flaggedItemIDs.contains(item.id)
-        guard flagged || !solvedUnaided else { return }
+        // A missed calculation puzzle is not a candidate. Missing one is the
+        // expected outcome — the band is 200 points above the user by
+        // construction — so admitting them would spend the whole of
+        // `newCardsPerDay` (three, the entire anti-burnout mechanism) on the one
+        // set that cannot run out of misses, starving the daily set and the slot
+        // `admitCards` holds back for a mistake from the user's own game. An
+        // explicit keep is a different act and still admits, which is the only
+        // way one of these reaches the deck.
+        guard flagged || (!solvedUnaided && !item.isCalculation) else { return }
 
         let candidate = CardCandidate(
             origin: flagged ? .flagged : .freshPuzzle,
@@ -367,8 +474,11 @@ final class TrainingService {
 
     /// Promotes mined moments into cards, under the same daily cap.
     ///
-    /// Game mistakes outrank corpus puzzles in `CardPolicy`, so calling this
-    /// before or after a session gives the same answer — the policy sorts.
+    /// Game mistakes outrank corpus puzzles in `CardPolicy`, but that ordering
+    /// only sorts the candidates handed to *one* call, and a day can spend its
+    /// cap on puzzles before a game is ever played. `admitCards` therefore keeps
+    /// a slot back for a game mistake rather than relying on the ordering; see
+    /// the reasoning there.
     @discardableResult
     func createCards(fromMoments moments: [Database.Moment]) async -> Int {
         let now = clock()
@@ -486,7 +596,16 @@ extension TrainingService {
                 from: row,
                 context: TrainingCardBridge.Context(
                     fen: item.fen,
-                    puzzleRating: item.rating,
+                    // This one is used to *bound a search*, not to weigh a
+                    // result, so the sentinel zero a mined position carries has
+                    // to be substituted here. Left alone it made the sibling
+                    // band `(-100)...100`, which matches no puzzle in the
+                    // corpus — so the cards mined from the user's own games,
+                    // the ones most worth generalising, could never reach the
+                    // ladder's generalisation step at all. The user's own
+                    // rating is the nearest honest answer to "how hard should a
+                    // comparable puzzle be for them".
+                    puzzleRating: item.rating > 0 ? item.rating : userPuzzleRating,
                     primaryTheme: item.primaryTheme,
                     ladder: ladder
                 )
@@ -539,12 +658,44 @@ extension TrainingService {
             }
         }
 
-        // Whatever the focus query could not fill falls through to the general
-        // pool, so a thin theme never shrinks the session.
-        let generalWanted = freshSlots - focusThemed.count
-        var general: [Puzzle] = []
+        // One slot held back for a gated theme the user has not been measured
+        // on yet.
+        //
+        // Rung 2 needs fifteen fresh attempts at 1200+ on each of five specific
+        // themes, and the focus mask that owns 60% of the fresh slots contains
+        // none of them — `calcToQuiet` is sacrifices and long mates. So the
+        // gate was left to chance: about four random puzzles a day, of which
+        // skewers and discovered attacks are a small minority, against a rung
+        // whose other requirements are met in weeks. The ring stalled on a
+        // sampling artefact rather than on a missing skill.
+        //
+        // Round-robin by fewest attempts, so the scarcest theme is served
+        // first, and only above the floor the gate counts at — a 900-rated fork
+        // does not move the number.
+        var gated: [Puzzle] = []
+        let gateWanted = freshSlots - focusThemed.count
+        // Only once the serving band actually reaches the floor. Below that the
+        // gate is out of reach anyway, and reserving a slot for a puzzle two
+        // hundred points above the user is a worse trade than waiting.
+        if gateWanted > 0, band.upperBound >= tuning.curriculum.themeRatingFloor,
+            let deficient = Self.deficientGatedTheme(metrics: metrics, tuning: tuning.curriculum),
+            let puzzleTheme = TrainingVocabulary.puzzleTheme(deficient)
+        {
+            gated = try corpus.puzzles(
+                ratingRange: tuning.curriculum.themeRatingFloor...band.upperBound,
+                themes: ThemeMask([puzzleTheme]),
+                limit: 1,
+                excluding: seenPuzzleIDs
+            )
+            seenPuzzleIDs.formUnion(gated.map(\.id))
+        }
+
+        // Whatever the focus and gate queries could not fill falls through to
+        // the general pool, so a thin theme never shrinks the session.
+        let generalWanted = freshSlots - focusThemed.count - gated.count
+        var general: [Puzzle] = gated
         if generalWanted > 0 {
-            general = try corpus.puzzles(
+            general += try corpus.puzzles(
                 ratingRange: band,
                 themes: .empty,
                 limit: generalWanted,
@@ -570,6 +721,93 @@ extension TrainingService {
         return LoadedSession(session: assembled, rating: rating)
     }
 
+    /// Loads the calculation set: fresh puzzles from a band above the user, and
+    /// nothing else.
+    ///
+    /// Deliberately takes neither the SRS store nor the scheduler. That is not a
+    /// tidiness argument — it is the guarantee that this path cannot touch the
+    /// review queue, stated in the signature where a later change has to notice
+    /// it rather than in a comment it can be made to contradict.
+    ///
+    /// The band comes back empty for a user whose rating has passed the top of
+    /// the corpus, and that is allowed to produce an empty set. Widening or
+    /// sliding the band to fill it would serve puzzles at or below the user's
+    /// own level under the calculation label, which is the substitution the
+    /// entry point's copy exists to make impossible.
+    private nonisolated static func loadCalculationSet(
+        corpus: any PuzzleCorpus,
+        metrics: any MetricStore,
+        settings: any AppSettingsStore,
+        tuning: DomainTuning
+    ) async throws -> LoadedSession {
+
+        let stored = try settings.current()
+        let rating = GlickoRating(rating: stored.puzzleRating, deviation: stored.puzzleRD)
+        let band = TrainingVocabulary.calculationBand(
+            userPuzzleRating: Int(stored.puzzleRating.rounded()),
+            tuning: tuning.calculation
+        )
+
+        // The same exclusion window the daily set uses. A repeat here is worse
+        // than a repeat there: four minutes spent recalling an answer is four
+        // minutes not spent calculating, which inverts the whole point of the
+        // set.
+        let seen = ServedPuzzleHistory.recentlyServed(metrics: metrics)
+        let wanted = max(0, tuning.calculation.setSize * tuning.calculation.candidateMultiple)
+
+        // Lichess tags a solution of three moves `long` and four or more
+        // `veryLong`. That is the corpus's own name for the property this set
+        // wants and the only length signal that can ride along with the rating
+        // index — the moves themselves are one space-separated column, so
+        // solution length is not a predicate.
+        var candidates = try corpus.puzzles(
+            ratingRange: band,
+            themes: ThemeMask([.long, .veryLong]),
+            limit: wanted,
+            excluding: seen
+        )
+
+        // Topped up from the unfiltered band rather than required. A band that
+        // holds no long-tagged puzzle is still a band above the user's level,
+        // and the length preference must not be allowed to empty a set that the
+        // entry point has already counted and priced. `calculationSet` ranks
+        // whatever arrives, so the long ones still lead.
+        if candidates.count < tuning.calculation.setSize {
+            var excluded = seen
+            excluded.formUnion(candidates.map(\.id))
+            candidates += try corpus.puzzles(
+                ratingRange: band,
+                themes: .empty,
+                limit: wanted - candidates.count,
+                excluding: excluded
+            )
+        }
+
+        return LoadedSession(
+            session: SessionAssembler.calculationSet(candidates: candidates, tuning: tuning.calculation),
+            rating: rating
+        )
+    }
+
+    /// The rung-2 theme furthest from being measured, or nil once every one of
+    /// them has the attempts the gate needs.
+    ///
+    /// Deliberately reads the same counters `MetricComputer` gates on, so the
+    /// slot stops being reserved the moment the gate can be evaluated.
+    private nonisolated static func deficientGatedTheme(
+        metrics: any MetricStore,
+        tuning: DomainTuning.Curriculum
+    ) -> ThemeTag? {
+        let floor = tuning.themeRatingFloor
+        let counts = tuning.rung2Themes.map { theme in
+            (theme, metrics.value(TrainingMetricKeys.themeAttempts(theme, ratingFloor: floor)))
+        }
+        guard let scarcest = counts.min(by: { $0.1 < $1.1 }),
+            scarcest.1 < Double(tuning.themeMinimumAttempts)
+        else { return nil }
+        return scarcest.0
+    }
+
     /// Finds the position behind a stored card.
     private nonisolated static func resolvePosition(
         row: SRSCard,
@@ -579,18 +817,33 @@ extension TrainingService {
         if let puzzleID = row.puzzleID, let puzzle = try corpus.puzzle(id: puzzleID) {
             return SolvableItem(puzzle: puzzle)
         }
-        guard let fen = row.fen, let line = try momentPositions.solutionLine(fen: fen), !line.isEmpty else {
+        guard let fen = row.fen, let mined = try momentPositions.minedPosition(fen: fen), !mined.line.isEmpty
+        else {
             return nil
         }
         return SolvableItem(
             backing: .momentPosition(momentID: nil),
             fen: fen,
-            line: line,
+            line: mined.line,
             // The moment's FEN is already the position the user got wrong, so
             // there is no setup move to play.
             opponentMovesFirst: false,
+            // Zero is a sentinel, not a guess at difficulty. `persist` gates
+            // the Glicko update on `rating > 0`, and rightly: a position from
+            // the user's own game has no independent rating, so feeding one in
+            // — their own, say — would be updating the rating against itself
+            // and dragging it toward whatever it already was. Consumers that
+            // need a *band* rather than an opponent strength substitute the
+            // user's rating at their own call site; see the latency band in
+            // `finishCurrentItem` and the sibling range in `loadSession`.
             rating: 0,
-            primaryTheme: ThemeTag("middlegame")
+            // The analysis already named the motif — and the value was computed
+            // and then dropped here, so every mined card was tagged
+            // `middlegame`. That names a phase rather than an idea: it has no
+            // noun for the banner, no definition for the summary chip, and it
+            // sends the anti-memorisation ladder hunting for a "sibling" that
+            // is any middlegame puzzle at all.
+            primaryTheme: mined.theme ?? ThemeTag("middlegame")
         )
     }
 
@@ -637,6 +890,13 @@ extension TrainingService {
         // 2. Puzzle rating. SRS reviews count at half weight — a repeat of a
         //    puzzle the user has already been shown is not independent evidence
         //    of strength, and full weight would let them farm their own deck.
+        //
+        //    A calculation puzzle counts at full weight, like any other fresh
+        //    one. Glicko already prices the difficulty: at +250 the expected
+        //    score is low, so a miss costs almost nothing and a solve is worth a
+        //    great deal — which is exactly the measurement the raised band is
+        //    there to make. Excluding them would throw away the only attempts in
+        //    the day that carry real information about the ceiling.
         var rating = currentRating
         if item.presented.item.rating > 0 {
             let glicko = Glicko1(tuning: tuning.puzzleRating)
@@ -688,15 +948,29 @@ extension TrainingService {
         //    Per-theme counts are kept at the curriculum's rating floor because
         //    "70% on forks" and "70% on forks rated 1200+" are different
         //    measurements.
+        //
+        //    The calculation set is excluded from the counters for a third
+        //    reason. Its band sits 200 points above the user by construction, so
+        //    a miss there is the expected result and says nothing about whether
+        //    the theme is known at the user's own level — but the gate would
+        //    read it as evidence that it is not, and the gate is *required* for
+        //    rung 2. Counting it would mean the ladder went backwards for the
+        //    user who did the hardest work of their day, and further backwards
+        //    the more of it they did.
         if case .fresh = item.kind {
             let floor = tuning.curriculum.themeRatingFloor
-            if item.presented.item.rating >= floor {
+            if !item.isCalculation, item.presented.item.rating >= floor {
                 let theme = item.presented.item.primaryTheme
                 try metrics.increment(TrainingMetricKeys.themeAttempts(theme, ratingFloor: floor), at: context.now)
                 if context.solvedUnaided {
                     try metrics.increment(TrainingMetricKeys.themeSolves(theme, ratingFloor: floor), at: context.now)
                 }
             }
+            // The serve record is kept for every fresh item, calculation
+            // included: it is what stops the corpus handing the same position
+            // back inside the exclusion window, and a position whose answer is
+            // remembered is a recognition test — which is the one thing this set
+            // must not quietly become.
             if let puzzleID = item.presented.item.puzzleID {
                 ServedPuzzleHistory.record(puzzleID: puzzleID, metrics: metrics, at: context.now)
             }
@@ -711,7 +985,10 @@ extension TrainingService {
             }
         }
 
-        // 6. The day's loop.
+        // 6. The day's loop. A calculation puzzle counts here like any other:
+        //    the counter is puzzles *answered*, and a user who spent twelve
+        //    minutes on three of them and then found Today unchanged would have
+        //    been told the hardest work of their day did not happen.
         try dailyLoop.update(day: DailyLoop.dayKey(for: context.now)) { loop in
             loop.puzzlesDone += 1
         }
@@ -730,9 +1007,29 @@ extension TrainingService {
         let dayKey = DailyLoop.dayKey(for: now)
         let createdToday = Int(metrics.value(TrainingMetricKeys.newCardsAdmitted, window: dayKey))
 
+        // A mistake from the user's own game keeps a slot however the day went.
+        //
+        // `CardPolicy` ranks a game mistake above every corpus puzzle, but that
+        // ordering only holds *within one call*, and this is called twice a day
+        // from different places: once at the end of a session, once when the
+        // analysis pass mines a finished game. Nothing stores
+        // `admission.deferred`, so on a day that spent the cap on puzzles first
+        // — the "Short on time? 10 puzzles" path, then a game — the three
+        // highest-priority cards in the system were deferred to a queue that
+        // does not exist and never became cards at all.
+        //
+        // Spending one slot over the cap is the cheaper error: the cap exists to
+        // keep the review queue from growing faster than it can be worked, and a
+        // position the user actually got wrong is the last thing that should
+        // lose to a corpus puzzle. A cap of zero is an explicit "no new cards"
+        // and is still honoured.
+        let cap = tuning.cards.newCardsPerDay
+        let reservesSlot = cap > 0 && candidates.contains { $0.origin == .gameMistake }
+        let budgetSpent = reservesSlot ? min(createdToday, cap - 1) : createdToday
+
         let admission = CardPolicy.admitNewCards(
             candidates: candidates,
-            createdToday: createdToday,
+            createdToday: budgetSpent,
             tuning: tuning.cards
         )
 
@@ -882,15 +1179,34 @@ enum PositionKey {
 /// the `Moment` the card was minted from. Rather than duplicate it into a synced
 /// column, the session asks for it at load time.
 protocol MomentPositionSource: Sendable {
-    /// - Returns: The UCI line the user must find, or `nil` when the position
-    ///   cannot be resolved (the game was deleted, say), in which case the card
-    ///   is skipped for today rather than shown unanswerable.
-    func solutionLine(fen: String) throws -> [String]?
+    /// - Returns: The card, or `nil` when the position cannot be resolved (the
+    ///   game was deleted, say), in which case the card is skipped for today
+    ///   rather than shown unanswerable.
+    func minedPosition(fen: String) throws -> MinedPosition?
+}
+
+/// A position from the user's own game, ready to be served.
+///
+/// More than the answer, because the answer alone is what made these — the most
+/// valuable cards in the deck — the worst-explained items in the app. A
+/// one-move line has no continuation, and `PuzzleReason` cannot say why a quiet
+/// move works without one; a `middlegame` theme has no noun, so the banner fell
+/// through to naming the square and the summary chip read `f3`.
+struct MinedPosition: Sendable, Hashable {
+    /// The move to find, plus the opponent's reply where the analysis stored
+    /// one. Two plies at most: the position *is* the moment the user went
+    /// wrong, so the card is a single move, and the reply is carried only so
+    /// the explanation can answer "and then what?".
+    var line: [String]
+    /// The motif the analysis named, in the corpus's own vocabulary. Nil where
+    /// the line won material by no recognised motif, in which case the caller
+    /// keeps the neutral tag rather than inventing one.
+    var theme: ThemeTag?
 }
 
 /// The default: no moment positions resolvable.
 struct EmptyMomentPositionSource: MomentPositionSource {
-    func solutionLine(fen: String) throws -> [String]? { nil }
+    func minedPosition(fen: String) throws -> MinedPosition? { nil }
 }
 
 /// Resolves moment positions by scanning recent games' moments for a matching
@@ -912,12 +1228,59 @@ struct GameMomentPositionSource: MomentPositionSource {
         self.gameLimit = gameLimit
     }
 
-    func solutionLine(fen: String) throws -> [String]? {
+    func minedPosition(fen: String) throws -> MinedPosition? {
         for game in try games.recent(limit: gameLimit) {
-            for moment in try moments.moments(forGame: game.id) where moment.fen == fen {
-                let best = moment.bestUCI.trimmingCharacters(in: .whitespaces)
+            for row in try moments.moments(forGame: game.id) where row.fen == fen {
+                let best = row.bestUCI.trimmingCharacters(in: .whitespaces)
                 guard !best.isEmpty else { continue }
-                return [best]
+                let analysed = row.decodePayload(as: AnalysisKit.Moment.self)
+                return MinedPosition(
+                    line: Self.line(best: best, from: analysed),
+                    theme: analysed.flatMap(Self.theme(of:))
+                )
+            }
+        }
+        return nil
+    }
+
+    /// The answer, and the reply the analysis had already found for it.
+    ///
+    /// One ply of continuation and no more. The whole principal variation would
+    /// turn a one-move card into a four-move puzzle, which is a different
+    /// exercise from the one the moment justifies; a single reply is what
+    /// ``PuzzleReason`` needs to answer the objection the reader is about to
+    /// raise, and it costs nothing.
+    ///
+    /// The PV is used only when its first ply *is* the stored best move. A
+    /// payload written before the columns were last touched can disagree, and
+    /// the second ply of a different line is not this move's reply.
+    private static func line(best: String, from moment: AnalysisKit.Moment?) -> [String] {
+        guard let pv = moment?.pvBest, pv.first == best, pv.count >= 2 else { return [best] }
+        let reply = pv[1].trimmingCharacters(in: .whitespaces)
+        return reply.isEmpty ? [best] : [best, reply]
+    }
+
+    /// The analysis's motif as a corpus theme.
+    ///
+    /// Every mined card used to be tagged `middlegame`, which names a phase
+    /// rather than an idea: it has no noun for the banner, no definition for
+    /// the summary, and — after two long-interval passes — it sends the
+    /// anti-memorisation ladder looking for a "sibling" that is any middlegame
+    /// puzzle at all.
+    private static func theme(of moment: AnalysisKit.Moment) -> ThemeTag? {
+        for tactic in moment.themeTags {
+            switch tactic {
+            case .fork: return ThemeTag("fork")
+            case .pin: return ThemeTag("pin")
+            case .skewer: return ThemeTag("skewer")
+            case .discoveredAttack: return ThemeTag("discoveredAttack")
+            case .backRankMate: return ThemeTag("backRankMate")
+            case .removalOfDefender: return ThemeTag("capturingDefender")
+            case .trappedPiece: return ThemeTag("trappedPiece")
+            // `mateThreat` and `unknownTactic` name no pattern the user could
+            // be taught by name, and mapping them to the nearest theme would
+            // put a word on screen the position may not support.
+            case .mateThreat, .unknownTactic: continue
             }
         }
         return nil

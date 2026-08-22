@@ -269,6 +269,147 @@ struct ResumeTests {
         let restored = AnalysisPipeline.resumePrefix(from: rows(plies: [3, 1, 2]), positionCount: 5)
         #expect(restored.map(\.ply) == [1, 2, 3])
     }
+
+    private func row(ply: Int, nodes: Int) -> PlyEvalRow {
+        AnalysisPipeline.PositionEval(
+            ply: ply,
+            best: Fixture.info(.centipawns(ply), pv: ["e2e4"]),
+            nodes: nodes,
+            depth: 20
+        )
+        .row(gameID: UUID())
+    }
+
+    @Test("A row searched at a smaller budget than this pass ends the prefix")
+    func thinRowTruncatesTheResume() {
+        // The device measured 250k nodes on the launch that started this pass
+        // and something much slower on the launch that is resuming it. Reusing
+        // both halves would judge one game to two standards, with the boundary
+        // wherever the user happened to switch apps.
+        let stored = [row(ply: 1, nodes: 250_000), row(ply: 2, nodes: 250_000), row(ply: 3, nodes: 60_000)]
+        let restored = AnalysisPipeline.resumePrefix(
+            from: stored,
+            positionCount: 6,
+            minimumNodes: AnalysisPipeline.resumeNodeFloor(budget: 250_000)
+        )
+        #expect(restored.map(\.ply) == [1, 2])
+    }
+
+    @Test("A row a little under the budget is still a full-budget row")
+    func slightlyShortRowIsReused() {
+        // The stored count is whatever the engine had reached when it printed
+        // the line, so an honest full-budget row lands just short of it.
+        let stored = [row(ply: 1, nodes: 244_000), row(ply: 2, nodes: 249_000)]
+        let restored = AnalysisPipeline.resumePrefix(
+            from: stored,
+            positionCount: 6,
+            minimumNodes: AnalysisPipeline.resumeNodeFloor(budget: 250_000)
+        )
+        #expect(restored.count == 2)
+    }
+
+    @Test("A terminal position survives the node floor")
+    func terminalRowIsExemptFromTheNodeFloor() {
+        // Checkmate and stalemate rows were never searched, so they carry no
+        // nodes at all; treating that as "searched too thinly" would truncate
+        // every resume at the first terminal position in the game.
+        let stored = [
+            row(ply: 1, nodes: 250_000),
+            AnalysisPipeline.PositionEval(ply: 2, terminalScore: .mate(-1)).row(gameID: UUID())
+        ]
+        let restored = AnalysisPipeline.resumePrefix(
+            from: stored,
+            positionCount: 4,
+            minimumNodes: AnalysisPipeline.resumeNodeFloor(budget: 250_000)
+        )
+        #expect(restored.map(\.ply) == [1, 2])
+    }
+}
+
+// MARK: - Coaching lines
+
+@Suite("Coaching lines")
+struct CoachingLineTests {
+
+    /// The base MultiPV-2 pass over `Fixture.openingUCI`, all at depth 20.
+    /// Move index 2 (white's `g1f3`) is the one every test here summarises.
+    private let evaluations: [AnalysisPipeline.PositionEval] = [
+        .init(ply: 1, best: Fixture.info(.centipawns(20), pv: ["e2e4"])),
+        .init(ply: 2, best: Fixture.info(.centipawns(-15), pv: ["e7e5"])),
+        .init(
+            ply: 3,
+            best: Fixture.info(.centipawns(30), pv: ["b1c3"]),
+            second: Fixture.info(.centipawns(10), pv: ["d2d4"], rank: 2)
+        ),
+        .init(ply: 4, best: Fixture.info(.centipawns(5), pv: ["f8c5"])),
+        .init(ply: 5, best: Fixture.info(.centipawns(-5), pv: ["d2d4"]))
+    ]
+
+    private func summary() throws -> AnalysisPipeline.MoveSummary {
+        let replay = AnalysisPipeline.replay(uci: Fixture.openingUCI)
+        return try #require(
+            AnalysisPipeline.summarize(moveIndex: 2, replay: replay, evaluations: evaluations)
+        )
+    }
+
+    @Test("With no enrichment the base pass speaks for itself")
+    func basePassWithoutEnrichment() throws {
+        let lines = AnalysisPipeline.coachingLines(summary: try summary(), enrichment: nil)
+        #expect(lines.best.pv.first == "b1c3")
+        #expect(lines.alternative?.pv.first == "d2d4")
+    }
+
+    @Test("A shallower enrichment does not get to rename the best move")
+    func shallowEnrichmentDoesNotOverride() throws {
+        // The enrichment is wider (three lines) but landed a ply short, which is
+        // what a same-budget MultiPV-3 search on a cleared table does. Its
+        // first choice deciding "the move" is how a user gets told to play
+        // something the deeper search did not prefer.
+        let enrichment = AnalysisPipeline.Enrichment(
+            best: Fixture.info(.centipawns(35), pv: ["a2a3"], depth: 19),
+            alternative: Fixture.info(.centipawns(20), pv: ["c2c4"], rank: 2, depth: 19)
+        )
+        let lines = AnalysisPipeline.coachingLines(summary: try summary(), enrichment: enrichment)
+        #expect(lines.best.pv.first == "b1c3")
+        // The width is still worth having: rank 2 or 3 from the re-search is a
+        // line the base pass never had.
+        #expect(lines.alternative?.pv.first == "c2c4")
+    }
+
+    @Test("An enrichment that matched the base depth wins on width")
+    func equallyDeepEnrichmentOverrides() throws {
+        let enrichment = AnalysisPipeline.Enrichment(
+            best: Fixture.info(.centipawns(35), pv: ["a2a3"], depth: 20),
+            alternative: Fixture.info(.centipawns(20), pv: ["c2c4"], rank: 2, depth: 20)
+        )
+        let lines = AnalysisPipeline.coachingLines(summary: try summary(), enrichment: enrichment)
+        #expect(lines.best.pv.first == "a2a3")
+        #expect(lines.alternative?.pv.first == "c2c4")
+    }
+
+    @Test("The alternative is never the move already named as best")
+    func alternativeNeverRepeatsTheBestMove() throws {
+        // Rejecting the enriched first choice can leave its alternative naming
+        // the base pass's own best move — "play this, or this" over one move.
+        let enrichment = AnalysisPipeline.Enrichment(
+            best: Fixture.info(.centipawns(35), pv: ["a2a3"], depth: 18),
+            alternative: Fixture.info(.centipawns(30), pv: ["b1c3"], rank: 2, depth: 18)
+        )
+        let lines = AnalysisPipeline.coachingLines(summary: try summary(), enrichment: enrichment)
+        #expect(lines.best.pv.first == "b1c3")
+        #expect(lines.alternative?.pv.first == "d2d4")
+    }
+
+    @Test("An enrichment with no first choice falls back to the base pass")
+    func enrichmentWithoutBestLine() throws {
+        let enrichment = AnalysisPipeline.Enrichment(
+            best: nil,
+            alternative: Fixture.info(.centipawns(20), pv: ["c2c4"], rank: 2, depth: 19)
+        )
+        let lines = AnalysisPipeline.coachingLines(summary: try summary(), enrichment: enrichment)
+        #expect(lines.best.pv.first == "b1c3")
+        #expect(lines.alternative?.pv.first == "c2c4")
+    }
 }
 
 // MARK: - Perspective
@@ -657,7 +798,12 @@ struct ResultFlipTests {
         let result = try #require(Fixture.kpkPass(played: "g5g6", best: ["f6g6"]))
         let note = try #require(result.moments.first?.coachText)
 
-        #expect(note.contains("bitbase"))
+        // The verdict, not the table it came from: "bitbase" is the name of the
+        // app's evidence, and naming it tells a club player nothing they can
+        // use. What the exactness *means* — that this is knowledge rather than
+        // calculation — is the half worth saying.
+        #expect(note.contains("known exactly"))
+        #expect(!note.contains("bitbase"))
         #expect(note.contains("Kg6"))
         #expect(note.count <= MomentExplainer.characterBudget)
     }

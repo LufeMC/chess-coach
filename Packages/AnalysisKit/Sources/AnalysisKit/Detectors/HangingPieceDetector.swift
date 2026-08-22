@@ -13,6 +13,13 @@ import ChessKit
 /// it, or when the evaluation actually dropped. Pawns are held to the higher bar
 /// of an inaccuracy or worse, because a deliberately offered pawn is a normal
 /// part of chess and a coach flagging every one of them is noise.
+///
+/// Those two confirmations are not equally strong, and the difference is carried
+/// out of here on ``FindingFlag/refutationCapturesTarget``. Only the first says
+/// the engine took the piece; the second says the move cost something while a
+/// static count — blind to pins, checks and desperados — liked the capture. The
+/// copy layer keeps them apart, and a sentence claiming the piece simply falls
+/// is written only for the flagged path: see ``MomentFacts/engineTakesTarget``.
 public struct HangingPieceDetector: Detector, Sendable {
     public let id = DetectorID.hangingPiece
 

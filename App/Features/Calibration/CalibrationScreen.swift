@@ -68,6 +68,7 @@ struct CalibrationScreen: View {
                 CalibrationRevealView(
                     progress: flow.progress,
                     estimate: estimate,
+                    wasSaved: flow.resultWasSaved,
                     onStart: onFinish
                 )
             }
@@ -93,7 +94,7 @@ struct CalibrationScreen: View {
                 Text("Placing you from the games")
                     .typeRole(.headline)
 
-                Text("This build shipped without the puzzle corpus, so your five games carry the whole measurement. Your rating will move faster than usual over the first week as real results come in.")
+                Text("The puzzle set is missing from this install, so your five games carry the whole measurement on their own. Your rating will move faster than usual over the first week, as real results come in.")
                     .typeRole(.body, appliesForeground: false)
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)

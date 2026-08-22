@@ -29,8 +29,21 @@ struct SessionProgress: Sendable, Hashable {
     /// Items currently in the queue.
     var total: Int = 0
 
+    /// First-attempt solves. Excludes the same-day retries, which are counted
+    /// in ``retriesSolved``.
     var solved: Int = 0
     var hinted: Int = 0
+
+    /// Same-day retries finished, and how many of them were clean.
+    ///
+    /// Kept apart from ``solved`` because they measure different things. A
+    /// retry is a second look at a position whose answer the user was shown
+    /// minutes ago; folding it into the same fraction produced `8 / 12`, in
+    /// which the denominator is the number of positions served and the
+    /// numerator is a mix of recall and re-recall. Two honest numbers beat one
+    /// that quietly means neither.
+    var retries: Int = 0
+    var retriesSolved: Int = 0
 
     /// Wall-clock time spent in the session.
     var elapsed: TimeInterval = 0
@@ -38,22 +51,34 @@ struct SessionProgress: Sendable, Hashable {
     /// Change in puzzle rating since the session started, already rounded.
     var ratingDelta: Int = 0
 
+    /// Glicko's uncertainty about the puzzle rating, in rating points.
+    ///
+    /// Carried so the summary can decline to report a delta it cannot stand
+    /// behind — see ``SessionSummaryView``.
+    var ratingDeviation: Double = 0
+
     init(
         index: Int = 0,
         completed: Int = 0,
         total: Int = 0,
         solved: Int = 0,
         hinted: Int = 0,
+        retries: Int = 0,
+        retriesSolved: Int = 0,
         elapsed: TimeInterval = 0,
-        ratingDelta: Int = 0
+        ratingDelta: Int = 0,
+        ratingDeviation: Double = 0
     ) {
         self.index = index
         self.completed = completed
         self.total = total
         self.solved = solved
         self.hinted = hinted
+        self.retries = retries
+        self.retriesSolved = retriesSolved
         self.elapsed = elapsed
         self.ratingDelta = ratingDelta
+        self.ratingDeviation = ratingDeviation
     }
 
     /// The denominator actually shown.
@@ -74,7 +99,21 @@ struct SessionProgress: Sendable, Hashable {
 
     // MARK: Summary rows
 
-    var solvedLabel: String { "\(solved)/\(displayTotal)" }
+    /// Positions the user was seeing for the first time today.
+    ///
+    /// The retries are subtracted rather than counted separately at the source
+    /// because the queue is what grows: `SessionAssembler.appendingRelearnRetries`
+    /// appends one per failed card, so `displayTotal` is first attempts plus
+    /// retries by construction.
+    var firstAttempts: Int { max(1, displayTotal - retries) }
+
+    var solvedLabel: String { "\(solved)/\(firstAttempts)" }
+
+    /// `1/2 clean`, or nil when nothing came back for a second look.
+    var retriesLabel: String? {
+        guard retries > 0 else { return nil }
+        return "\(retriesSolved)/\(retries) clean"
+    }
 
     var hintsLabel: String { "\(hinted)" }
 

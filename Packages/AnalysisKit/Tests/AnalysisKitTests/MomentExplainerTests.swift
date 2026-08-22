@@ -77,6 +77,70 @@ private enum Sample {
     ) throws -> String {
         try #require(moment(context, detectors: detectors, kind: kind).coachText)
     }
+
+    /// One context per shape of note the explainer can write.
+    ///
+    /// Used by the tests that assert something about *every* note — the copy
+    /// budget, the vocabulary — where a claim proved on one clause is worth very
+    /// little. Each entry is a detector fixture, so the sentences under test are
+    /// written about positions whose findings are asserted elsewhere.
+    static func everyShape() throws -> [MoveContext] {
+        [
+            try Fixture.context(
+                fen: hangsMovedPiece, played: "a1a5",
+                refutation: ["b6a5"], refutationScore: .centipawns(500)
+            ),
+            try Fixture.context(
+                fen: hangsOtherPiece, played: "b1a3",
+                refutation: ["e8e7"], refutationScore: .centipawns(400)
+            ),
+            try Fixture.context(
+                fen: foolsMate, ply: 3, played: "g2g4", best: ["b1c3"],
+                bestScore: .centipawns(20), refutation: ["d8h4"], refutationScore: .mate(1),
+                threatProbe: try probe(foolsMate, move: "d8h4", cp: 400)
+            ),
+            try Fixture.context(
+                fen: deepCombination, played: "g1h1", best: ["d1d8"],
+                refutation: ["b4c3", "b2c3", "d8d1"], refutationScore: .centipawns(500)
+            ),
+            try Fixture.context(
+                fen: forkAvailable, played: "e1e2", best: ["b5c7", "e8e7", "c7a8"],
+                bestScore: .centipawns(400), refutationScore: .centipawns(30)
+            ),
+            try Fixture.context(
+                fen: loudOrQuiet, played: "d5d8", best: ["d5d1"],
+                bestScore: .centipawns(50), refutationScore: .centipawns(200)
+            ),
+            try Fixture.context(
+                fen: losingCapture, played: "d1d5", best: ["d1d2"],
+                refutation: ["c6d5"], refutationScore: .centipawns(400)
+            ),
+            try Fixture.context(
+                fen: poorTrade, played: "d4c6", best: ["e1e2"],
+                bestScore: .centipawns(-100), refutation: ["b7c6"], refutationScore: .centipawns(220)
+            ),
+            try Fixture.context(
+                fen: shelter, ply: 29, played: "g2g4", best: ["h1g1"],
+                refutation: ["d8d5"], refutationScore: .centipawns(300)
+            ),
+            try Fixture.context(
+                fen: kpkWin, ply: 61, played: "g5g6", best: ["f6g6"],
+                bestScore: .centipawns(120), refutationScore: .centipawns(-120)
+            ),
+            try Fixture.context(
+                fen: philidor, ply: 61, played: "a1a6", best: ["e5d5"],
+                bestScore: .centipawns(150), refutationScore: .centipawns(200)
+            ),
+            try Fixture.context(
+                fen: openingCentre, ply: 3, played: "d1h5", best: ["g1f3"],
+                bestScore: .centipawns(20), refutationScore: .centipawns(120)
+            ),
+            try Fixture.context(
+                fen: drifting, played: "a1a4", best: ["a1d1"],
+                bestScore: .centipawns(60), refutationScore: .centipawns(80)
+            )
+        ]
+    }
 }
 
 @Suite("Moment explainer")
@@ -101,7 +165,9 @@ struct MomentExplainerTests {
         // this one — it is outside every line the prompt supplied.
         #expect(note.contains("bxa5"))
         #expect(note.contains("a5"))
-        #expect(note.contains("500cp"))
+        // A rook, not "500cp": the note prices material in the words the player
+        // counts in, and the figure stays on the move list.
+        #expect(note.contains("a rook"))
         #expect(note.contains("no defenders"))
         #expect(note.contains("blunder check"))
     }
@@ -120,7 +186,52 @@ struct MomentExplainerTests {
         #expect(moment.causeTag == .hungLeftPiece)
         #expect(note.contains("rook on d5"))
         #expect(note.contains("cxd5"))
-        #expect(note.contains("500cp"))
+        #expect(note.contains("a rook"))
+    }
+
+    /// The detector fires on the static exchange count alone whenever the move
+    /// also cost an inaccuracy's worth of ground, and that count is blind to
+    /// pins, checks and desperados. On a move the engine answered some other way
+    /// the note therefore says what was counted — and names the answer the
+    /// engine actually chose, which is the move that was really missed.
+    @Test("A loose piece the engine's own reply declines is counted, not condemned")
+    func hangingWithoutAnEngineCapture() throws {
+        let taken = try Fixture.context(
+            fen: Sample.hangsOtherPiece,
+            played: "b1a3",
+            refutation: ["c6d5"],
+            refutationScore: .centipawns(500)
+        )
+        // The same loose rook, but their best reply is a king move: static
+        // exchange still says d5 is winnable and the engine declined to prove it.
+        let declined = try Fixture.context(
+            fen: Sample.hangsOtherPiece,
+            played: "b1a3",
+            refutation: ["e8e7"],
+            refutationScore: .centipawns(400)
+        )
+
+        let confirmed = Sample.moment(taken, detectors: [HangingPieceDetector()])
+        let unconfirmed = Sample.moment(declined, detectors: [HangingPieceDetector()])
+        let confirmedNote = try #require(confirmed.coachText)
+        let unconfirmedNote = try #require(unconfirmed.coachText)
+
+        // Same finding, same square, same cause: only the strength of the claim
+        // is allowed to differ.
+        #expect(confirmed.causeTag == unconfirmed.causeTag)
+        #expect(unconfirmed.evidence?.squares == [Square.d5])
+        #expect(unconfirmed.evidence?.flags.contains(.refutationCapturesTarget) == false)
+
+        #expect(confirmedNote.contains("can just be taken"))
+        #expect(confirmedNote.contains("which is a rook"))
+
+        #expect(unconfirmedNote.contains("can just be taken") == false)
+        #expect(unconfirmedNote.contains("hanging") == false)
+        // What was actually computed: the count, and their real answer.
+        #expect(unconfirmedNote.contains("the count is one attacker to no defenders"))
+        #expect(unconfirmedNote.contains("Ke7"))
+        // And no price on the piece, because nothing showed it coming off.
+        #expect(unconfirmedNote.contains("which is a rook") == false)
     }
 
     @Test("A missed new threat names the square and what they actually played")
@@ -141,8 +252,11 @@ struct MomentExplainerTests {
         #expect(moment.causeTag == .missedNewThreat)
         #expect(note.contains("h4"))
         #expect(note.contains("Qh4#"))
-        #expect(note.contains("expected points"))
-        #expect(note.contains("Step 1"))
+        // The square, not the size. The threat's magnitude is a half-budget
+        // probe score minus a full-budget one, which is fit to rank findings and
+        // unfit to quote.
+        #expect(note.contains("h4 was the square to be looking at"))
+        #expect(MomentExplainer.stepPhrasings(.s1WhatChanged).contains { note.contains($0) })
     }
 
     @Test("A standing threat says it had been there, and still names the move")
@@ -199,7 +313,8 @@ struct MomentExplainerTests {
 
         #expect(moment.causeTag == .allowedDeepTactic)
         #expect(note.contains("Bxc3"))
-        #expect(note.contains("three plies"))
+        // Three plies is two moves as the player who has to find them counts.
+        #expect(note.contains("two moves"))
         #expect(note.contains("d1"))
     }
 
@@ -220,7 +335,7 @@ struct MomentExplainerTests {
         // The whole reason `classifyDetailed` exists: naming which two pieces.
         #expect(note.contains("king on e8"))
         #expect(note.contains("rook on a8"))
-        #expect(note.contains("500cp"))
+        #expect(note.contains("worth a rook"))
     }
 
     @Test("A miscalculated tactic contrasts the move played with the one that worked")
@@ -303,10 +418,12 @@ struct MomentExplainerTests {
         #expect(moment.causeTag == .miscountedExchange)
         #expect(note.contains("d5"))
         #expect(note.contains("one recapture"))
-        #expect(note.contains("400cp"))
+        // 400 is not any one piece, so it is counted in pawns rather than given
+        // the name of the nearest one.
+        #expect(note.contains("about four pawns"))
     }
 
-    @Test("A planless trade states where the position stood before it")
+    @Test("A planless trade names what trading does rather than quoting the evaluation")
     func planlessTrade() throws {
         let context = try Fixture.context(
             fen: Sample.poorTrade,
@@ -322,7 +439,7 @@ struct MomentExplainerTests {
         #expect(moment.causeTag == .planlessTrade)
         #expect(note.contains("Nxc6"))
         #expect(note.contains("c6"))
-        #expect(note.contains("expected points"))
+        #expect(note.contains("fewer pieces suits whoever is ahead"))
     }
 
     @Test("King exposure names the king's square and what stopped covering what")
@@ -362,7 +479,9 @@ struct MomentExplainerTests {
 
         #expect(moment.causeTag == .endgameTechnique)
         #expect(moment.evidence?.subtype == .kpk)
-        #expect(note.contains("bitbase"))
+        // "Bitbase" is the engine's word for it; the claim it licenses — that
+        // this ending has an exact answer — is the part the player needs.
+        #expect(note.contains("known exactly"))
         #expect(note.contains("a win for the pawn before g6"))
         #expect(note.contains("a draw after it"))
         #expect(note.contains("Kg6"))
@@ -455,7 +574,43 @@ struct MomentExplainerTests {
         #expect(note.contains("name what changed"))
         // No motif, no refuting move, no invented plan.
         #expect(note.contains("fork") == false)
-        #expect(note.contains("threat") == false || note.contains("nothing was threatened"))
+        #expect(note.contains("threat") == false)
+    }
+
+    /// The probe is skipped for a side that was in check, for a ply outside the
+    /// enrichment window and for a probe search that was cut short — and on all
+    /// three the app never looked at what the opponent was threatening. A note
+    /// that reports the negative anyway is inventing the one fact it is least
+    /// entitled to, so the claim is made only where the probe ran.
+    @Test("\"Nothing was threatened\" is only said when the threat probe actually ran")
+    func driftOnlyClaimsWhatWasProbed() throws {
+        let unprobed = try Fixture.context(
+            fen: Sample.drifting,
+            played: "a1a4",
+            best: ["a1d1"],
+            bestScore: .centipawns(60),
+            refutationScore: .centipawns(80)
+        )
+        // The same position with a probe taken. The threat detector still cannot
+        // fire — it needs the opponent to play the probe's move for real, and no
+        // reply was searched here — so the only thing that changes is what the
+        // note is entitled to say.
+        let probed = try Fixture.context(
+            fen: Sample.drifting,
+            played: "a1a4",
+            best: ["a1d1"],
+            bestScore: .centipawns(60),
+            refutationScore: .centipawns(80),
+            threatProbe: try Sample.probe(Sample.drifting, move: "e8d7", cp: 10)
+        )
+
+        let withoutProbe = try Sample.note(unprobed)
+        let withProbe = try Sample.note(probed)
+
+        #expect(Sample.moment(probed).causeTag == .positionalDrift)
+        #expect(withoutProbe.contains("Nothing hung here"))
+        #expect(withoutProbe.contains("nothing was threatened") == false)
+        #expect(withProbe.contains("Nothing hung and nothing was threatened"))
     }
 
     /// The shipped bank had no `generic` entry, so praise moments were handed the
@@ -551,6 +706,82 @@ struct MomentExplainerTests {
             openings.insert(String(note.prefix(12)))
         }
         #expect(openings.count > 1)
+    }
+
+    /// The register the whole app is written in: a note explains a move to a
+    /// player around 1200, and an engine unit in it is a word they have to
+    /// translate or skip. The numbers are not lost — the move list prints the
+    /// evaluation and the chip prints the class — they are simply not what a
+    /// sentence about their own game is made of.
+    @Test("No note is written in engine units")
+    func notesAreInChessEnglish() throws {
+        // Word-bounded on purpose: "simply" contains "ply", and banning the
+        // substring would ban the sentence.
+        let engineVocabulary = [
+            "[0-9]+ ?cp\\b",
+            "\\bcentipawns?\\b",
+            "expected points",
+            "\\bpl(y|ies)\\b",
+            "\\bmultipv\\b",
+            "\\bdepth\\b",
+            "[0-9]+\\.[0-9]+"
+        ]
+
+        var notes = try Sample.everyShape().map { try Sample.note($0) }
+        notes.append(
+            try Sample.note(
+                Fixture.context(
+                    fen: Sample.forkAvailable, played: "b5c7", best: ["b5c7", "e8e7", "c7a8"],
+                    bestScore: .centipawns(400), refutationScore: .centipawns(-400),
+                    criticality: CriticalityResult(isCritical: true, gap: 0.2, suppressedBy: nil)
+                ),
+                kind: .reinforcement
+            )
+        )
+
+        for note in notes {
+            for pattern in engineVocabulary {
+                #expect(
+                    note.range(of: pattern, options: [.regularExpression, .caseInsensitive]) == nil,
+                    "\(pattern) in: \(note)"
+                )
+            }
+        }
+    }
+
+    /// The bands are what keep a number from being given the name of the
+    /// nearest piece: 400 is a queen for a rook, and printing "a piece" would be
+    /// a material claim nothing computed.
+    @Test("Material is named only where the figure is that piece")
+    func materialIsNamedOnlyWhenItIsThatPiece() {
+        #expect(MomentExplainer.material(320) == "a piece")
+        #expect(MomentExplainer.material(330) == "a piece")
+        #expect(MomentExplainer.material(500) == "a rook")
+        #expect(MomentExplainer.material(900) == "a queen")
+        #expect(MomentExplainer.material(180) == "the exchange")
+        #expect(MomentExplainer.material(400) == "about four pawns")
+        #expect(MomentExplainer.material(100) == "about a pawn")
+        // Sign is the caller's business: the clause it lands in says who lost it.
+        #expect(MomentExplainer.material(-500) == "a rook")
+    }
+
+    /// Both sides of this move read the same on the graph, so there is no honest
+    /// two-word summary of what it cost — and "from level to level" would be
+    /// filler in the clause that is supposed to be the evidence.
+    @Test("A move that does not change the standing gets no swing clause")
+    func swingNeedsAChangeOfStanding() throws {
+        let note = try Sample.note(
+            Fixture.context(
+                fen: Sample.drifting,
+                played: "a1a4",
+                best: ["a1d1"],
+                bestScore: .centipawns(10),
+                refutationScore: .centipawns(20)
+            )
+        )
+
+        #expect(note.contains("simply let the position get worse"))
+        #expect(note.contains("from level to level") == false)
     }
 
     @Test("Every note fits the copy block")
@@ -748,6 +979,62 @@ struct GameSummaryTests {
         #expect(summary.body.contains("you got it right"))
         #expect(summary.headline.count <= GameSummary.headlineBudget)
         #expect(summary.body.count <= GameSummary.bodyBudget)
+    }
+
+    /// `Moment.total` is the selection score — severity multiplied by
+    /// learnability and by how relevant the lesson is to this player's current
+    /// rung — and it decides which three positions are worth showing. Both of
+    /// the verdict's claims are claims about size instead, so both are made on
+    /// what the move cost. Reading `total` let a teachable opening inaccuracy
+    /// outrank the blunder that lost the game, and the headline then named a
+    /// phase the graph directly above it contradicted.
+    @Test("The verdict follows what the moves cost, not the selection score")
+    func verdictFollowsTheCost() {
+        let teachable = Fixture.moment(
+            ply: 5,
+            causeTag: .openingPrinciple,
+            total: 6,
+            deltaEP: 0.12,
+            phase: .opening
+        )
+        let costliest = Fixture.moment(
+            ply: 41,
+            causeTag: .kingExposure,
+            total: 1,
+            deltaEP: 0.55,
+            phase: .endgame
+        )
+
+        let summary = GameSummarizer.summary(
+            outcome: .loss,
+            accuracy: 68,
+            moveCount: 30,
+            moments: [teachable, costliest]
+        )
+
+        #expect(summary.headline.contains("endgame"))
+        #expect(summary.headline.contains("opening") == false)
+        // 41 half-moves in is move 21, and the cause named is that move's cause.
+        #expect(summary.body.contains("on move 21"))
+        #expect(summary.body.contains(GameSummarizer.causeName(.kingExposure)))
+    }
+
+    /// Two moves that cost the same: the verdict names the earlier one, because
+    /// the rest of the game followed from it — and it must not depend on the
+    /// order the moments happen to arrive in.
+    @Test("Equal cost breaks to the earlier move")
+    func equalCostPrefersTheEarlierMove() {
+        let early = Fixture.moment(ply: 9, causeTag: .hungMovedPiece, total: 1, deltaEP: 0.4)
+        let late = Fixture.moment(ply: 33, causeTag: .kingExposure, total: 9, deltaEP: 0.4)
+
+        let summary = GameSummarizer.summary(
+            outcome: .loss,
+            accuracy: 68,
+            moveCount: 30,
+            moments: [late, early]
+        )
+
+        #expect(summary.body.contains("on move 5"))
     }
 
     @Test("A game with nothing to review says so")

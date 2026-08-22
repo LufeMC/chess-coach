@@ -89,7 +89,12 @@ public struct MomentFilmstrip: View {
 
   private func card(_ moment: MomentThumbnail) -> some View {
     Button {
-      selection = selection == moment.id ? nil : moment.id
+      // Select-only, deliberately not a toggle. The screen that owns this strip
+      // drives a board and a coach card off the selection, so deselecting would
+      // take the most valuable content on the page away; the host therefore
+      // ignores a nil, and a tap that toggled to nil read as a broken tap — the
+      // ring blinked and nothing else moved.
+      selection = moment.id
     } label: {
       VStack(alignment: .leading, spacing: 8) {
         BoardView(

@@ -134,6 +134,133 @@ struct LeakPresentationTests {
         #expect(LeakTable.title(for: CauseTag("")) == "Unclassified")
     }
 
+    @Test("Every detail line says how to catch it, not just what it was")
+    func detailsCarryTheMechanism() {
+        // A line that restates the row's own title leaves the training button
+        // to be taken on trust; the second clause is the question that would
+        // have caught the move.
+        for tag in CauseTag.known {
+            let detail = LeakTable.detail(for: tag)
+            #expect(detail.contains("—"), "\(tag.rawValue) has no counter-habit clause")
+        }
+    }
+
+    @Test("The diagnosis defines its unit and its chips once, in prose")
+    func diagnosisDefinesItsTerms() throws {
+        // "0.72 pts / game" is read by a chess player as rating points or
+        // material. Nothing else on the screen says otherwise.
+        let concentrated = try #require(
+            LeakDiagnosis.make(
+                rows: LeakTable.rows(from: [
+                    Self.leak(.hungMovedPiece, ep: 0.42, count: 14),
+                    Self.leak(.forcingBias, ep: 0.10, count: 4)
+                ]),
+                windowGames: 40
+            )
+        )
+        #expect(concentrated.shape == .concentrated)
+        #expect(concentrated.explanation.contains("a win is worth 1 point"))
+        #expect(concentrated.explanation.contains("High impact"))
+
+        // The clean branch used to omit the unit entirely.
+        let clean = try #require(
+            LeakDiagnosis.make(
+                rows: LeakTable.rows(from: [Self.leak(.forcingBias, ep: 0.03, count: 2)]),
+                windowGames: 40
+            )
+        )
+        #expect(clean.shape == .clean)
+        #expect(clean.explanation.contains("a win is worth 1 point"))
+    }
+
+    @Test("The shape words are parallel statements of how many holes there are")
+    func shapeWords() {
+        #expect(LeakDiagnosis.Shape.clean.word == "Nothing much")
+        #expect(LeakDiagnosis.Shape.concentrated.word == "One cause")
+        #expect(LeakDiagnosis.Shape.spread.word == "Several causes")
+    }
+
+    @Test("A sparkline states its direction for readers who cannot see it")
+    func trendDirection() throws {
+        let now = Date(timeIntervalSince1970: 1_760_000_000)
+        func occurrences(_ daysAgo: [Double]) -> [LeakOccurrence] {
+            daysAgo.map { days in
+                LeakOccurrence(
+                    id: UUID(), gameID: UUID(),
+                    playedAt: now.addingTimeInterval(-days * 86_400),
+                    ply: 21, playedSAN: "Nf3", bestSAN: "Qe2", epLost: 0.3,
+                    opponentRating: 1200, result: "0-1"
+                )
+            }
+        }
+        let falling = try #require(
+            LeakTrend.make(from: occurrences([80, 78, 76, 74, 10]), now: now)
+        )
+        #expect(falling.directionLabel == "falling over 90 days")
+        #expect(falling.spanLabel == "90 days, oldest first")
+
+        let rising = try #require(
+            LeakTrend.make(from: occurrences([80, 10, 8, 6, 4]), now: now)
+        )
+        #expect(rising.directionLabel == "rising over 90 days")
+    }
+
+    @Test("A sparkline spans the window the app actually looked at")
+    func trendSpansTheObservedWindow() throws {
+        let now = Date(timeIntervalSince1970: 1_760_000_000)
+        // Twenty games of daily play with the leak in every other one — the
+        // exact profile of the user this sparkline is for. The occurrences can
+        // only come from the leak horizon, so nothing older than nineteen days
+        // exists to plot.
+        let occurrences = stride(from: 19, through: 1, by: -2).map { day in
+            LeakOccurrence(
+                id: UUID(), gameID: UUID(),
+                playedAt: now.addingTimeInterval(-Double(day) * 86_400),
+                ply: 21, playedSAN: "Nf3", bestSAN: "Qe2", epLost: 0.3,
+                opponentRating: 1200, result: "0-1"
+            )
+        }
+        let horizonStart = now.addingTimeInterval(-19 * 86_400)
+
+        // What the fixed ninety-day span produced: four buckets empty by
+        // construction, so a perfectly steady habit drew as a late surge.
+        let unwindowed = try #require(LeakTrend.make(from: occurrences, now: now))
+        #expect(unwindowed.buckets.prefix(4).allSatisfy { $0 == 0 })
+
+        let trend = try #require(
+            LeakTrend.make(from: occurrences, now: now, observedSince: horizonStart)
+        )
+        #expect(trend.days == 19)
+        #expect(trend.spanLabel == "19 days, oldest first")
+        #expect(
+            trend.buckets.allSatisfy { $0 > 0 },
+            "a span sized to the data has no structurally empty buckets to mistake for a change"
+        )
+    }
+
+    @Test("The observed window never overstates the ninety-day cap")
+    func trendWindowIsCapped() throws {
+        let now = Date(timeIntervalSince1970: 1_760_000_000)
+        let occurrences = [200.0, 150, 100, 80, 60, 40, 20, 5].map { days in
+            LeakOccurrence(
+                id: UUID(), gameID: UUID(),
+                playedAt: now.addingTimeInterval(-days * 86_400),
+                ply: 21, playedSAN: "Nf3", bestSAN: "Qe2", epLost: 0.3,
+                opponentRating: 1200, result: "0-1"
+            )
+        }
+        // A weekly player's twenty games reach back most of a year; the chart
+        // still refuses to draw six buckets across it.
+        let trend = try #require(
+            LeakTrend.make(
+                from: occurrences,
+                now: now,
+                observedSince: now.addingTimeInterval(-300 * 86_400)
+            )
+        )
+        #expect(trend.days == 90)
+    }
+
     @Test("The habit that fixes a leak rides along with it")
     func habitCarried() {
         let rows = LeakTable.rows(from: [Self.leak(.hungMovedPiece, ep: 0.4, count: 3, habit: .blunderCheck)])

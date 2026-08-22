@@ -105,7 +105,11 @@ public enum Curriculum {
                 ),
                 Skill(
                     id: "r1.basicMates",
-                    title: "Basic mates: K+Q vs K in \(t.kqkMaxMoves), K+R vs K in \(t.krkMaxMoves)",
+                    // Stated as the thing you do, not as the notation for it:
+                    // "K+Q vs K in 15" asks the reader to know that 15 counts
+                    // moves, and this row is the only place the app tells them
+                    // what to go and practise.
+                    title: "Mate with the queen in \(t.kqkMaxMoves) moves, with the rook in \(t.krkMaxMoves)",
                     criteria: [
                         SkillCriterion(
                             metricKey: .kqkDrillCleanStreak,
@@ -145,20 +149,41 @@ public enum Curriculum {
                             window: .lastGames(8),
                             threshold: 4.0,
                             comparison: .lessThan
-                        ),
-                        SkillCriterion(
-                            metricKey: .cleanRetryRate,
-                            window: .lastGames(8),
-                            threshold: 0.55,
-                            comparison: .greaterThanOrEqual
                         )
                     ],
                     isRequired: true,
                     habit: .blunderCheck
                 ),
                 Skill(
+                    // Split out of `r1.blunderControl`, and **not required**,
+                    // because of where the number comes from. A clean retry is
+                    // counted when a review card that was failed earlier in the
+                    // same session is re-played and solved unaided — so the only
+                    // way to produce the data is to *fail* a card first. A user
+                    // with no due cards yet, or one who simply solves their
+                    // reviews, never generates a single attempt, the metric
+                    // stays unmeasured, and an unmeasured criterion is unmet:
+                    // as a required conjunct it held rung 1 shut on evidence the
+                    // user had no way to go and create. It stays on the ladder
+                    // because the measurement is real and worth showing; it just
+                    // cannot be a gate until something other than a failed card
+                    // can feed it.
+                    id: "r1.cleanRetries",
+                    title: "Second tries land clean",
+                    metricKey: .cleanRetryRate,
+                    window: .lastGames(8),
+                    threshold: 0.55,
+                    comparison: .greaterThanOrEqual,
+                    isRequired: false,
+                    habit: .blunderCheck
+                ),
+                Skill(
                     id: "r1.puzzleRating",
-                    title: "Puzzle rating 1000 with a settled deviation",
+                    // "Settled" rather than "with a settled deviation": the
+                    // second criterion is a Glicko RD, and RD is a word the
+                    // user has no reason to know on the first screen after
+                    // calibration, where this title is shown verbatim.
+                    title: "Puzzle rating 1000, and settled",
                     criteria: [
                         SkillCriterion(
                             metricKey: .puzzleRating,
@@ -185,6 +210,18 @@ public enum Curriculum {
 
     // MARK: - Rung 2
 
+    /// `Forks, pins, skewers, discovered attacks and back-rank mates`.
+    ///
+    /// An Oxford-comma-free list with "and" before the last item, because the
+    /// result is read as a sentence fragment in a skill title rather than
+    /// scanned as data.
+    static func themeList(_ themes: [ThemeTag]) -> String {
+        let nouns = themes.map(\.pluralNoun)
+        guard let last = nouns.last else { return "Tactical themes" }
+        guard nouns.count > 1 else { return last.capitalisedFirst }
+        return (nouns.dropLast().joined(separator: ", ") + " and " + last).capitalisedFirst
+    }
+
     /// 1000-1400. The player no longer drops pieces; now they have to *see*
     /// the tactics that are there.
     private static func rung2(_ t: DomainTuning.Curriculum) -> Rung {
@@ -195,7 +232,12 @@ public enum Curriculum {
             skills: [
                 Skill(
                     id: "r2.themes",
-                    title: "Core tactical themes at \(t.themeRatingFloor)+",
+                    // The themes are named rather than summarised as "core
+                    // tactical themes": a row that does not say which patterns
+                    // it means is a row the user cannot go and practise, which
+                    // is the only reason the sub-skills are listed at all. Built
+                    // from the tuning's list so it cannot drift from the gate.
+                    title: "\(Self.themeList(t.rung2Themes)) at \(t.themeRatingFloor)+",
                     criteria: t.rung2Themes.map { theme in
                         SkillCriterion(
                             metricKey: .puzzleThemeSuccess(theme, ratingFloor: t.themeRatingFloor),
@@ -241,11 +283,28 @@ public enum Curriculum {
                         // The guided-mode hit rate is the *deliberate* half of
                         // the same skill: the game metric says it happens, this
                         // says the user can do it on demand when prompted.
+                        //
+                        // The minimum sample is the part that was missing, and
+                        // it is not decoration. Guided mode asks at most three
+                        // questions per game, so a single answered prompt was a
+                        // 100% hit rate — enough on its own to certify a
+                        // *required* rung-2 skill — and two missed ones blocked
+                        // the rung just as cheaply. Rung promotion picks which
+                        // habit the week's focus trains, so a gate this noisy
+                        // mis-aims the whole loop.
+                        //
+                        // Most rates on the ladder need no such rule because
+                        // their denominator *is* the game count, and
+                        // ``DomainTuning/Curriculum/minimumGamesAtRung`` already
+                        // makes that ten. A rate counted in anything else has to
+                        // say so itself: the puzzle-theme gates and the
+                        // critical-moment gate do, and this one did not.
                         SkillCriterion(
                             metricKey: .guidedScanThreatsHitRate,
                             window: .lastGames(10),
                             threshold: 0.60,
-                            comparison: .greaterThanOrEqual
+                            comparison: .greaterThanOrEqual,
+                            minimumSamples: t.guidedPromptMinimumSamples
                         )
                     ],
                     isRequired: true,
@@ -253,7 +312,12 @@ public enum Curriculum {
                 ),
                 Skill(
                     id: "r2.ladderStrength",
-                    title: "Ladder rating 1350 and holding",
+                    // "Game rating", not "ladder rating". On first launch "the
+                    // ladder" is the staircase of opponent ratings, and reusing
+                    // the word for the user's own rating — inside a section
+                    // built of rungs — leaves the reader unable to tell which
+                    // of the three the number belongs to.
+                    title: "Game rating 1350 and holding",
                     criteria: [
                         SkillCriterion(
                             metricKey: .ladderRating,
@@ -296,7 +360,11 @@ public enum Curriculum {
                 ),
                 Skill(
                     id: "r3.criticalMoments",
-                    title: "Get the critical moments right",
+                    // "Hold", not "get right": the metric counts moments the
+                    // user came through without giving anything back, which is
+                    // holding the position — finding the single best move is a
+                    // stronger claim than the measurement supports.
+                    title: "Hold the critical moments",
                     metricKey: .criticalMomentHitRate,
                     window: .lastGames(12),
                     threshold: 0.55,

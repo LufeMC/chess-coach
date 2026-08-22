@@ -17,6 +17,17 @@ struct GameSummaryRow: Identifiable, Sendable, Equatable {
     var result: GameResult?
     var accuracyText: String
     var analysisState: AnalysisState
+    /// Moments this game still owes the user, in the same count Today's CTA
+    /// promises. Zero on a game with nothing left, which is most of them.
+    var toReviewCount: Int = 0
+
+    /// The caption that separates "a clean win" from "three blunders nobody has
+    /// looked at". Without it a month of play is thirty near-identical rows and
+    /// the game you abandoned halfway through a review is unfindable.
+    var toReviewText: String? {
+        guard toReviewCount > 0 else { return nil }
+        return "\(toReviewCount) to review"
+    }
 
     struct Indicator: Sendable, Equatable {
         var symbol: String
@@ -43,7 +54,12 @@ struct GameSummaryRow: Identifiable, Sendable, Equatable {
     /// of a result that matters in a personal history.
     var userColor: PlayerColor?
 
-    static func make(game: Database.Game, opponentName: String, calendar: Calendar = .current) -> GameSummaryRow {
+    static func make(
+        game: Database.Game,
+        opponentName: String,
+        toReviewCount: Int = 0,
+        calendar: Calendar = .current
+    ) -> GameSummaryRow {
         let result = game.result.flatMap(GameResult.init(rawValue:))
         let color = game.color
 
@@ -69,6 +85,7 @@ struct GameSummaryRow: Identifiable, Sendable, Equatable {
             // Lichess curve does not have.
             accuracyText: game.userAccuracy.map { "\(Int($0.rounded()))%" } ?? "—",
             analysisState: game.analysis ?? .pending,
+            toReviewCount: toReviewCount,
             userColor: color
         )
     }

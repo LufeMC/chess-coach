@@ -47,6 +47,20 @@ struct AnalysisStore: Sendable {
         try database.games.recent(limit: limit).filter { $0.analysis == .running }
     }
 
+    /// Games whose pass ended in `failed`.
+    ///
+    /// Same scan as ``stalled(limit:)`` and for the same reason. Bounded to the
+    /// recent games on purpose as well as for convenience: a failure from
+    /// hundreds of games ago has already been overtaken by everything the user
+    /// has played since, and re-running it would spend the engine on a review
+    /// nobody is waiting for.
+    func failed(limit: Int = 50) throws -> [GameRow] {
+        // `isFinished` because the queue only ever offers finished games: a
+        // requeued game that has not ended would sit in `pending` for good,
+        // which is a worse state than the one it came from.
+        try database.games.recent(limit: limit).filter { $0.analysis == .failed && $0.isFinished }
+    }
+
     /// The two settings that shape moment selection.
     func policyInputs() throws -> (weeklyFocusHabit: String?, currentRung: Int) {
         let settings = try database.settings.current()

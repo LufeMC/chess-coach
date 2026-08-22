@@ -48,6 +48,13 @@ struct TrainHomeScreen: View {
 
                 queueCard
 
+                // Below the set, always. The daily set is the day's work and
+                // this is the addition to it; putting them side by side would
+                // make them read as two ways to train and invite picking one.
+                if home.canStartSession {
+                    calculationCard
+                }
+
                 if !home.due.isEmpty {
                     dueSection
                 }
@@ -62,15 +69,26 @@ struct TrainHomeScreen: View {
         }
         .background(Palette.surfaceGround.dynamic.ignoresSafeArea())
         .navigationTitle("Train")
+        // The leak request is consumed before the curriculum recompute, not
+        // after it. `measure()` replays up to twenty games, and a user who
+        // tapped "Train blunder-checking" on Profile was left looking at this
+        // screen for the length of that replay, with nothing saying a session
+        // was coming.
         .task {
-            await home.load()
+            await home.prepare()
             consumeLeakRequest()
+            consumeStartRequest()
+            await home.measure()
         }
         // The tab stays alive once visited, so a leak tapped later would never
         // reach `task`. Both entry points run the same consume, which is what
         // stops a stale request aiming a session the user has moved on from.
         .onChange(of: model.pendingTrainingHabit) { _, habit in
             if habit != nil { consumeLeakRequest() }
+        }
+        // Same pair for Today's CTA, and for the same reason.
+        .onChange(of: model.pendingTrainRequest) { _, requested in
+            if requested { consumeStartRequest() }
         }
         .trainingCover(item: $route) { route in
             destination(for: route)
@@ -121,16 +139,23 @@ struct TrainHomeScreen: View {
                     .background(Circle().fill(Palette.surfaceSunken.dynamic))
 
                 VStack(alignment: .leading, spacing: 2) {
-                    Text("Set").typeRole(.headline)
+                    Text("Today's set").typeRole(.headline)
                     Text(setSubtitle).typeRole(.caption)
+                        .fixedSize(horizontal: false, vertical: true)
                 }
 
                 Spacer(minLength: 0)
             }
 
+            if let focus = focusLine {
+                Text(focus)
+                    .typeRole(.caption)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
             LengthSelector(lengths: TrainHomeModel.lengths, selection: $home.length)
 
-            Button("Start") { route = .puzzles }
+            Button(startTitle) { route = .puzzles }
                 .buttonStyle(.primaryAction)
                 .disabled(!home.canStartSession)
         }
@@ -138,10 +163,117 @@ struct TrainHomeScreen: View {
         .elevation(.raised, cornerRadius: CornerRadius.card)
     }
 
+    /// What the set contains, in the order it arrives in.
+    ///
+    /// The old subtitle counted the puzzles and nothing else, which is not what
+    /// a set is: a lesson or its exercise comes first, and the length promise
+    /// covering only the puzzles is a promise the user cannot budget against.
+    /// The concept is named by *family*, never by title — "The outpost" is most
+    /// of the answer to its own exercise.
     private var setSubtitle: String {
         guard home.canStartSession else { return "The puzzle corpus is missing from this build." }
-        guard home.dueCount > 0 else { return "\(home.length) puzzles." }
-        return "\(home.length) puzzles — \(home.dueCount) due for review."
+
+        let puzzles = "\(home.length) puzzles"
+        let opening: String
+        if let selection = home.nextConcept {
+            let family = selection.concept.family.label.lowercased()
+            let article = PuzzleConcept.article(for: family)
+            opening = selection.teachFirst
+                ? "\(article.prefix(1).uppercased() + article.dropFirst()) \(family) to learn, then \(puzzles)"
+                : "\(article.prefix(1).uppercased() + article.dropFirst()) \(family) to practise, then \(puzzles)"
+        } else {
+            opening = puzzles.prefix(1).uppercased() + puzzles.dropFirst()
+        }
+
+        guard home.dueCount > 0 else { return "\(opening)." }
+        // "Due for review" is the scheduler's word for it. What the user
+        // recognises is that these are the ones they got wrong before.
+        return "\(opening) — \(home.dueCount) of them you missed before."
+    }
+
+    /// The habit the mix is weighted toward, and where it came from.
+    ///
+    /// Computed for every session and shown nowhere: sixty per cent of the
+    /// fresh puzzles are themed to it, so the one line that connects "your leak
+    /// is king safety" to "these puzzles" was missing from both ends.
+    private var focusLine: String? {
+        guard home.canStartSession, home.focus != nil else { return nil }
+        return "Weighted toward \(home.focusChipTitle.lowercased()) — the habit your own games say costs you most."
+    }
+
+    private var startTitle: String {
+        guard home.canStartSession else { return "Start" }
+        return "Start the set · ~\(home.estimatedMinutes) min"
+    }
+
+    // MARK: Calculation
+
+    /// The slow set: a few puzzles from above the user's band, worked out rather
+    /// than recognised.
+    ///
+    /// ## Why this is not a fourth Length chip
+    ///
+    /// Because it is not more of the same thing. The daily set is a recognition
+    /// dose — inside 150 points of the user, graded `.easy` under ten seconds,
+    /// over the moment the first move is right — and doing fifteen of those
+    /// instead of ten trains the same reflex for longer. What separates 1500
+    /// from 2000 is holding a line four to six plies deep, which needs a
+    /// position the user *cannot* see at a glance and permission to sit on it.
+    /// Neither is available anywhere on the length control, so it is a separate
+    /// step with its own price on its own button.
+    ///
+    /// Bordered rather than filled: `Start the set` is this screen's one accent,
+    /// and the daily set is still the thing to do first.
+    private var calculationCard: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            HStack(spacing: 12) {
+                // A branching arrow, sunken like the set's own glyph. A tree of
+                // variations is what the card is asking for, and it is the one
+                // symbol in the set that is not a board or a clock — both of
+                // which would say the opposite of what this mode means.
+                Image(systemName: "arrow.triangle.branch")
+                    .font(.system(size: 15, weight: .semibold))
+                    .foregroundStyle(.secondary)
+                    .frame(width: 34, height: 34)
+                    .background(Circle().fill(Palette.surfaceSunken.dynamic))
+
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Calculation").typeRole(.headline)
+                    Text(calculationSubtitle)
+                        .typeRole(.caption)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+
+                Spacer(minLength: 0)
+            }
+
+            // No button at all when the band is empty, rather than a disabled
+            // one. A control that names three puzzles and twelve minutes while
+            // the line above it says there are none is the app arguing with
+            // itself, and a greyed-out button reads as something the user did
+            // wrong.
+            if home.canStartCalculation {
+                Button(calculationTitle) { route = .calculation }
+                    .buttonStyle(.secondaryAction)
+            }
+        }
+        .padding(16)
+        .elevation(.raised, cornerRadius: CornerRadius.card)
+    }
+
+    /// What the calculation set is, or why there is none. See ``CalculationCopy``.
+    private var calculationSubtitle: String {
+        guard home.canStartCalculation else {
+            return CalculationCopy.emptyBand(home.calculationBand)
+        }
+        return CalculationCopy.offer(
+            offsetLabel: home.calculationOffsetLabel,
+            minutesPerPuzzle: home.calculationMinutesPerPuzzle
+        )
+    }
+
+    private var calculationTitle: String {
+        CalculationCopy.title(puzzles: home.calculationSupply, minutes: home.calculationMinutes)
     }
 
     // MARK: What the sets have covered
@@ -169,6 +301,13 @@ struct TrainHomeScreen: View {
 
         return VStack(alignment: .leading, spacing: 12) {
             SectionHeader(title: "Your training", qualifier: taughtQualifier)
+
+            // "Set" and "idea" are this screen's own words and nothing defined
+            // them. One sentence buys both, and the row's own affordance —
+            // tapping to read a lesson again — with it.
+            Text("Each set teaches one idea before its puzzles. Tap one to read it again.")
+                .typeRole(.caption)
+                .fixedSize(horizontal: false, vertical: true)
 
             VStack(spacing: 0) {
                 ForEach(Array(taught.enumerated()), id: \.element.id) { row in
@@ -201,8 +340,8 @@ struct TrainHomeScreen: View {
 
             Text(
                 home.covered.contains(where: \.isTaught)
-                    ? "\(remaining) more, as your sets reach them"
-                    : "\(remaining) ideas your sets will teach you"
+                    ? "\(remaining) more, one per set, as your rating reaches them"
+                    : "\(remaining) more ideas, one taught per set"
             )
             .typeRole(.body, appliesForeground: false)
             .foregroundStyle(.secondary)
@@ -242,7 +381,28 @@ struct TrainHomeScreen: View {
     /// what `SessionAssembler` weights the drill mix by.
     private func consumeLeakRequest() {
         guard let habit = model.consumeTrainingHabit() else { return }
+        // A leak tap used to route into the cover unconditionally, which is how
+        // a build with no puzzle corpus produced a full-screen "Training
+        // unavailable" with no way back. `Start` has always been disabled in
+        // that state; this path simply bypassed it.
+        guard home.canStartSession else { return }
         requestedFocus = home.focus(for: habit)
+        route = .puzzles
+    }
+
+    /// Opens the set Today's CTA already priced.
+    ///
+    /// Today names the length the user chose here and the minutes it costs, so
+    /// arriving at a length selector and a second `Start` is the app asking
+    /// again for a decision it already has. The week's own focus is left alone —
+    /// this is the ordinary daily set, not a leak drill.
+    ///
+    /// The `canStartSession` guard is the same one `Start` carries: a build with
+    /// no puzzle corpus must not answer the CTA with a full-screen "Training
+    /// unavailable" the user has to find their way out of.
+    private func consumeStartRequest() {
+        guard model.consumeTrainRequest() else { return }
+        guard home.canStartSession, route == nil else { return }
         route = .puzzles
     }
 
@@ -251,33 +411,75 @@ struct TrainHomeScreen: View {
         switch route {
         case .puzzles:
             if let service = home.makeTrainingService() {
+                // The concept the card has been advertising, handed over rather
+                // than resolved a second time. Both sides ask the same
+                // scheduler with the same rows, so they normally agree — but
+                // "an endgame to learn, then 10 puzzles" is a promise, and a
+                // second resolution can answer differently the moment anything
+                // in between touches `lastSeenAt`. Nil when the home screen's
+                // read has not landed yet, in which case the session resolves
+                // its own, which is what it always did.
                 let session = PuzzleSessionModel(
                     driver: service,
                     focus: requestedFocus ?? home.focus,
-                    evaluator: EnginePuzzleEvaluator(service: model.engineService)
+                    evaluator: EnginePuzzleEvaluator(service: model.engineService),
+                    concept: home.nextConcept,
+                    // A leak drill names its own subject on the button that
+                    // opened it, so it skips the lesson slot: the scheduler's
+                    // next concept is chosen by rotation, and arriving at one
+                    // after tapping "Train blunder-checking" reads as the app
+                    // ignoring the request.
+                    teachesConcept: requestedFocus == nil
                 )
                 NavigationStack {
-                    PuzzleSessionScreen(model: session)
+                    // A set whose concept was an endgame ends by *offering* the
+                    // drill. Handed back rather than pushed from inside the
+                    // session, because the drill has its own screen and its own
+                    // model and the session cover is not the place to host a
+                    // second one — and handed back only when the user asked for
+                    // it, so closing a set early is not answered with another
+                    // twenty moves.
+                    PuzzleSessionScreen(
+                        model: session,
+                        focusName: (requestedFocus ?? home.focus).map { FocusVocabulary.chipTitle($0.habit) }
+                    ) { kind in pendingDrill = kind }
                 }
-                // A set whose concept was an endgame ends by asking for the
-                // drill. Read on dismissal rather than pushed from inside the
-                // session, because the drill has its own screen and its own
-                // model and the session cover is not the place to host a
-                // second one.
-                .onDisappear { pendingDrill = session.pendingDrill }
+            } else {
+                unavailable
+            }
+        case .calculation:
+            if let service = home.makeCalculationService() {
+                NavigationStack {
+                    // No concept, no focus, no drill handoff. The card priced
+                    // this at three puzzles; anything else in front of them is
+                    // time the user was not told about, and on the one set whose
+                    // premise is that the minutes go on the position.
+                    PuzzleSessionScreen(
+                        model: PuzzleSessionModel(
+                            driver: service,
+                            evaluator: EnginePuzzleEvaluator(service: model.engineService),
+                            isCalculationSet: true
+                        )
+                    )
+                }
             } else {
                 unavailable
             }
         case let .concept(concept):
             if let service = home.makeTrainingService() {
                 NavigationStack {
+                    // The same handoff as the set. Without it, revisiting an
+                    // endgame technique from the training list showed the
+                    // lesson, said "Got it", and then went back to this screen
+                    // having practised nothing — which is the one thing that
+                    // row advertises.
                     PuzzleSessionScreen(
                         model: PuzzleSessionModel(
                             driver: service,
                             evaluator: EnginePuzzleEvaluator(service: model.engineService),
                             soloConcept: concept
                         )
-                    )
+                    ) { kind in pendingDrill = kind }
                 }
             } else {
                 unavailable
@@ -295,11 +497,19 @@ struct TrainHomeScreen: View {
         }
     }
 
+    /// The cover's root when there is nothing to serve.
+    ///
+    /// It carries its own way out: this is a full-screen cover, which cannot be
+    /// swiped away, and the stage it replaces is the one that would have had
+    /// the close button.
     private var unavailable: some View {
         ContentUnavailableView {
             Label("Training unavailable", systemImage: "square.grid.3x3")
         } description: {
             Text("The app could not open its databases.")
+        } actions: {
+            Button("Back to Train") { route = nil }
+                .buttonStyle(.secondaryAction)
         }
     }
 }
@@ -333,7 +543,7 @@ private struct LengthSelector: View {
                 .fill(Palette.surfaceSunken.dynamic)
         )
         .accessibilityElement(children: .contain)
-        .accessibilityLabel("Session length")
+        .accessibilityLabel("Set length")
     }
 
     private func segment(_ length: Int) -> some View {
@@ -434,17 +644,21 @@ private struct PromotionRow: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
+            // "Rung" stays — it is what Profile's ladder calls the same number,
+            // and two words for one thing is worse than one unfamiliar word.
+            // What was missing is what it means and what accepting it changes.
             Text("Rung \(promotion.rung)")
                 .typeRole(.label)
 
             Text(promotion.title)
                 .typeRole(.headline)
 
-            Text("Every required skill on your rung is met.")
+            Text("The ladder's next step is unlocked: every required skill on your current rung is "
+                + "met. Moving up raises the puzzle difficulty and changes what your sets practise.")
                 .typeRole(.caption)
                 .fixedSize(horizontal: false, vertical: true)
 
-            Button("Move up", action: onAccept)
+            Button("Move up to rung \(promotion.rung)", action: onAccept)
                 .buttonStyle(.secondaryAction)
                 .padding(.top, 2)
         }
@@ -457,6 +671,8 @@ private struct PromotionRow: View {
 /// Where the Train tab can go.
 enum TrainRoute: Identifiable, Hashable {
     case puzzles
+    /// The slow set, drawn from a band above the user's rating.
+    case calculation
     case drill(EndgameDrillKind)
     /// One concept revisited on its own, from the training list.
     case concept(TrainingConcept)
@@ -464,6 +680,7 @@ enum TrainRoute: Identifiable, Hashable {
     var id: String {
         switch self {
         case .puzzles: "puzzles"
+        case .calculation: "calculation"
         case let .drill(kind): "drill.\(kind.rawValue)"
         case let .concept(concept): "concept.\(concept.id)"
         }

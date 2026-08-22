@@ -70,6 +70,11 @@ private struct TodayBoardSquare: View {
     let opponentName: String?
     let onTap: (TodayStep) -> Void
 
+    /// Scaled, so the square keeps its proportions at every text size rather
+    /// than clipping the words inside a fixed box.
+    @ScaledMetric(relativeTo: .subheadline) private var squareHeight: CGFloat = 132
+    @ScaledMetric(relativeTo: .subheadline) private var iconHeight: CGFloat = 46
+
     private var isTappable: Bool {
         state.status == .current || state.status == .available
     }
@@ -93,31 +98,37 @@ private struct TodayBoardSquare: View {
         }
         .accessibilityElement(children: .combine)
         .accessibilityLabel(accessibilityLabel)
-        .accessibilityHint(state.status == .locked ? (state.lockedReason ?? "") : "")
+        .accessibilityHint(state.status.isDimmed ? (state.note ?? "") : "")
     }
 
     private var face: some View {
         VStack(spacing: 10) {
             icon
-                .frame(height: 46)
+                .frame(height: iconHeight)
 
             VStack(spacing: 2) {
                 Text(shortTitle)
                     .font(.system(.subheadline, design: .rounded, weight: .heavy))
                     .foregroundStyle(labelTint)
                     .lineLimit(1)
-                    .minimumScaleFactor(0.8)
+                    .minimumScaleFactor(0.7)
 
                 Text(subtitle)
                     .font(.system(.caption, design: .rounded, weight: .bold))
                     .monospacedDigit()
                     .foregroundStyle(labelTint.opacity(0.8))
-                    .lineLimit(1)
-                    .minimumScaleFactor(0.8)
+                    .lineLimit(2)
+                    .multilineTextAlignment(.center)
+                    .minimumScaleFactor(0.7)
             }
         }
         .frame(maxWidth: .infinity)
-        .frame(height: 132)
+        // A floor, not a fixed height. Three tiles in a row cannot each be
+        // given the width their text wants, so the one dimension left to give
+        // is vertical: at accessibility sizes the square grows instead of
+        // shrinking "Moments" to an unreadable 80%.
+        .frame(minHeight: squareHeight)
+        .padding(.vertical, 8)
         .padding(.horizontal, 6)
     }
 
@@ -140,17 +151,26 @@ private struct TodayBoardSquare: View {
         // On the game square the opponent's face *is* the icon. A clock beside
         // a small portrait was two symbols competing inside 44 points, and the
         // honest answer to "what is this square" is the person you are playing.
-        if let opponentName, state.status != .done, state.status != .locked {
+        if let opponentName, state.status != .done, !state.status.isDimmed {
             OpponentAvatar(name: opponentName, size: 46)
         } else {
             glyph
         }
     }
 
+    /// The square's second line: where the step stands, in as few words as a
+    /// square can hold.
+    ///
+    /// A row with no tally shows its reason rather than the word "locked" — the
+    /// point of naming the blocker is lost if the only surface that renders it
+    /// is VoiceOver, and "after your game" is both shorter and an instruction.
     private var subtitle: String {
         if state.status == .done { return "done" }
-        if state.lockedReason != nil { return "locked" }
+        if let note = state.note { return note }
         guard let tally = state.tally else { return "" }
+        // The game is one game: a binary step drawn as `0 of 1` reads like an
+        // arithmetic bug rather than "not played yet".
+        if state.step == .game { return tally.value == "0" ? "not yet" : "played" }
         return "\(tally.value) \(tally.denominator)"
     }
 
@@ -164,6 +184,13 @@ private struct TodayBoardSquare: View {
         switch state.status {
         case .done: "checkmark"
         case .locked: "lock.fill"
+        // Waiting is a clock hand, not a spinner: the square says the pass is
+        // running and then stops moving, because an animation looping under a
+        // number nobody is watching is the app performing effort.
+        case .waiting: "hourglass"
+        // A dash, which is the app's mark for "measured, and there is nothing
+        // here" everywhere else it appears.
+        case .empty: "minus"
         default:
             switch state.step {
             // Chess glyphs where one exists: the game is a clock, because a
@@ -180,10 +207,14 @@ private struct TodayBoardSquare: View {
     /// Done squares go gold, live squares take the brand, and the rest sit in
     /// the two board tones — which is what makes the row read as a rank rather
     /// than as three unrelated tiles.
+    ///
+    /// A step that ended with nothing in it stays in the board tones rather
+    /// than going gold: gold is the colour of work finished, and a clean game's
+    /// empty review queue is not work the user did.
     private var fill: DualColor {
         switch state.status {
         case .done: Palette.gold
-        case .locked: isDarkSquare ? Palette.surfaceSunken : Palette.lockedFill
+        case .locked, .waiting, .empty: isDarkSquare ? Palette.surfaceSunken : Palette.lockedFill
         default: Palette.accent
         }
     }
@@ -191,19 +222,19 @@ private struct TodayBoardSquare: View {
     private var edge: DualColor {
         switch state.status {
         case .done: Palette.goldEdge
-        case .locked: Palette.lockedEdge
+        case .locked, .waiting, .empty: Palette.lockedEdge
         default: Palette.accentEdge
         }
     }
 
     private var glyphTint: Color {
-        state.status == .locked
+        state.status.isDimmed
             ? DualColor(light: 0xA9A4B5, dark: 0x6B6280).dynamic
             : .white
     }
 
     private var labelTint: Color {
-        state.status == .locked
+        state.status.isDimmed
             ? DualColor(light: 0xA9A4B5, dark: 0x6B6280).dynamic
             : .white
     }
@@ -212,10 +243,10 @@ private struct TodayBoardSquare: View {
         var parts = [state.title]
         if state.status == .done {
             parts.append("done")
-        } else if let reason = state.lockedReason {
-            parts.append(reason)
+        } else if let note = state.note {
+            parts.append(note)
         } else if let tally = state.tally {
-            parts.append(tally.accessibilityText)
+            parts.append(state.step == .game ? subtitle : tally.accessibilityText)
         }
         if let opponentName { parts.append("against \(opponentName)") }
         return parts.joined(separator: ", ")

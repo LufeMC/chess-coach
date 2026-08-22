@@ -188,7 +188,17 @@ enum PuzzleConcept {
                 // the idea — worth keeping, since the vocabulary is half of what
                 // the user is here for. The move goes first so the sentence
                 // still opens with something they can act on.
-                sentence = "\(verb) — \(move): \(named(concept))."
+                //
+                // Two sentences rather than `move: concept`, and the difference
+                // matters. The tag belongs to the *puzzle*; the move being
+                // explained is whichever one the user was standing in front of
+                // when it went wrong, which on a multi-move line is regularly
+                // not the themed move at all — a fork puzzle's final recapture,
+                // a mate-in-three's quiet second move. The colon read as "this
+                // move is a pin" and attached the word the user is here to
+                // learn to the wrong picture. Naming the puzzle's subject
+                // instead is the claim the theme tag can actually support.
+                sentence = "\(verb) — \(move). This puzzle was about \(named(concept))."
             } else if let move {
                 sentence = "\(verb) — \(move)."
             } else if let concept = noun(for: theme) {
@@ -246,9 +256,14 @@ enum PuzzleConcept {
     }
 
     /// The chip label for a missed item, which is the concept alone.
-    static func chipLabel(theme: ThemeTag, answer: String?) -> String {
-        if let concept = noun(for: theme) { return concept }
-        if let square = destination(ofUCI: answer) { return square.notation }
-        return "position"
+    ///
+    /// A square is not a concept. The chip used to fall through to the answer's
+    /// destination for any theme with no noun — so a position from the user's
+    /// own game, tagged only by its phase, appeared in the summary as `f3`,
+    /// which names nothing the reader can look up or think about later.
+    /// The answer is still taken and still ignored: `MissedItem` carries it for
+    /// the row to be tapped through to, and the label is the concept alone.
+    static func chipLabel(theme: ThemeTag, answer _: String?) -> String {
+        noun(for: theme) ?? "position"
     }
 }

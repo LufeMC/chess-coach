@@ -48,8 +48,10 @@ struct GameLibraryScreen: View {
     private var content: some View {
         switch model.state {
         case .loading:
-            ProgressView()
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            // The final layout is known — rows of a fixed height — so it is
+            // drawn rather than covered by a spinner. `craft-standards.md`:
+            // no spinners outside a button, and nothing at all under ~200ms.
+            LoadingRows()
 
         case .failed(let message):
             ContentUnavailableView {
@@ -105,6 +107,11 @@ private struct GameLibraryRow: View {
                     .typeRole(.headline)
                 Text(row.subtitle)
                     .typeRole(.caption)
+                if let toReview = row.toReviewText {
+                    Text(toReview)
+                        .typeRole(.caption, appliesForeground: false)
+                        .foregroundStyle(Palette.accent.dynamic)
+                }
             }
 
             Spacer(minLength: 8)
@@ -123,6 +130,30 @@ private struct GameLibraryRow: View {
                 .frame(width: 44, alignment: .trailing)
         }
         .padding(.vertical, 2)
+    }
+}
+
+/// The list's own shape, drawn while the read is in flight.
+private struct LoadingRows: View {
+    var body: some View {
+        VStack(spacing: 0) {
+            ForEach(0..<6, id: \.self) { _ in
+                HStack(spacing: 12) {
+                    SkeletonView(width: 22, height: 22, cornerRadius: 11)
+                    VStack(alignment: .leading, spacing: 6) {
+                        SkeletonView(width: 96, height: 14)
+                        SkeletonView(width: 150, height: 11)
+                    }
+                    Spacer(minLength: 8)
+                    SkeletonView(width: 34, height: 12)
+                }
+                .padding(.horizontal, 20)
+                .padding(.vertical, 12)
+            }
+            Spacer(minLength: 0)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+        .accessibilityLabel(Text("Loading your games"))
     }
 }
 
@@ -154,9 +185,22 @@ final class GameLibraryModel {
             return
         }
 
-        let outcome = await Task.detached(priority: .userInitiated) { () -> Result<[Database.Game], LoadFailure> in
+        let outcome = await Task.detached(priority: .userInitiated) { () -> Result<[GameSummaryRow], LoadFailure> in
             do {
-                return .success(try database.games.recent(limit: 100))
+                let games = try database.games.recent(limit: 100)
+                return .success(
+                    games.map { game in
+                        GameSummaryRow.make(
+                            game: game,
+                            opponentName: OpponentRoster.opponent(forRating: game.opponentRating).name,
+                            // An indexed count per row rather than a fetch: it is
+                            // the same number Today's CTA promises, so a row that
+                            // says "2 to review" and the checklist step that sends
+                            // you there cannot disagree.
+                            toReviewCount: (try? database.moments.eligibleCount(forGame: game.id)) ?? 0
+                        )
+                    }
+                )
             } catch {
                 return .failure(LoadFailure(message: String(describing: error)))
             }
@@ -164,14 +208,10 @@ final class GameLibraryModel {
 
         switch outcome {
         case .failure(let failure):
-            state = .failed(failure.message)
-        case .success(let games):
-            rows = games.map { game in
-                GameSummaryRow.make(
-                    game: game,
-                    opponentName: OpponentRoster.opponent(forRating: game.opponentRating).name
-                )
-            }
+            AppLog.persistence.error("Could not list games: \(failure.message, privacy: .public)")
+            state = .failed(StorageFailureText.reading(failure.message))
+        case .success(let loaded):
+            rows = loaded
             state = .ready
         }
     }

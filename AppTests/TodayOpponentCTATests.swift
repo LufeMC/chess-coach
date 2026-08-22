@@ -8,6 +8,10 @@ import Testing
 /// hides the half of the decision the user actually weighs, which is who they
 /// are about to face. These pin the naming *and* the price, because dropping
 /// either one to make room for the other was the obvious wrong fix.
+///
+/// The price is 25 minutes because sparring is a 15+10 rapid game. A CTA that
+/// says ten and opens a screen reading "15+10" is a promise broken inside one
+/// tap.
 @Suite("Today — the CTA names the opponent")
 struct TodayOpponentCTATests {
 
@@ -20,7 +24,7 @@ struct TodayOpponentCTATests {
             opponentName: "Oscar"
         )
 
-        #expect(plan.primary.title == "Play Oscar · ~10 min")
+        #expect(plan.primary.title == "Play Oscar · ~25 min")
         #expect(plan.primary.destination == .play)
         #expect(plan.primary.emphasis == .primary)
         #expect(plan.primary.step == .game)
@@ -35,7 +39,7 @@ struct TodayOpponentCTATests {
             opponentName: "Oscar"
         )
 
-        #expect(plan.primary.title == "Play Oscar · ~10 min")
+        #expect(plan.primary.title == "Play Oscar · ~25 min")
     }
 
     @Test("With nobody to name, the CTA describes the step rather than guessing")
@@ -45,7 +49,7 @@ struct TodayOpponentCTATests {
         // spent trust that the number in the same line is trying to build.
         let plan = TodayPlanner.plan(progress: .zero, hasHistory: true, streakBroken: false)
 
-        #expect(plan.primary.title == "Play 1 game · ~10 min")
+        #expect(plan.primary.title == "Play 1 game · ~25 min")
         #expect(plan.primary.title != "Play")
     }
 
@@ -60,7 +64,7 @@ struct TodayOpponentCTATests {
         )
 
         #expect(plan.phase == .complete)
-        #expect(plan.primary.title == "Play Petra · ~10 min")
+        #expect(plan.primary.title == "Play Petra · ~25 min")
         // Still bordered: the filled button never points at optional work.
         #expect(plan.primary.emphasis == .secondary)
     }

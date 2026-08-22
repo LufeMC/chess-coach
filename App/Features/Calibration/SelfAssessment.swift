@@ -70,6 +70,21 @@ enum CalibrationSeed {
     /// How far the ladder moves after each game.
     static let step = 100
 
+    /// The weakest opponent the engine can actually be.
+    ///
+    /// `Humanizer.Profile.anchors` starts at 800 and interpolation clamps below
+    /// it, so a ladder that walked down to 600 would put "Opponent 600" on the
+    /// screen and 600 into `mean(opponentRatings)` while the 800 profile played
+    /// every move. The label would be describing nothing, and the estimate would
+    /// be dragged down by strength the opponent never actually gave up. Stopping
+    /// the walk where the measured profiles stop is the only honest floor
+    /// available until a sub-800 anchor exists and has been measured; the old
+    /// floor of 400 was two unmeasured steps past the end of the ladder.
+    ///
+    /// It is also exactly ``opponentRating(for:)`` for `.new`, so the gentlest
+    /// seed and the floor agree by construction.
+    static let weakestOpponent = 800
+
     /// Where the opponent ladder starts.
     ///
     /// Offsets from ``defaultOpponentRating`` rather than absolute numbers, so
@@ -101,10 +116,13 @@ enum CalibrationSeed {
     ///
     /// A draw holds the ladder still: it is the one result that says the two
     /// sides are already close, so moving would be discarding the information.
+    ///
+    /// Losses stop at ``weakestOpponent`` rather than continuing down into
+    /// labels the engine cannot play.
     static func nextOpponentRating(current: Int, outcome: GameOutcome) -> Int {
         switch outcome {
         case .win: return current + step
-        case .loss: return max(400, current - step)
+        case .loss: return max(weakestOpponent, current - step)
         case .draw: return current
         }
     }

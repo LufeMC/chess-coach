@@ -63,7 +63,7 @@ public enum GameSummarizer {
     static func headline(outcome: GameOutcome, moments: [Moment]) -> String {
         let mistakes = moments.filter { $0.kind == .mistake }
 
-        guard let worst = mistakes.max(by: { $0.total < $1.total }) else {
+        guard let worst = costliest(mistakes) else {
             switch outcome {
             case .win: return "A win with nothing to pick apart"
             case .loss: return "A loss with no single moment behind it"
@@ -95,9 +95,9 @@ public enum GameSummarizer {
                 "\(causeName(repeated.tag)) came up \(countPhrase(repeated.count)) — that is the pattern, "
                     + "not the individual moves."
             )
-        } else if let first = mistakes.first {
-            sentences.append("The costliest decision was \(first.playedSAN) on move \(moveNumber(first.ply)): "
-                + "\(causeName(first.causeTag)).")
+        } else if let worst = costliest(mistakes) {
+            sentences.append("The costliest decision was \(worst.playedSAN) on move \(moveNumber(worst.ply)): "
+                + "\(causeName(worst.causeTag)).")
         }
 
         if moments.contains(where: { $0.kind == .reinforcement }) {
@@ -107,10 +107,37 @@ public enum GameSummarizer {
         if mistakes.isEmpty, outcome != .win {
             sentences.append("Nothing in this game crossed the threshold for review.")
         } else {
-            sentences.append("Work through the positions below on a board before you read the lines.")
+            // Not "on a board" — the reader is looking at one — and not "the
+            // lines", which promised engine variations the review does not
+            // print. It names the two things that are actually on the screen,
+            // in the order that makes the second one worth reading.
+            sentences.append(
+                "Tap each position below and find the better move yourself before you open the coach's note."
+            )
         }
 
         return sentences.joined(separator: " ")
+    }
+
+    /// The move that actually cost the most.
+    ///
+    /// Both of the verdict's claims — which phase the game was decided in, and
+    /// which decision was the costliest — are claims about size, so they are
+    /// made on `deltaEP` and on nothing else. `Moment.total` is the *selection*
+    /// score, severity multiplied by learnability and by how relevant the lesson
+    /// is to this player's current rung, and it exists to choose which three
+    /// moments are worth showing. Reading it as "the worst move" lets a
+    /// teachable inaccuracy on the weekly focus habit outrank the blunder that
+    /// lost the game, and the verdict then names a phase the graph directly
+    /// above it visibly contradicts. Display order is no better: it named
+    /// whichever mistake happened first.
+    ///
+    /// Ties break to the earlier move, because the rest of the game followed
+    /// from it.
+    static func costliest(_ mistakes: [Moment]) -> Moment? {
+        mistakes.max { left, right in
+            left.deltaEP == right.deltaEP ? left.ply > right.ply : left.deltaEP < right.deltaEP
+        }
     }
 
     /// The cause that appeared more than once, if any. Two instances of one habit
@@ -143,23 +170,30 @@ public enum GameSummarizer {
     }
 
     /// The cause tags in the words a student reads, not the words the code uses.
+    ///
+    /// Word for word the names the coach card and the Profile leak table use.
+    /// This file cannot reach that table — AnalysisKit depends on nothing but
+    /// the board and the engine value types — so the alignment is kept by hand,
+    /// and it is worth keeping: a diagnosis worded three ways on one scroll is
+    /// three diagnoses to a reader trying to follow the thread from the verdict
+    /// to the card to the leak costing them the most rating.
     static func causeName(_ tag: CauseTag) -> String {
         switch tag {
-        case .missedNewThreat: "A threat you did not see arrive"
-        case .ignoredStandingThreat: "A threat left standing"
-        case .hungMovedPiece: "Moving a piece onto a square it could be taken on"
-        case .hungLeftPiece: "Leaving a piece loose"
-        case .allowedShallowTactic: "Allowing a one-move tactic"
-        case .allowedDeepTactic: "Allowing a longer combination"
-        case .miscalculatedTactic: "Calculating a tactic to the wrong end"
-        case .missedForcingIdea: "Missing a forcing idea"
-        case .forcingBias: "Reaching for the forcing move"
-        case .miscountedExchange: "Miscounting an exchange"
-        case .planlessTrade: "Trading without a reason"
-        case .kingExposure: "Loosening your own king"
+        case .missedNewThreat: "Missed opponent threats"
+        case .ignoredStandingThreat: "Ignored standing threats"
+        case .hungMovedPiece: "Hanging pieces"
+        case .hungLeftPiece: "Pieces left hanging"
+        case .allowedShallowTactic: "Allowed simple tactics"
+        case .allowedDeepTactic: "Allowed deep tactics"
+        case .miscalculatedTactic: "Miscalculated tactics"
+        case .missedForcingIdea: "Missed forcing ideas"
+        case .forcingBias: "Premature forcing moves"
+        case .miscountedExchange: "Miscounted exchanges"
+        case .planlessTrade: "Planless trades"
+        case .kingExposure: "King left exposed"
         case .endgameTechnique: "Endgame technique"
-        case .openingPrinciple: "An opening principle"
-        case .positionalDrift: "The position drifting"
+        case .openingPrinciple: "Opening principles"
+        case .positionalDrift: "Positional drift"
         case .generic: "A move that cost something"
         }
     }

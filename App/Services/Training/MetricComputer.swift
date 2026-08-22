@@ -124,6 +124,9 @@ enum MetricComputer {
     ///   prophylactic moves that *were* available, which the analysis pass does
     ///   not currently emit. Nothing in the stored data distinguishes "there was
     ///   no prophylactic move" from "there was one and it was missed".
+    /// A criterion on one of these is dropped before the ladder is drawn — see
+    /// `CurriculumLadderState` — because a row that can never tick is a promise
+    /// the build cannot keep.
     static let unsupportedMetrics: Set<String> = [
         MetricKey.prophylacticFindRate.rawValue
     ]
@@ -158,6 +161,9 @@ enum MetricComputer {
             case let .lastGames(count):
                 let slice = Array(statistics.prefix(count))
                 merge(gameMetrics(slice, window: window, tuning: tuning), into: &result)
+                // Prompt metrics get the full list, not the slice: their window
+                // is counted in guided games. See `guidedPromptMetrics`.
+                merge(guidedPromptMetrics(statistics, window: window, games: count), into: &result)
             case .lastDays, .allTime:
                 break
             }
@@ -293,25 +299,68 @@ enum MetricComputer {
             put(.rookEndingResultFlipsPer8, Double(flips) / Double(rookEndings.count) * 8, rookEndings.count)
         }
 
-        // Guided-mode prompts, per habit. Only `scanThreats` is gated today, but
-        // the loop is written over every habit so a new gate needs no new code.
-        var prompts: [String: (total: Int, hits: Int)] = [:]
-        for statistic in statistics {
-            for prompt in statistic.guidedPrompts {
-                var bucket = prompts[prompt.habit] ?? (0, 0)
-                bucket.total += 1
-                if prompt.hit { bucket.hits += 1 }
-                prompts[prompt.habit] = bucket
-            }
-        }
-        if let scan = prompts[Habit.scanThreats.rawValue], scan.total > 0 {
-            put(.guidedScanThreatsHitRate, Double(scan.hits) / Double(scan.total), scan.total)
-        }
-
         // Playing ladder.
         let ladderGames = statistics.compactMap(\.ladderGame)
         if let performance = EloLadder.performanceRating(games: ladderGames) {
             put(.ladderPerformance, performance, ladderGames.count)
+        }
+
+        return result
+    }
+
+    // MARK: Guided-mode prompts
+
+    /// Hit rate on the guided-mode coaching prompts, per habit.
+    ///
+    /// The one metric family whose window is *not* the last `games` rows of the
+    /// table, and the exception is deliberate. A prompt only exists in guided
+    /// mode, so a sparring game is not a zero for this metric — it is a
+    /// not-applicable — and letting one occupy a slot in "the last ten games"
+    /// meant the sample size depended on which mode the user happened to be in
+    /// lately. Someone alternating modes was judged on whatever three or four
+    /// guided games survived the cut; someone who played ten sparring games
+    /// since their last guided one lost the metric altogether, and
+    /// `Skill.evaluate(in:)` reads a missing value as unmet — silently
+    /// un-certifying the *required* `r2.threatAwareness` for playing the wrong
+    /// mode for a fortnight. The minimum-sample rule this metric now carries
+    /// would otherwise have made that worse, not better: eight prompts cannot
+    /// be collected out of a window sparring games are free to fill.
+    ///
+    /// Counting the window in games that actually asked about the habit gives
+    /// every user the same sample, and ages it out only when newer guided games
+    /// push it out. It is still bounded by how far back `MetricsService` loads,
+    /// so it cannot reach into ancient history to keep a stale rate alive.
+    private static func guidedPromptMetrics(
+        _ statistics: [GameStatistics],
+        window: MetricWindow,
+        games: Int
+    ) -> [MetricAddress: MetricValue] {
+        var result: [MetricAddress: MetricValue] = [:]
+        func put(_ key: MetricKey, _ value: Double, _ samples: Int) {
+            guard !unsupportedMetrics.contains(key.rawValue), samples > 0 else { return }
+            result[MetricAddress(key: key, window: window)] = MetricValue(value: value, sampleCount: samples)
+        }
+
+        // Bucketed per habit — only `scanThreats` is gated today, but a new
+        // guided gate then needs no new code here.
+        let habits = Set(statistics.flatMap { $0.guidedPrompts.map(\.habit) })
+        var prompts: [String: (total: Int, hits: Int)] = [:]
+        for habit in habits {
+            var bucket = (total: 0, hits: 0)
+            let asked = statistics.filter { statistic in
+                statistic.guidedPrompts.contains { $0.habit == habit }
+            }
+            for statistic in asked.prefix(games) {
+                for prompt in statistic.guidedPrompts where prompt.habit == habit {
+                    bucket.total += 1
+                    if prompt.hit { bucket.hits += 1 }
+                }
+            }
+            prompts[habit] = bucket
+        }
+
+        if let scan = prompts[Habit.scanThreats.rawValue], scan.total > 0 {
+            put(.guidedScanThreatsHitRate, Double(scan.hits) / Double(scan.total), scan.total)
         }
 
         return result
@@ -441,7 +490,13 @@ enum MetricComputer {
 
                 if isCritical {
                     statistics.criticalMoments += 1
-                    if let judgment, judgment < .mistake { statistics.criticalHits += 1 }
+                    // A hit is a moment the user came through without giving
+                    // anything back — not merely one that escaped the "mistake"
+                    // label. The mistake band opens at 0.20 expected points, so
+                    // counting anything below it would let a move that hands
+                    // over a fifth of the result count as holding the position,
+                    // at exactly the moments where the position was decided.
+                    if let judgment, judgment < .inaccuracy { statistics.criticalHits += 1 }
                     statistics.criticalThinkMs += Double(move.thinkTimeMs)
                     statistics.criticalThinkCount += 1
                     if ThinkBucket.classify(thinkTimeMs: move.thinkTimeMs, control: nil) == .fast {

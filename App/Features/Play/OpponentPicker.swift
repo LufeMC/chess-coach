@@ -1,5 +1,6 @@
 import Database
 import Foundation
+import TrainingCore
 
 /// Chooses who you play next.
 ///
@@ -29,12 +30,35 @@ struct OpponentPicker: Sendable {
     /// Conservative defaults for a user who hasn't calibrated yet.
     static let unmeasured = OpponentPicker(userRating: 1100, gamesPlayed: 0)
 
+    /// The ladder rule itself lives in `TrainingCore`, where it is tuned and
+    /// tested. The app had a second copy of it that rounded down instead of to
+    /// nearest and ignored `DomainTuning`, which quietly shaved the stretch
+    /// games; calling the real one is what makes the shipped ladder the
+    /// measured one.
     var rating: Int {
-        OpponentLadder.rating(forUserRating: userRating, gameIndex: gamesPlayed)
+        EloLadder.opponentRating(userRating: userRating, gameIndex: gamesPlayed)
     }
 
     var opponent: OpponentRoster.Opponent {
         OpponentRoster.opponent(forRating: rating)
+    }
+
+    /// Why this game sits where it does on the ladder, or nil for the two
+    /// ordinary games in the cycle.
+    ///
+    /// The cycle moves the opponent by as much as 150 points, and from the
+    /// user's side that reads as the same named person drifting in rating
+    /// between games — which undercuts the whole point of naming them. Saying
+    /// "a stretch game" turns the drift back into a plan.
+    var framing: String? {
+        let cycle = DomainTuning.default.ladder.opponentOffsetCycle
+        guard let hardest = cycle.max(), let easiest = cycle.min(), hardest != easiest else { return nil }
+        let offset = cycle[((gamesPlayed % cycle.count) + cycle.count) % cycle.count]
+        switch offset {
+        case hardest: return "a stretch game"
+        case easiest: return "a confidence game"
+        default: return nil
+        }
     }
 
     /// Loads the real inputs, falling back to the unmeasured default when the

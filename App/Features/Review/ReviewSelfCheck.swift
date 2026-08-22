@@ -49,11 +49,22 @@ enum ReviewSelfCheck {
             var label: String
             var byUser: Bool
             var thinkTimeMs: Int
+            /// Whether the analysis judged this move a mistake or a blunder.
+            ///
+            /// Read off the move row's own classification, which covers **every**
+            /// ply — unlike ``moments``, which is the slate of at most three the
+            /// selector kept. It is the only thing here that knows about the
+            /// mistakes that did not make the slate, and it exists to keep them
+            /// out of the decoys; see ``moveQuestion(id:prompt:answerPly:input:excludingJudgedMistakes:explanation:)``.
+            var isJudgedMistake: Bool = false
         }
 
         struct Moment: Sendable, Equatable {
             var ply: Int
             var causeTag: String
+            /// The move that punished this one, in SAN, when the stored line has
+            /// it. Names the reply in the explanation instead of describing it.
+            var refutationSAN: String? = nil
         }
 
         var moves: [Move]
@@ -106,70 +117,129 @@ enum ReviewSelfCheck {
     static func questions(for input: Input) -> [Question] {
         var questions: [Question] = []
 
-        if let ply = firstMoment(in: input, causedBy: materialCauses) {
-            questions.append(
-                moveQuestion(
-                    id: "material",
-                    prompt: "Where did you lose material?",
-                    answerPly: ply,
-                    input: input,
-                    explanation: "That is the move material went missing on. Counting what "
-                        + "is attacked and what defends it, before you move, is the habit "
-                        + "that catches this one."
-                )
+        if let moment = firstMoment(in: input, causedBy: materialCauses) {
+            let question = moveQuestion(
+                id: "material",
+                prompt: "Where did you lose material?",
+                answerPly: moment.ply,
+                input: input,
+                excludingJudgedMistakes: true,
+                explanation: "That is the move material went missing on. Counting what "
+                    + "is attacked and what defends it, before you move, is the habit "
+                    + "that catches this one."
+            )
+            if let question { questions.append(question) }
+        }
+
+        if let moment = firstMoment(in: input, causedBy: threatCauses) {
+            let question = moveQuestion(
+                id: "threat",
+                prompt: "Which move let your opponent's threat through?",
+                answerPly: moment.ply,
+                input: input,
+                excludingJudgedMistakes: true,
+                explanation: threatExplanation(for: moment)
+            )
+            if let question { questions.append(question) }
+        }
+
+        let clock = longestThink(in: input).flatMap { ply in
+            moveQuestion(
+                id: "clock",
+                prompt: "Which move did you spend longest on?",
+                answerPly: ply,
+                input: input,
+                // Not excluded here, unlike the two questions above: the longest
+                // think is as likely to be a blunder as anything else, and
+                // dropping the mistakes would tell the reader which move it was.
+                excludingJudgedMistakes: false,
+                explanation: clockExplanation(answerPly: ply, input: input)
             )
         }
 
-        if let ply = firstMoment(in: input, causedBy: threatCauses) {
-            questions.append(
-                moveQuestion(
-                    id: "threat",
-                    prompt: "Which move let your opponent's threat through?",
-                    answerPly: ply,
-                    input: input,
-                    explanation: "Their reply to this move was the one you had not accounted "
-                        + "for. Asking what their last move threatens — every move, before "
-                        + "anything else — is what turns this into a move you see coming."
-                )
-            )
-        }
+        // Always answerable, which is not the same as always worth asking. On a
+        // clean game it becomes a one-question quiz whose only answer is Yes,
+        // and the card one tap later says "A win with nothing to pick apart" —
+        // two readings of the same game on adjacent screens. It goes in only
+        // beside a question that could have gone wrong.
+        guard !questions.isEmpty || clock != nil else { return [] }
 
-        // Always askable: a game with no king trouble is a *fact about the
-        // game*, and "yes, it was safe" is worth being right about.
-        let exposed = input.moments.contains { $0.causeTag == kingCause }
-        questions.append(
-            Question(
-                id: "king",
-                prompt: "Was your king safe all game?",
-                options: [
-                    Question.Option(id: "king-yes", label: "Yes", ply: nil),
-                    Question.Option(id: "king-no", label: "No", ply: nil)
-                ],
-                correct: exposed ? 1 : 0,
-                explanation: exposed
-                    ? "The analysis found your king exposed. Shelter is easier to keep than "
-                        + "to rebuild — castling early and not pushing the pawns in front of "
-                        + "the king is most of it."
-                    : "Your king was never the problem in this game. Worth knowing: it means "
-                        + "the mistakes to work on here are elsewhere."
-            )
-        )
+        questions.append(kingQuestion(for: input))
 
-        if let ply = longestThink(in: input) {
-            questions.append(
-                moveQuestion(
-                    id: "clock",
-                    prompt: "Which move did you spend longest on?",
-                    answerPly: ply,
-                    input: input,
-                    explanation: "Time is only well spent where the position is genuinely "
-                        + "critical. If this was a quiet move, the thinking went somewhere "
-                        + "the game was not being decided."
-                )
-            )
-        }
+        if let clock { questions.append(clock) }
 
         return questions
+    }
+
+    /// The king question, and the one thing it is careful not to claim.
+    ///
+    /// "Was your king safe all game?" is marked against the slate, and the slate
+    /// holds at most three moments — so a king-exposure moment that lost its slot
+    /// to two bigger mistakes leaves this answering "Yes". Saying *your king was
+    /// never the problem* there is an assertion nothing verified, on the one
+    /// screen whose whole value is being believed. The wording says what the
+    /// review actually did, which is also the more useful thing to tell someone:
+    /// nothing about your king was among the worst things in this game.
+    static func kingQuestion(for input: Input) -> Question {
+        let exposed = input.moments.contains { $0.causeTag == kingCause }
+        return Question(
+            id: "king",
+            prompt: "Was your king safe all game?",
+            options: [
+                Question.Option(id: "king-yes", label: "Yes", ply: nil),
+                Question.Option(id: "king-no", label: "No", ply: nil)
+            ],
+            correct: exposed ? 1 : 0,
+            explanation: exposed
+                ? "The analysis found your king exposed. Shelter is easier to keep than "
+                    + "to rebuild — castling early and not pushing the pawns in front of "
+                    + "the king is most of it."
+                : "Nothing the review picked out this game turned on your king. That is "
+                    + "not a clean bill of health — the review only pulls out the few "
+                    + "moves that cost the most — but your king was not among them."
+        )
+    }
+
+    /// The threat question's explanation, which depends on which threat it was.
+    ///
+    /// The two causes grouped under this question are opposites, and one
+    /// sentence for both told half the readers the wrong thing.
+    /// `missedNewThreat` is a reply you did not see coming; `ignoredStandingThreat`
+    /// is one you had already seen and answered badly — the coaching bank's own
+    /// words for it are "you already knew about their threat", and the leak it
+    /// feeds is titled "A threat left standing". Telling that reader they missed
+    /// it contradicts every other screen that mentions the same move.
+    static func threatExplanation(for moment: Input.Moment) -> String {
+        let reply = moment.refutationSAN.map { " Their answer was \($0)." } ?? ""
+
+        if moment.causeTag == "ignoredStandingThreat" {
+            return "You had already seen this threat; the move you chose did not deal with it."
+                + reply
+                + " Before you commit, check that your move actually answers what they are "
+                + "threatening — a move that merely ignores it hands them the idea."
+        }
+        return "Their reply to this move was the one you had not accounted for."
+            + reply
+            + " Asking what their last move threatens — every move, before anything else — "
+            + "is what turns this into a move you see coming."
+    }
+
+    /// The clock question's explanation.
+    ///
+    /// Whether the longest think landed on a position the review flagged is a
+    /// fact this screen holds, and it is the whole point of the question: time
+    /// spent on the move that decided the game is time well spent, and the same
+    /// three minutes spent elsewhere is the leak. Criticality proper is not
+    /// stored on the row, so the claim is kept to what the slate can support.
+    static func clockExplanation(answerPly: Int, input: Input) -> String {
+        let flagged = input.moments.contains { $0.ply == answerPly }
+        if flagged {
+            return "That is also one of the positions this game turned on, so the time went "
+                + "where the game was. Spending it there is the habit, not the problem."
+        }
+        return "Nothing the review flagged happened on that move, so the longest think of "
+            + "the game went somewhere it was not being decided. Move quickly where only "
+            + "one move makes sense, and bank the time for the positions that branch."
     }
 
     /// Marks a set of answers. Keys are question ids, values are option indices.
@@ -181,11 +251,12 @@ enum ReviewSelfCheck {
 
     // MARK: Building one question
 
-    private static func firstMoment(in input: Input, causedBy causes: Set<String>) -> Int? {
+    /// The earliest moment with one of these causes, because the first time
+    /// material went is the one the rest of the game followed from.
+    private static func firstMoment(in input: Input, causedBy causes: Set<String>) -> Input.Moment? {
         input.moments
             .filter { causes.contains($0.causeTag) }
-            .map(\.ply)
-            .min()
+            .min { $0.ply < $1.ply }
     }
 
     private static func longestThink(in input: Input) -> Int? {
@@ -205,15 +276,37 @@ enum ReviewSelfCheck {
     /// taken from around the answer: three plies either side of the mistake are
     /// all plausible, which makes the question a guess between neighbours
     /// instead of a search through the game.
+    ///
+    /// ## Why the other mistakes are kept out
+    ///
+    /// The check is marked against the slate, and the slate holds at most three
+    /// moments — but at 1000–1500 several hangs a game is normal, so a reader
+    /// who names a *different* real blunder was answering the question correctly
+    /// and being marked wrong for it. That is the fastest way to teach someone
+    /// not to trust the coaching, and there is no per-ply cause tag to mark
+    /// against instead.
+    ///
+    /// What there *is* is the move row's own classification, which covers every
+    /// ply of the game. Excluding the moves the analysis judged mistakes leaves
+    /// only quiet moves to choose between, so the one wrong-looking move on
+    /// offer is the answer and a wrong answer is genuinely wrong. The question
+    /// gets easier; it stops being unfair, which matters more.
+    ///
+    /// Returns `nil` when there is nothing left to choose between: a single
+    /// option is not a question.
     private static func moveQuestion(
         id: String,
         prompt: String,
         answerPly: Int,
         input: Input,
+        excludingJudgedMistakes: Bool,
         explanation: String
-    ) -> Question {
+    ) -> Question? {
         let mine = input.moves.filter(\.byUser).sorted { $0.ply < $1.ply }
-        let others = mine.filter { $0.ply != answerPly }
+        let others = mine.filter { move in
+            guard move.ply != answerPly else { return false }
+            return !(excludingJudgedMistakes && move.isJudgedMistake)
+        }
         let wanted = optionCount - 1
 
         var decoys: [Input.Move] = []
@@ -238,6 +331,7 @@ enum ReviewSelfCheck {
         let options = all.map {
             Question.Option(id: "\(id)-\($0.ply)", label: $0.label, ply: $0.ply)
         }
+        guard options.count >= 2, options.contains(where: { $0.ply == answerPly }) else { return nil }
 
         return Question(
             id: id,

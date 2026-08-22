@@ -42,11 +42,19 @@ public enum UCIParser {
                 index += 2
             case "score":
                 // "score cp 34" | "score mate -3", optionally followed by
-                // "lowerbound"/"upperbound" which we deliberately ignore: a
+                // "lowerbound"/"upperbound". The line is kept either way — a
                 // bounded score is still the best information available at that
-                // depth, and the final line for the depth supersedes it.
+                // depth, and the final line for the depth supersedes it — but
+                // the flag is recorded rather than dropped, because a bound is
+                // not comparable with an exact score from another rank and the
+                // app subtracts one rank from another in three places.
                 if let kind = tokens[safe: index + 1], let value = intAt(tokens, index + 2) {
                     info.score = (kind == "mate") ? .mate(value) : .centipawns(value)
+                    switch tokens[safe: index + 3] {
+                    case "lowerbound": info.bound = .lower
+                    case "upperbound": info.bound = .upper
+                    default: info.bound = .exact
+                    }
                     sawScore = true
                 }
                 index += 3

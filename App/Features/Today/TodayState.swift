@@ -5,8 +5,43 @@
 
 import Database
 import Foundation
+import TrainingCore
 
 // MARK: - Progress
+
+/// What the latest game left behind to review.
+///
+/// The moments step is the one step whose work the user does not create by
+/// showing up: a game is always playable and puzzles always exist, but moments
+/// are a *residue* of a game going wrong. A clean game, or a two-move
+/// resignation, leaves none; the pass that finds them takes seconds and can
+/// fail outright. Each of those is a different sentence on the screen, so each
+/// is a case here rather than one number asked to stand for all of them.
+enum MomentsQueue: Equatable, Sendable {
+
+    /// Nothing counted, and nothing claimed. The nominal target stands. This is
+    /// the state every caller outside Today works in — the game summary prices
+    /// the same step from its own count and has no business with the day's.
+    case unknown
+
+    /// A game is waiting on its post-game pass. There is no count yet and the
+    /// step must not invent one: the review it would open has nothing in it.
+    case analysing
+
+    /// The pass could not finish, so there is no queue and no way to make one
+    /// without a re-run. Said plainly rather than parking the whole day on work
+    /// the app is not able to supply.
+    case unavailable
+
+    /// The pass finished: `total` moments worth reviewing, `reviewed` of them
+    /// already worked through.
+    ///
+    /// Both halves come from one read of one game's rows. Sizing the step from
+    /// "moments still unread" instead — the number the queue query answers most
+    /// cheaply — makes the target shrink as the user works through it, and a
+    /// target that shrinks ticks the step done after two of three.
+    case counted(total: Int, reviewed: Int)
+}
 
 /// One day's progress through the loop, free of the database row.
 ///
@@ -16,27 +51,31 @@ import Foundation
 struct DailyProgress: Equatable, Sendable {
 
     var gamePlayed: Bool
+
+    /// Moments worked through **today**, across every game — the day's own
+    /// counter, straight off the loop row.
+    ///
+    /// Not the same number as ``MomentsQueue/counted``'s `reviewed`, which is
+    /// per game. This one resets at midnight, and it is what says whether the
+    /// user has touched the review step today at all.
     var momentsReviewed: Int
+
     var puzzlesDone: Int
 
-    /// How many reviewable moments the latest analysed game actually produced.
+    /// The latest game's review queue. See ``MomentsQueue``.
+    var moments: MomentsQueue
+
+    /// How many puzzles today's set is.
     ///
-    /// **Nil means not yet known** — no game has been analysed, or the pass is
-    /// still running — and the nominal target stands. A number means the app has
-    /// counted, and the step promises exactly what it can deliver.
-    ///
-    /// This exists because the moments step is the one step whose work the user
-    /// does not create by showing up: a game is always playable and puzzles
-    /// always exist, but moments are a *residue* of a game going wrong. A clean
-    /// game, or a two-move resignation, leaves none. Advertising a fixed "review
-    /// 3 moments" and then opening a review with nothing in it is the worst
-    /// thing this screen can do, because the CTA is the one promise the whole
-    /// daily loop rests on.
-    var momentsAvailable: Int?
+    /// Read from the length the user chose on Train rather than fixed at ten,
+    /// because two screens negotiating one decision is how "10 puzzles" here
+    /// becomes "5 puzzles." on the screen it opens.
+    var puzzleTarget: Int
 
     /// The nominal target — what a normal game is expected to yield, and the
     /// ceiling on a day's review work regardless of how badly a game went.
     static let momentsTarget = 3
+    /// The default set length, standing in until the user's own choice is read.
     static let puzzlesTarget = 10
 
     static let zero = DailyProgress(gamePlayed: false, momentsReviewed: 0, puzzlesDone: 0)
@@ -45,38 +84,51 @@ struct DailyProgress: Equatable, Sendable {
         gamePlayed: Bool = false,
         momentsReviewed: Int = 0,
         puzzlesDone: Int = 0,
-        momentsAvailable: Int? = nil
+        moments: MomentsQueue = .unknown,
+        puzzleTarget: Int = DailyProgress.puzzlesTarget
     ) {
         self.gamePlayed = gamePlayed
         self.momentsReviewed = momentsReviewed
         self.puzzlesDone = puzzlesDone
-        self.momentsAvailable = momentsAvailable
+        self.moments = moments
+        self.puzzleTarget = puzzleTarget
     }
 
-    init(_ loop: DailyLoop, momentsAvailable: Int? = nil) {
+    init(
+        _ loop: DailyLoop,
+        moments: MomentsQueue = .unknown,
+        puzzleTarget: Int = DailyProgress.puzzlesTarget
+    ) {
         self.init(
             gamePlayed: loop.gamePlayed,
             momentsReviewed: loop.momentsReviewed,
             puzzlesDone: loop.puzzlesDone,
-            momentsAvailable: momentsAvailable
+            moments: moments,
+            puzzleTarget: puzzleTarget
         )
     }
 
     /// The moments target this particular day can honour.
-    ///
-    /// Never below what has already been reviewed: a user who worked through
-    /// two moments and emptied the queue has *finished* the step, and must not
-    /// be shown a `2 of 0` for it.
     var momentsTarget: Int {
-        guard let momentsAvailable else { return Self.momentsTarget }
-        return max(momentsReviewed, min(Self.momentsTarget, momentsAvailable))
+        switch moments {
+        case .unknown, .analysing:
+            Self.momentsTarget
+        case .unavailable:
+            0
+        case let .counted(total, reviewed):
+            // Never below what has already been worked through: a user who
+            // emptied a two-moment queue has *finished* the step, and must not
+            // be shown a `2 of 0` for it.
+            max(reviewed, min(Self.momentsTarget, total))
+        }
     }
 
-    /// The target for a step on this day. Only `moments` varies.
+    /// The target for a step on this day. `game` is the only fixed one.
     func target(_ step: TodayStep) -> Int {
         switch step {
         case .moments: momentsTarget
-        default: step.target
+        case .puzzles: puzzleTarget
+        case .game: step.target
         }
     }
 
@@ -90,22 +142,70 @@ struct DailyProgress: Equatable, Sendable {
         !gamePlayed && momentsReviewed == 0 && puzzlesDone == 0
     }
 
-    func isDone(_ step: TodayStep) -> Bool {
+    /// Blocked by a dependency that today has not satisfied.
+    ///
+    /// Keyed on the day's own counter, not on the per-game one: a game reviewed
+    /// yesterday keeps its `reviewed` count forever, and reading that would
+    /// hand every morning a moments step that was already finished before the
+    /// user woke up. The second clause keeps the legitimate case working —
+    /// moments worked through today from a game played yesterday are progress,
+    /// not a locked step.
+    func isBlocked(_ step: TodayStep) -> Bool {
+        guard let required = step.requires else { return false }
+        return !isDone(required) && !hasProgressToday(step)
+    }
+
+    /// Whether anything was done toward this step *today*.
+    private func hasProgressToday(_ step: TodayStep) -> Bool {
         switch step {
         case .game: gamePlayed
+        case .moments: momentsReviewed > 0
+        case .puzzles: puzzlesDone > 0
+        }
+    }
+
+    /// Whether the step can be started right now.
+    ///
+    /// Separate from "blocked", which is about the loop's order. This is about
+    /// the work existing yet: a review opened while the post-game pass is still
+    /// running shows an empty screen, and a CTA that leads there has spent the
+    /// user's one tap on nothing.
+    func isActionable(_ step: TodayStep) -> Bool {
+        guard step == .moments else { return true }
+        return moments != .analysing
+    }
+
+    func isDone(_ step: TodayStep) -> Bool {
+        // A step whose dependency today has not met is not done, whatever its
+        // target arithmetic says. Without this, a game that produced nothing to
+        // review yesterday ticks tomorrow's moments row green — and the header
+        // reads `1 of 3` before the user has touched anything.
+        guard !isBlocked(step) else { return false }
+
+        switch step {
+        case .game: return gamePlayed
         // `>=` and not `==`, so a game that produced nothing to review (target
         // 0) counts as done rather than parking the loop on a step with no work
         // in it.
-        case .moments: momentsReviewed >= momentsTarget
-        case .puzzles: puzzlesDone >= Self.puzzlesTarget
+        case .moments: return completed(.moments) >= momentsTarget
+        case .puzzles: return puzzlesDone >= puzzleTarget
         }
     }
 
     func completed(_ step: TodayStep) -> Int {
         switch step {
-        case .game: gamePlayed ? 1 : 0
-        case .moments: min(momentsReviewed, momentsTarget)
-        case .puzzles: min(puzzlesDone, Self.puzzlesTarget)
+        case .game:
+            return gamePlayed ? 1 : 0
+        case .moments:
+            switch moments {
+            // The day's counter is the only figure either state has.
+            case .unknown: return min(momentsReviewed, momentsTarget)
+            // A queue still being built has had nothing worked out of it.
+            case .analysing, .unavailable: return 0
+            case let .counted(_, reviewed): return min(reviewed, momentsTarget)
+            }
+        case .puzzles:
+            return min(puzzlesDone, puzzleTarget)
         }
     }
 
@@ -160,9 +260,17 @@ enum TodayStep: Int, CaseIterable, Identifiable, Sendable {
     /// These are the numbers the app is promising, so they are conservative:
     /// a step that reliably overruns its estimate is worse than one that never
     /// gave an estimate at all.
+    ///
+    /// The game is priced at 25 because that is what the game the button starts
+    /// actually is. Sparring is a 15+10 rapid game (`GameSession.Configuration
+    /// .sparring`), and the Play screen prints "15+10" above the board the
+    /// moment the CTA is tapped: two sides using a fifteen-minute clock with a
+    /// ten-second increment is twenty to forty minutes, not ten. A user who
+    /// budgeted the promised ten resigns mid-game, and the app records that as
+    /// a loss.
     var estimatedMinutes: Int {
         switch self {
-        case .game: 10
+        case .game: 25
         case .moments: 5
         case .puzzles: 4
         }
@@ -204,9 +312,19 @@ enum TodayStep: Int, CaseIterable, Identifiable, Sendable {
 /// view, which is the only layer that knows which game is the latest one.
 enum TodayDestination: Equatable, Sendable {
     case play
+    /// A coached game on one habit.
+    ///
+    /// Its own destination rather than a flag on ``play`` because it is the only
+    /// route the app has to the guided metrics, and a required rung-2 skill is
+    /// gated on one of them: prompts are logged nowhere else, so a user who
+    /// follows the ordinary CTA every day can never clear the rung.
+    case playGuided(Habit)
     case reviewLatestGame
     case train
-    case weekSummary
+    /// The Profile tab: the rating chart, the ladder and the leak table. Named
+    /// for what it opens — the finished screen's one link used to promise a
+    /// week summary, and no week view exists anywhere in the app.
+    case progress
 }
 
 /// How a step row presents.
@@ -219,8 +337,17 @@ enum StepStatus: Equatable, Sendable {
     case available
     /// Blocked by a dependency. Dimmed, with the reason.
     case locked
+    /// The work is coming but is not ready yet — the post-game pass is still
+    /// running. Dimmed, with the reason, and *not* tappable: the screen it
+    /// would open is empty.
+    case waiting
+    /// Settled without anything to do: a clean game leaves no moments, and a
+    /// failed pass leaves none either. Drawn apart from ``done`` on purpose —
+    /// a gold check identical to the one earned by reviewing three moments
+    /// tells the user they did work they never did.
+    case empty
 
-    var isDimmed: Bool { self == .locked }
+    var isDimmed: Bool { self == .locked || self == .waiting || self == .empty }
 }
 
 struct StepRowState: Equatable, Identifiable, Sendable {
@@ -229,10 +356,13 @@ struct StepRowState: Equatable, Identifiable, Sendable {
     /// Resolved here rather than read off `step` by the view, because the
     /// moments row's label depends on the day's data.
     let title: String
-    /// `2` `of 3`. Nil on a locked row, which shows its reason instead — a
-    /// `0/3` on a step you cannot start is a score you were never able to move.
+    /// `2` `of 3`. Nil whenever there is no score the user could move — a
+    /// `0/3` on a step you cannot start is a number that only looks like a
+    /// failure. Those rows carry a ``note`` instead.
     let tally: Denominator?
-    let lockedReason: String?
+    /// The row's one line of explanation when it has no tally: why it is
+    /// locked, why it is waiting, or why there is nothing in it.
+    let note: String?
 
     var id: Int { step.rawValue }
 }
@@ -323,19 +453,78 @@ enum TodayPhase: Equatable, Sendable {
 
 // MARK: - Rung
 
-/// The rung card's content. `progress` is optional on purpose.
+/// The rung bar's value and the count it is a fraction of.
+///
+/// ## Why the count travels with the fraction
+///
+/// The bar can only ever move in whole skills. A rung with three required
+/// skills goes 0%, 33%, 67%, 100% and nothing in between, so a card that reads
+/// `33%` invites the reader to watch for 34% — which will never arrive, however
+/// well they play. `1 of 3 met` is the same fact and it also says what the next
+/// step costs, which is the only actionable thing about the number.
+///
+/// ## Why "not measured yet" is counted separately
+///
+/// A required skill nothing has measured is not a cleared one, so it stays in
+/// the denominator — a bar that skipped it would read as further along than the
+/// rung actually is. But it is not a *failure* either, and the rest of the app
+/// takes care to keep those apart. The caption carries the distinction so the
+/// bar does not have to.
+struct RungSkillProgress: Equatable, Sendable {
+
+    /// Required skills measured and met.
+    let met: Int
+
+    /// Required skills on the rung, whatever their state.
+    let total: Int
+
+    /// How many of `total` have no measurement behind them yet.
+    let unmeasured: Int
+
+    /// 0...1 for the bar. A rung with no required skills is already clear.
+    var fraction: Double { total > 0 ? Double(met) / Double(total) : 1 }
+
+    /// `1 of 3 met · 2 not measured yet`.
+    var caption: String {
+        let tally = "\(met) of \(total) met"
+        guard unmeasured > 0 else { return tally }
+        return "\(tally) · \(unmeasured) not measured yet"
+    }
+}
+
+/// The rung card's content. `skills` is optional on purpose.
 struct RungPresentation: Equatable, Sendable {
     let rung: Int
+    /// How many rungs the ladder has, so the card can say `Rung 2 of 4`.
+    ///
+    /// A bare "Rung 2" is a coordinate with no axis: it does not say how far
+    /// the ladder goes, and "rung" is the app's organising noun. The card is
+    /// the loudest surface on the home screen and it is where the word has to
+    /// become legible, because the only other place that explains it is an
+    /// accordion three tabs away.
+    let rungCount: Int
     let title: String
-    /// Required-skill progress, 0...1. **Nil means not yet measured**, and the
-    /// card says so rather than drawing an empty bar. A 0% bar is a claim that
-    /// the user has made no progress; "unmeasured" is the truth.
-    let progress: Double?
+    /// Required-skill progress. **Nil means not yet measured**, and the card
+    /// says so rather than drawing an empty bar. A 0% bar is a claim that the
+    /// user has made no progress; "unmeasured" is the truth.
+    let skills: RungSkillProgress?
     let focusHabit: String?
-    /// Shown in place of the bar when `progress` is nil.
+    /// Shown in place of the bar when `skills` is nil.
     let unmeasuredNote: String
 
-    static let firstRunNote = "We'll set your rung after your first game"
+    /// What the bar measures, stated next to it.
+    ///
+    /// Without this the card shows a word, a title and a bar with no unit —
+    /// and a user cannot tell whether the bar is rating, accuracy or time
+    /// served. Every rung is a checklist of required skills; clearing it is
+    /// what moves you up.
+    static let progressCaption = "Required skills for this rung"
+
+    /// Calibration has already placed the user by the time Today is first
+    /// opened, so the note must not say the rung is still to be set — it is on
+    /// the card directly above these words. What is genuinely missing on day
+    /// one is the skill measurement, which needs played games.
+    static let firstRunNote = "Skill progress starts with your first game"
     static let measuringNote = "Measuring — a few more games"
 }
 
@@ -402,35 +591,51 @@ enum TodayPlanner {
         return TodayStep.allCases.map { step in
             let target = progress.target(step)
             let status: StepStatus
-            // Locked is tested *before* done, and only while nothing has been
-            // done toward the step. Otherwise a zero target — the honest state
-            // after a game with nothing to review — would tick the moments row
-            // green tomorrow morning, before today's game has even been played.
-            // The second clause keeps the legitimate case working: moments
-            // reviewed today from a game played yesterday are done, not locked.
-            if let required = step.requires,
-                !progress.isDone(required),
-                progress.completed(step) == 0
-            {
+            // Blocked is tested first: a step the day has not unlocked yet is
+            // dimmed whatever its arithmetic says. `DailyProgress.isBlocked`
+            // owns that rule so the row, the header tally and the streak all
+            // read the same day.
+            if progress.isBlocked(step) {
                 status = .locked
             } else if progress.isDone(step) {
-                status = .done
+                // A target of zero is a step that was settled by having no work
+                // in it, which is not the same event as finishing three
+                // moments and must not wear the same gold check.
+                status = target == 0 ? .empty : .done
+            } else if !progress.isActionable(step) {
+                status = .waiting
             } else if step == currentStep {
                 status = .current
             } else {
                 status = .available
             }
 
+            let note: String?
+            switch status {
+            case .locked: note = step.lockedReason
+            case .waiting: note = "analysing"
+            case .empty: note = emptyNote(for: step, progress: progress)
+            case .done, .current, .available: note = nil
+            }
+
             return StepRowState(
                 step: step,
                 status: status,
                 title: step.title(target: target),
-                tally: status == .locked
-                    ? nil
-                    : .of(progress.completed(step), target),
-                lockedReason: status == .locked ? step.lockedReason : nil
+                tally: note == nil ? .of(progress.completed(step), target) : nil,
+                note: note
             )
         }
+    }
+
+    /// Why a step ended the day with nothing in it.
+    ///
+    /// The two reasons are not interchangeable: "your game was clean" is about
+    /// the user's play, "the pass did not finish" is about the app. Collapsing
+    /// them would credit the app's own failure to the player.
+    static func emptyNote(for step: TodayStep, progress: DailyProgress) -> String? {
+        guard step == .moments else { return nil }
+        return progress.moments == .unavailable ? "not analysed" : "none today"
     }
 
     /// The step the CTA points at: the first incomplete step, in loop order,
@@ -444,19 +649,18 @@ enum TodayPlanner {
     /// offers it without hijacking the loop.
     static func nextStep(for progress: DailyProgress, phase: TodayPhase) -> TodayStep? {
         guard phase != .complete else { return nil }
-        return TodayStep.allCases.first { step in
-            guard !progress.isDone(step) else { return false }
-            guard let required = step.requires else { return true }
-            return progress.isDone(required)
-        }
+        return unblockedSteps(for: progress).first
     }
 
     /// Incomplete steps that could be started right now.
+    ///
+    /// "Right now" includes the work existing: a moments step whose analysis is
+    /// still running is skipped, so the loop moves on to the step that has work
+    /// in it instead of pointing the filled button at an empty review.
     static func unblockedSteps(for progress: DailyProgress) -> [TodayStep] {
         TodayStep.allCases.filter { step in
-            guard !progress.isDone(step) else { return false }
-            guard let required = step.requires else { return true }
-            return progress.isDone(required)
+            guard !progress.isDone(step), progress.isActionable(step) else { return false }
+            return !progress.isBlocked(step)
         }
     }
 
@@ -532,10 +736,37 @@ enum TodayPlanner {
 
     // MARK: Actions
 
+    /// The bordered alternative for a rung waiting on a coached game.
+    ///
+    /// Named like every other CTA — what, and how long — and it costs the same
+    /// as the sparring game above it, because it *is* that game with up to three
+    /// questions in it. The second line is the part that matters: without it the
+    /// user has no way to know that the required skill their rung is stuck on is
+    /// measured in exactly one place and that no amount of ordinary play will
+    /// ever move it.
+    static func guidedGameAction(habit: Habit) -> TodayAction {
+        TodayAction(
+            title: "Guided game · \(habit.microGoalTitle.lowercased()) · "
+                + "~\(TodayStep.game.estimatedMinutes) min",
+            subtitle: "Your rung is waiting on this one, and a guided game is the only place "
+                + "it gets measured.",
+            destination: .playGuided(habit),
+            emphasis: .tertiary,
+            step: .game
+        )
+    }
+
+    /// - Parameter guidedGate: a habit whose guided metric a *required* skill on
+    ///   the current rung needs and nothing has measured. When one exists and
+    ///   the day's game is still to be played, the alternative offers the
+    ///   coached version of that same game instead of the short step — the
+    ///   shortest thing is not worth offering on a day when the loop cannot
+    ///   otherwise move.
     static func actions(
         phase: TodayPhase,
         progress: DailyProgress,
-        opponentName: String? = nil
+        opponentName: String? = nil,
+        guidedGate: Habit? = nil
     ) -> (primary: TodayAction, alternative: TodayAction?) {
 
         if phase == .complete {
@@ -552,14 +783,30 @@ enum TodayPlanner {
                     step: nil
                 ),
                 TodayAction(
-                    title: "See your week",
-                    destination: .weekSummary,
+                    // Named for the screen it opens. "See your week" promised a
+                    // week summary that exists nowhere in the app; the Profile
+                    // tab holds the rating chart, the ladder and the leaks.
+                    title: "See your progress",
+                    destination: .progress,
                     emphasis: .tertiary
                 )
             )
         }
 
         guard let next = nextStep(for: progress, phase: phase) else {
+            // Nothing startable, and the day is not finished: the review is
+            // still being built. Naming the wait is better than offering an
+            // extra game as though the day were over.
+            if progress.moments == .analysing {
+                return (
+                    TodayAction(
+                        title: "Open the review — still analysing",
+                        destination: .reviewLatestGame,
+                        emphasis: .secondary
+                    ),
+                    nil
+                )
+            }
             return (
                 TodayAction(
                     title: extraGameTitle(opponentName: opponentName),
@@ -582,6 +829,13 @@ enum TodayPlanner {
             emphasis: .primary,
             step: next
         )
+
+        // A rung stuck on an unmeasured guided skill outranks the short step.
+        // Offering "10 puzzles · ~4 min" there is offering the one thing that
+        // cannot unblock the ladder, on the day the ladder is what is stuck.
+        if let guidedGate, next == .game {
+            return (primary, guidedGameAction(habit: guidedGate))
+        }
 
         // The shortest *other* unblocked step, offered plainly. This is the
         // honest version of "pick the shortest": it is stated as an option
@@ -624,10 +878,16 @@ enum TodayPlanner {
         progress: DailyProgress,
         hasHistory: Bool,
         streakBroken: Bool,
-        opponentName: String? = nil
+        opponentName: String? = nil,
+        guidedGate: Habit? = nil
     ) -> TodayPlan {
         let phase = phase(today: progress, hasHistory: hasHistory, streakBroken: streakBroken)
-        let actions = actions(phase: phase, progress: progress, opponentName: opponentName)
+        let actions = actions(
+            phase: phase,
+            progress: progress,
+            opponentName: opponentName,
+            guidedGate: guidedGate
+        )
 
         return TodayPlan(
             phase: phase,
@@ -680,11 +940,18 @@ enum StreakCalculator {
 
     /// A day counts only when the whole loop was completed.
     ///
-    /// `completedAt` is never written by any code path today, so keying off it
-    /// would report a permanent zero streak. The derived predicate is the
-    /// truthful one; `completedAt` is still honoured if a future writer sets it.
+    /// `completedAt` is the authority, and Today stamps it the moment the live
+    /// plan is complete — that plan is the only place the day's real moment
+    /// queue is known. A row on its own cannot say whether the review step had
+    /// any work in it: a clean game leaves no moments, so `momentsReviewed: 0`
+    /// is a finished day and an unfinished one wearing the same clothes.
+    /// Judging the unstamped row on the two steps that are always available is
+    /// therefore the closest a row alone can get, and it is the version that
+    /// does not tell a user who finished everything the app asked for that they
+    /// missed the day.
     static func isComplete(_ loop: DailyLoop) -> Bool {
-        loop.completedAt != nil || DailyProgress(loop).isComplete
+        if loop.completedAt != nil { return true }
+        return loop.gamePlayed && loop.puzzlesDone >= DailyProgress.puzzlesTarget
     }
 
     /// The set of day keys whose loop was completed.

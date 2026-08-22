@@ -3,6 +3,7 @@
 //  ChessCoachTests
 //
 
+import EngineKit
 import Foundation
 import SwiftUI
 import Testing
@@ -254,5 +255,51 @@ struct PaletteTests {
     func darkSurfacesAreDistinct() {
         #expect(Palette.surfaceRaised.dark != Palette.surfaceGround.dark)
         #expect(Palette.surfaceSunken.dark != Palette.surfaceRaised.dark)
+    }
+}
+
+// MARK: - Boot failure
+
+/// What the app says when the engine will not start.
+///
+/// This is the first screen a bad install can reach, and it used to render
+/// `String(describing: error)` — a Swift enum case, with nothing to tap. The
+/// mapping is pure, so it can be pinned without a Stockfish process.
+@MainActor
+@Suite("Boot failure copy")
+struct BootFailureCopyTests {
+
+    @Test("A missing network names the fix rather than the file")
+    func missingNetwork() {
+        let message = AppModel.explain(EngineError.missingNetwork("nn-1c0000000000.nnue"))
+        #expect(message.contains("installing it again"))
+        #expect(!message.contains("nnue"))
+    }
+
+    @Test("A handshake that timed out says a retry is worth having")
+    func timeout() {
+        let message = AppModel.explain(EngineError.handshakeTimeout)
+        #expect(message.contains("did not start in time"))
+    }
+
+    /// An error from outside `EngineKit` still has to produce a sentence: the
+    /// screen has no other content, and a blank description under a warning
+    /// triangle is the dead end this replaced.
+    @Test("An unrecognised failure still gets a sentence")
+    func unknownError() {
+        struct Odd: Error {}
+        #expect(!AppModel.explain(Odd()).isEmpty)
+    }
+
+    /// The raw case is kept, because it is the only part of this worth pasting
+    /// into a bug report.
+    @Test("The raw error is carried alongside the sentence")
+    func detailIsKept() {
+        let failure = AppModel.BootFailure(
+            message: AppModel.explain(EngineError.handshakeTimeout),
+            detail: String(describing: EngineError.handshakeTimeout)
+        )
+        #expect(failure.detail == "handshakeTimeout")
+        #expect(failure.message != failure.detail)
     }
 }

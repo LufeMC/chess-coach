@@ -4,6 +4,7 @@
 //
 
 import Foundation
+import TrainingCore
 
 /// Chooses the one concept a set carries alongside its puzzles.
 ///
@@ -23,6 +24,14 @@ import Foundation
 /// the family rotates: two endgames in a row is a worse set than one endgame
 /// and one opening, even when the endgame is technically more overdue, because
 /// a set that feels like one subject is a set the user starts skipping.
+///
+/// ## And when the games disagree
+///
+/// Rotation on its own is blind to evidence. With eighteen concepts sharing one
+/// slot, a family comes round roughly every eighteen sets — so a player who
+/// loses every game out of the opening keeps being served endgames while the
+/// metrics that know it sit unread. A measured weakness therefore *overrides*
+/// the rotation rather than joining it: see ``next(rating:states:lastFamily:focus:openingMistakesPerGame:)``.
 enum ConceptScheduler {
 
     /// What the scheduler needs to know about one concept.
@@ -47,6 +56,16 @@ enum ConceptScheduler {
         var teachFirst: Bool
     }
 
+    /// Opening mistakes per game above which the opening family jumps the
+    /// queue.
+    ///
+    /// The same number `r3.opening` gates on, deliberately: the curriculum
+    /// already calls half a mistake a game the line between "your openings are
+    /// fine" and "they are not", and having the slot promote at one threshold
+    /// while the ladder passes at another would mean the app teaching openings
+    /// to somebody it has just told they have finished with them.
+    static let openingPressureThreshold = 0.5
+
     /// Picks the concept for one set.
     ///
     /// - Parameters:
@@ -54,24 +73,37 @@ enum ConceptScheduler {
     ///   - states: progress by concept id. A concept with no row has never
     ///     been seen, which is the common case on the first sets.
     ///   - lastFamily: the family the previous set used, so this one can differ.
+    ///   - focus: the week's habit, when the caller has one. Some habits are
+    ///     taught by a family — the endgame technique habit is the endgame
+    ///     family, more or less by definition — and where that is true the slot
+    ///     follows the habit instead of the rotation. Habits with no family
+    ///     (blunder-checking, clock discipline) are trained by the puzzle mix
+    ///     and leave this alone.
+    ///   - openingMistakesPerGame: measured from the user's own games. Above
+    ///     ``openingPressureThreshold`` it promotes the opening family over
+    ///     everything else, so a player losing games out of the opening stops
+    ///     waiting eighteen sessions for the slot to come round to it.
     /// - Returns: nil only when the catalogue has nothing at this rating, which
     ///   would mean a misconfigured catalogue rather than a finished user.
     static func next(
         rating: Int,
         states: [String: State],
-        lastFamily: TrainingConcept.Family? = nil
+        lastFamily: TrainingConcept.Family? = nil,
+        focus: Habit? = nil,
+        openingMistakesPerGame: Double = 0
     ) -> Selection? {
         let available = TrainingConcept.available(atRating: rating)
         guard !available.isEmpty else { return nil }
 
-        // Prefer a family the user did not just do, but never at the cost of
-        // serving nothing: if rotating leaves no candidates, rotation loses.
-        let rotated = available.filter { $0.family != lastFamily }
-        let pool = rotated.isEmpty ? available : rotated
+        let pool = self.pool(
+            from: available,
+            lastFamily: lastFamily,
+            preferring: preferredFamily(focus: focus, openingMistakesPerGame: openingMistakesPerGame)
+        )
 
         let untaught = pool.filter { states[$0.id]?.isIntroduced != true }
         if let first = untaught.first {
-            return Selection(concept: first, teachFirst: true)
+            return selection(for: first, state: states[first.id], teachFirst: true)
         }
 
         // Everything here has been taught: the one seen least recently is the
@@ -87,6 +119,68 @@ enum ConceptScheduler {
             return (left?.lastSeenAt ?? .distantPast) < (right?.lastSeenAt ?? .distantPast)
         }
 
-        return due.map { Selection(concept: $0, teachFirst: false) }
+        return due.map { selection(for: $0, state: states[$0.id], teachFirst: false) }
+    }
+
+    /// The candidates this set may choose from.
+    ///
+    /// A preference beats the rotation rather than filtering it, because the two
+    /// answer different questions: rotation exists so a set does not feel like
+    /// one subject, and a measured weakness is a reason to spend two sets on one
+    /// subject on purpose. Both give way rather than leave the slot empty.
+    private static func pool(
+        from available: [TrainingConcept],
+        lastFamily: TrainingConcept.Family?,
+        preferring preferred: TrainingConcept.Family?
+    ) -> [TrainingConcept] {
+        if let preferred {
+            let matching = available.filter { $0.family == preferred }
+            if !matching.isEmpty { return matching }
+        }
+        let rotated = available.filter { $0.family != lastFamily }
+        return rotated.isEmpty ? available : rotated
+    }
+
+    /// The family the user's own games say is costing them, if any.
+    private static func preferredFamily(
+        focus: Habit?,
+        openingMistakesPerGame: Double
+    ) -> TrainingConcept.Family? {
+        if openingMistakesPerGame > openingPressureThreshold { return .opening }
+        guard let focus else { return nil }
+        return family(taughtBy: focus)
+    }
+
+    /// The family that teaches a habit, for the habits a lesson can teach.
+    ///
+    /// Nil is the common answer and the honest one. Blunder-checking is not a
+    /// subject with a lesson behind it; it is a thing you practise on positions,
+    /// which is what the puzzle mix already weights toward the focus.
+    private static func family(taughtBy habit: Habit) -> TrainingConcept.Family? {
+        switch habit {
+        case .endgameTechnique, .convertCleanly: return .endgame
+        case .kingSafety: return .opening
+        case .whatChanged, .scanThreats, .candidatesFirst, .calcToQuiet,
+            .blunderCheck, .clockDiscipline:
+            return nil
+        }
+    }
+
+    /// Wraps a concept with the variation of its line this visit should serve.
+    ///
+    /// The main line first, then its alternatives, cycling on `timesSeen` — so
+    /// the lesson and its first exercise agree, and the deviations arrive on the
+    /// visits where the user has already played the main line once.
+    private static func selection(
+        for concept: TrainingConcept,
+        state: State?,
+        teachFirst: Bool
+    ) -> Selection {
+        let variations = concept.lineVariations
+        guard variations.count > 1 else {
+            return Selection(concept: concept, teachFirst: teachFirst)
+        }
+        let index = max(0, state?.timesSeen ?? 0) % variations.count
+        return Selection(concept: concept.playing(variation: variations[index]), teachFirst: teachFirst)
     }
 }

@@ -19,6 +19,16 @@ public struct IgnoredThreatDetector: Detector, Sendable {
     public let id = DetectorID.ignoredThreat
 
     /// Expected points the free move must win for the threat to count.
+    ///
+    /// The number this is compared against is a difference between two searches
+    /// of different sizes: the probe runs at half the node budget under the
+    /// MultiPV-3 enrichment lease, while `evalBefore` is the full-budget
+    /// MultiPV-2 score from the main pass. That is a coarse quantity — good
+    /// enough as a gate, and only because the detector has already required the
+    /// opponent to play the probe's move for real, which is what actually
+    /// establishes the threat. It is not good enough to show anyone, which is
+    /// why ``MomentExplainer`` prints the threatened square and the move rather
+    /// than this figure, and why `magnitude` below is for ranking only.
     public static let threatThreshold = 0.10
 
     public init() {}
@@ -30,7 +40,10 @@ public struct IgnoredThreatDetector: Detector, Sendable {
 
         // Both sides of this subtraction are the opponent's expected points:
         // the probe is searched with the opponent to move, and the real
-        // evaluation is mover-relative, so it is complemented rather than negated.
+        // evaluation is mover-relative, so it is complemented rather than
+        // negated. The two sides are not searched to the same budget — see
+        // ``threatThreshold`` — so the difference ranks findings and is never
+        // quoted back to the player.
         let opponentEPWithFreeMove = probe.expectedPoints
         let opponentEPNow = EvalMath.complement(ep: EvalMath.expectedPoints(score: context.evalBefore))
         let gain = opponentEPWithFreeMove - opponentEPNow
@@ -49,7 +62,8 @@ public struct IgnoredThreatDetector: Detector, Sendable {
                 squares: [targetSquare].compactMap { $0 },
                 flags: flags,
                 magnitude: gain,
-                detail: "Opponent's threat \(threatMove) was worth \(String(format: "%.2f", gain)) EP"
+                detail: "Opponent's threat \(threatMove) probes \(String(format: "%.2f", gain)) EP "
+                    + "above the main search's score"
             )
         ]
     }

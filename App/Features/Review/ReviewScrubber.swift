@@ -20,6 +20,13 @@ struct ReviewScrubber: View {
     let moments: [Int: BoardUI.MoveClassification]
     @Binding var index: Int
     let style: BoardStyle
+    /// The side the reader played, marked on the axis.
+    ///
+    /// The curve is deliberately never flipped — two games with the same shape
+    /// must look like the same object — which leaves a player of Black with a
+    /// graph that climbs while they are losing. Naming their end of the axis is
+    /// the smallest honest fix: it costs three characters and no ambiguity.
+    var playedSide: Piece.Color?
 
     @Environment(\.colorScheme) private var colorScheme
 
@@ -57,13 +64,18 @@ struct ReviewScrubber: View {
     /// against the move that caused it.
     private var axisLabels: some View {
         VStack(alignment: .leading, spacing: 0) {
-            Text("White")
+            Text(label(for: .white))
             Spacer(minLength: 0)
-            Text("Black")
+            Text(label(for: .black))
         }
         .typeRole(.caption, appliesForeground: false)
         .foregroundStyle(.tertiary)
-        .frame(width: 42, height: curveHeight, alignment: .leading)
+        .frame(width: 52, height: curveHeight, alignment: .leading)
+    }
+
+    private func label(for side: Piece.Color) -> String {
+        let name = side == .white ? "White" : "Black"
+        return playedSide == side ? "\(name) · you" : name
     }
 
     // MARK: - Curve

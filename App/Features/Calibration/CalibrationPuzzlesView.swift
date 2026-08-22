@@ -25,9 +25,19 @@ final class CalibrationPuzzleRunner {
     /// scored against.
     private(set) var currentRating: Int = 0
     private(set) var ring: BoardRing?
+    /// The move that solves the puzzle, drawn after a miss.
+    private(set) var answerArrow: (from: Square, to: Square)?
+    /// Shown instead of the machine's position while feedback is on screen.
+    private(set) var feedbackPosition: Position?
+    /// One line under the board saying what happened, because a ring is a
+    /// colour and a colour is not a channel every reader has.
+    private(set) var feedbackText: String?
     private(set) var isLoading = false
     /// Set when the corpus has nothing left in band.
     private(set) var exhausted = false
+
+    /// The expected move of the puzzle just missed, in UCI.
+    private var missedAnswer: String?
 
     private var seen: Set<Puzzle.ID> = []
     private let corpus: any PuzzleCorpus
@@ -96,6 +106,10 @@ final class CalibrationPuzzleRunner {
         pendingFEN = puzzle.fen
         pendingLine = puzzle.moveList
         ring = nil
+        answerArrow = nil
+        feedbackPosition = nil
+        feedbackText = nil
+        missedAnswer = nil
 
         var built = PuzzleSolveMachine(fen: puzzle.fen, line: puzzle.moveList)
         built?.start()
@@ -126,10 +140,15 @@ final class CalibrationPuzzleRunner {
         switch outcome {
         case .illegal:
             return .rejected
-        case .retry, .failed:
+        case .retry:
             apply(outcome: outcome, probe: probe, played: uci)
             return .rejected(reason: nil)
-        case .advanced, .solved:
+        // A wrong answer is *accepted* by the board and left standing. Rejecting
+        // it plays the illegal-move snap-back — the piece flies home and the
+        // origin square flashes — which is the board saying "not allowed" over a
+        // move that was allowed and merely wrong. Two contradictory signals,
+        // twenty times in a row.
+        case .failed, .advanced, .solved:
             apply(outcome: outcome, probe: probe, played: uci)
             return .accepted
         }
@@ -143,13 +162,58 @@ final class CalibrationPuzzleRunner {
         case .solved:
             machine = probe
             ring = PuzzleConcept.destination(ofUCI: played).map { BoardRing(square: $0, tone: .correct) }
+            feedbackText = "Solved."
+            AccessibilityNotification.Announcement("Correct.").post()
             onResult(currentRating, true)
-        case .failed, .retry:
+        case .failed(let expected):
+            // The board keeps showing the move the user made, since the machine
+            // itself did not take it: the position it holds is still the puzzle.
+            if let current = machine {
+                var attempted = current.board
+                if PuzzleSolveMachine.apply(uci: played, to: &attempted) {
+                    feedbackPosition = attempted.position
+                }
+            }
+            // The failed machine is what closes the board for the beat the
+            // answer is on screen. Without it a second drag lands on a puzzle
+            // that has already been scored and scores it again.
+            machine = probe
             ring = PuzzleConcept.destination(ofUCI: played).map { BoardRing(square: $0, tone: .wrong) }
-            if case .failed = outcome { onResult(currentRating, false) }
+            feedbackText = "Missed."
+            missedAnswer = expected
+            onResult(currentRating, false)
+        case .retry:
+            ring = PuzzleConcept.destination(ofUCI: played).map { BoardRing(square: $0, tone: .wrong) }
         case .illegal:
             break
         }
+    }
+
+    /// Holds the last answer on screen before the next puzzle replaces it.
+    ///
+    /// A solve needs a beat, or the ring and the next position arrive on the
+    /// same frame and the feedback is never seen. A miss needs the answer: the
+    /// result is recorded before this runs, so showing the move cannot
+    /// contaminate the measurement, and twenty puzzles that never say what the
+    /// move was is twenty items of teaching thrown away.
+    func holdFeedback() async {
+        guard let expected = missedAnswer, let current = machine else {
+            try? await Task.sleep(for: .milliseconds(550))
+            return
+        }
+
+        // Long enough to read the wrong move as wrong, before the board goes
+        // back to the position and answers it.
+        try? await Task.sleep(for: .milliseconds(900))
+
+        let described = PuzzleReason.description(ofMove: expected, in: current.board.position)
+        feedbackPosition = nil
+        answerArrow = MovePair(uci: expected).map { ($0.from, $0.to) }
+        ring = PuzzleConcept.destination(ofUCI: expected).map { BoardRing(square: $0, tone: .correct) }
+        feedbackText = described.map { "Missed — the answer was \($0)." } ?? "Missed."
+        AccessibilityNotification.Announcement(feedbackText ?? "Missed.").post()
+
+        try? await Task.sleep(for: .milliseconds(1_600))
     }
 
     private func isPromotion(from: Square, to: Square, in position: Position) -> Bool {
@@ -160,10 +224,14 @@ final class CalibrationPuzzleRunner {
 
 /// The puzzle half of calibration.
 ///
-/// No hints, no second try, no result banner. The same argument as the games:
-/// anything that helps the user solve a puzzle they would otherwise have missed
-/// is a contaminant in a measurement, and a banner between every item would turn
-/// twenty quick puzzles into twenty interruptions.
+/// No hints and no second try. The same argument as the games: anything that
+/// helps the user solve a puzzle they would otherwise have missed is a
+/// contaminant in a measurement.
+///
+/// The answer *after* the fact is a different matter. It arrives once the result
+/// is already recorded, so it cannot contaminate anything, and without it twenty
+/// puzzles at the user's exact level teach nothing at all — which is an hour of
+/// the one thing this app is for, spent on measurement alone.
 struct CalibrationPuzzlesView: View {
 
     let flow: CalibrationModel
@@ -188,11 +256,22 @@ struct CalibrationPuzzlesView: View {
             if runner.exhausted {
                 exhausted
             } else {
+                // Coming straight off five games, nothing on this screen says
+                // what is being asked. The board animates one move and waits,
+                // and "find the best move" is a guess the user should not have
+                // to make twenty times.
+                Text("\(runner.orientation == .white ? "White" : "Black") to move — find the best move")
+                    .typeRole(.headline)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.horizontal)
+
                 if let position = runner.position {
                     CapturedTrayRow(perspective: runner.orientation, position: position)
                         .padding(.horizontal)
                 }
                 boardSlot
+                feedbackLine
+                    .padding(.horizontal)
             }
 
             Spacer(minLength: 0)
@@ -216,13 +295,32 @@ struct CalibrationPuzzlesView: View {
                     style: BoardAppearance.shared.style
                 )
                 .overlay {
-                    BoardAnnotationOverlay(orientation: runner.orientation, ring: runner.ring)
+                    BoardAnnotationOverlay(
+                        orientation: runner.orientation,
+                        ring: runner.ring,
+                        hint: runner.answerArrow
+                    )
                 }
             } else {
                 EmptyBoardSlot()
             }
         }
         .skeleton(if: runner.position == nil) { BoardSkeleton() }
+    }
+
+    /// What just happened, in words.
+    ///
+    /// The rings are green and orange, which is one channel and the wrong one to
+    /// rely on: the same two shapes in the same two positions read identically
+    /// to a red/green colourblind reader. A space rather than nothing when there
+    /// is no feedback, so the board never moves when a line appears.
+    private var feedbackLine: some View {
+        Text(runner.feedbackText ?? " ")
+            .typeRole(.label)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .fixedSize(horizontal: false, vertical: true)
+            .contentTransition(.opacity)
+            .animation(Motion.crossfade, value: runner.feedbackText)
     }
 
     // MARK: Running out
@@ -243,7 +341,7 @@ struct CalibrationPuzzlesView: View {
                 .typeRole(.headline)
 
             Text(
-                "The corpus has nothing left near your level. Your \(flow.games.count) games and the puzzles you did answer carry the measurement between them — the rating just comes with a slightly wider margin."
+                "There are no more puzzles at your level on this device. Your \(flow.games.count) games and the puzzles you did answer carry the measurement between them — the rating just comes with a slightly wider margin."
             )
             .typeRole(.body, appliesForeground: false)
             .foregroundStyle(.secondary)
@@ -261,11 +359,8 @@ struct CalibrationPuzzlesView: View {
     }
 
     private func advance() async {
-        // A short beat so the ring on the last move is visible before the board
-        // is replaced. Without it a correct answer and the next position arrive
-        // on the same frame and the feedback is never seen.
         if flow.puzzles.count > 0 {
-            try? await Task.sleep(for: .milliseconds(550))
+            await runner.holdFeedback()
         }
         guard !flow.progress.isComplete else { return }
         await runner.loadPuzzle(rating: flow.puzzleRating)
@@ -274,6 +369,7 @@ struct CalibrationPuzzlesView: View {
 
     private func displayedPosition(fallback: Position) -> Position {
         if isPlayingSetupMove, let preview = runner.setupPreview { return preview.position }
+        if let feedback = runner.feedbackPosition { return feedback }
         return fallback
     }
 

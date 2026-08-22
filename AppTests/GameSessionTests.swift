@@ -30,16 +30,30 @@ private final class ScriptedEngine {
 
     /// Run on every search, while the session is suspended waiting for it.
     var duringSearch: (() -> Void)?
+    /// The same window, told which search it is looking at.
+    ///
+    /// Separate from ``duringSearch`` rather than a parameter on it, because
+    /// the limit is what names the caller: the opponent's own move is the only
+    /// `.depthWithin` search a session makes, and both coaching probes are
+    /// `.nodes`.
+    var duringSearchOfLimit: ((SearchLimit) -> Void)?
+    /// Run as each lease is handed out, before the search that follows it.
+    ///
+    /// The window between the two is where the opponent's clock starts, and
+    /// nothing else can observe it.
+    var duringAcquire: ((EngineService.Client) -> Void)?
 
     private(set) var leases: [EngineService.Client] = []
 
     private func search(_ position: EnginePosition, _ limit: SearchLimit) throws -> SearchResult {
         duringSearch?()
+        duringSearchOfLimit?(limit)
         return try onSearch(position, limit)
     }
 
     private func record(lease: EngineService.Client) {
         leases.append(lease)
+        duringAcquire?(lease)
     }
 
     var sessionEngine: SessionEngine {
@@ -255,6 +269,108 @@ struct SecondTryRetractionTests {
         #expect(outcome.userWon == nil)
     }
 
+    /// The probe is two engine searches long, and the user's clock kept running
+    /// against the move's own start date for the whole of it — so the pill
+    /// dipped by the think time and sprang back when the probe returned, and a
+    /// long think followed by a perfectly legal move could flag the user in the
+    /// gap.
+    @Test("The blunder probe does not charge the move a second time")
+    func probeDoesNotDoubleChargeTheClock() async throws {
+        let engine = ScriptedEngine()
+        engine.onSearch = blunderScript(blunder: "e2e4")
+        let session = makeSession(.sparring(userColor: .white, opponentRating: 1200), engine: engine)
+
+        await session.start()
+        let moveStart = session.moveStartedAt
+
+        var duringProbe: Date?
+        engine.duringSearch = { [weak session] in
+            guard let session, session.moves.count == 1 else { return }
+            duringProbe = session.moveStartedAt
+        }
+
+        _ = await session.attemptUserMove(from: .e2, to: .e4)
+
+        // The move has been paid for by the time the probe runs, so the instant
+        // the clock is measured against has to have moved on with it.
+        let observed = try #require(duringProbe)
+        #expect(observed > moveStart)
+    }
+
+    @Test("A game that ends during the probe stays ended")
+    func finishingDuringTheProbeStands() async throws {
+        let engine = ScriptedEngine()
+        engine.onSearch = blunderScript(blunder: "e2e4")
+        let session = makeSession(.sparring(userColor: .white, opponentRating: 1200), engine: engine)
+        await session.start()
+
+        // Resigning from the options sheet while the coach is deciding whether
+        // to interrupt. `finish` has by then saved the record and moved the
+        // ladder, and the retraction below used to overwrite `.finished` and
+        // carry on — so the game ended a second time, under the same id.
+        engine.duringSearch = { [weak session] in session?.resign() }
+
+        _ = await session.attemptUserMove(from: .e2, to: .e4)
+
+        #expect(session.phase.isFinishedPhase)
+    }
+
+    @Test("In the last minute the blunder stands, and the start prompt said so")
+    func secondTryStandsDownInTimeTrouble() async throws {
+        let engine = ScriptedEngine()
+        engine.onSearch = blunderScript(blunder: "e2e4")
+        // A minute on the clock is the floor exactly, so the take-back is off
+        // from the first move of this game.
+        let configuration = GameSession.Configuration(
+            userColor: .white,
+            opponentRating: 1200,
+            baseSeconds: GameSession.secondTryMinClockMs / 1000,
+            incrementSeconds: 0,
+            mode: "sparring",
+            secondTryEnabled: true,
+            guidedEnabled: false
+        )
+        let session = makeSession(configuration, engine: engine)
+
+        await session.start()
+        _ = await session.attemptUserMove(from: .e2, to: .e4)
+
+        if case .secondTry = session.phase {
+            Issue.record("the take-back fired below its clock floor")
+        }
+        #expect(session.moves.first?.uci == "e2e4")
+
+        // The rule is defensible; discovering it mid-blunder is not. The start
+        // prompt's promise carries the boundary, so this is the sentence that
+        // has to keep naming it.
+        #expect(GameSession.secondTryPromise.contains("last minute"))
+        #expect(GameSession.secondTryMinClockMs == 60_000)
+    }
+
+    @Test("Reading the coaching card is not on anybody's clock")
+    func secondTryIsNotCharged() async throws {
+        let engine = ScriptedEngine()
+        engine.onSearch = blunderScript(blunder: "e2e4")
+        let session = makeSession(.sparring(userColor: .white, opponentRating: 1200), engine: engine)
+
+        await session.start()
+        _ = await session.attemptUserMove(from: .e2, to: .e4)
+
+        guard case .secondTry = session.phase else {
+            Issue.record("expected the blunder to be retracted")
+            return
+        }
+        // Nothing charges this deliberation — `keepOriginalMove` pays only what
+        // the first attempt cost and `resumeAfterSecondTry` restarts the clock —
+        // so ending the game on it was the worst of both readings: a pause that
+        // cannot cost you a second but could cost you the game.
+        #expect(!session.checkClock())
+        guard case .secondTry = session.phase else {
+            Issue.record("the coaching pause flagged the user")
+            return
+        }
+    }
+
     @Test("The hint ladder never skips and never resets")
     func hintLadder() async throws {
         let engine = ScriptedEngine()
@@ -356,6 +472,95 @@ struct GameSessionClockTests {
         #expect(outcome.userWon == true)
         // The opponent's move was abandoned rather than played out.
         #expect(session.moves.isEmpty)
+    }
+
+    /// The other opponent flag: the one the search itself notices, when the turn
+    /// cost more than was left rather than the display timer catching it first.
+    @Test("A move made after the opponent's flag never reaches the board")
+    func opponentFlagsInsideItsOwnTurn() async throws {
+        let engine = ScriptedEngine()
+        engine.onSearch = { _, _ in result([line("e2e4", cp: 10)]) }
+
+        let session = makeSession(plainConfiguration(userColor: .black, baseSeconds: 0), engine: engine)
+        await session.start()
+
+        guard case .finished(let outcome) = session.phase else {
+            Issue.record("expected a timeout")
+            return
+        }
+        #expect(outcome.termination == GameTermination.timeout.rawValue)
+        // The flag is now read before the move is applied, exactly as it is on
+        // the user's side. It used to be read after, which left the abandoned
+        // move sitting on the board — and handed that board to the mating-
+        // material test that decides whether the flag is a loss or a draw.
+        #expect(session.moves.isEmpty)
+        #expect(session.board.position.piece(at: .e2) != nil)
+        #expect(session.lastMove == nil)
+    }
+}
+
+// MARK: - Draw offers
+
+/// Recognising a dead ending and agreeing it is endgame technique, and the only
+/// alternatives were shuffling to a repetition or resigning a drawn game.
+///
+/// The guards are what these pin, because the failure that costs something is
+/// one-sided: a decline costs a few more moves, an acceptance in a position the
+/// user was winning costs half a point and a rating move they had earned.
+@Suite("Draw offers")
+@MainActor
+struct GameSessionDrawOfferTests {
+
+    @Test("A draw can only be offered on your own move")
+    func onlyOnYourOwnMove() async throws {
+        let engine = ScriptedEngine()
+        let session = makeSession(plainConfiguration(), engine: engine)
+
+        // Before the game starts, and after it has ended, there is nothing to
+        // offer and nobody to answer.
+        #expect(!session.canOfferDraw)
+        #expect(!session.offerDraw())
+
+        await session.start()
+        #expect(session.canOfferDraw)
+
+        session.resign()
+        #expect(!session.canOfferDraw)
+        #expect(!session.offerDraw())
+    }
+
+    @Test("The opponent does not agree a draw in the opening")
+    func notInTheOpening() async throws {
+        let engine = ScriptedEngine()
+        engine.onSearch = { _, _ in result([line("e7e5", cp: 0)]) }
+        let session = makeSession(plainConfiguration(), engine: engine)
+        await session.start()
+        _ = await session.attemptUserMove(from: .e2, to: .e4)
+
+        // Dead level by the opponent's own reading — `cp: 0` — and still no. A
+        // level opening is a game, not a drawn ending, and the offer is only
+        // ever entertained in an endgame.
+        #expect(session.canOfferDraw)
+        #expect(!session.offerDraw())
+        if case .finished = session.phase {
+            Issue.record("the opening was agreed drawn")
+        }
+    }
+
+    @Test("An opponent that has not looked at the position cannot agree to it")
+    func notBeforeTheOpponentHasEvaluated() async throws {
+        let engine = ScriptedEngine()
+        let session = makeSession(plainConfiguration(), engine: engine)
+        await session.start()
+
+        // Belt and braces with the endgame guard above, and the one worth
+        // stating: `currentEvaluation` starts at 50, which reads as "dead level"
+        // and means "nobody has looked yet". Confusing the two is exactly how a
+        // won position would get given away.
+        #expect(!session.offerDraw())
+        if case .finished = session.phase {
+            Issue.record("a game nobody has evaluated was agreed drawn")
+        }
     }
 }
 
@@ -468,6 +673,97 @@ struct GameSessionBackgroundingTests {
         #expect(!session.resumeClock())
         #expect(!session.resumeClock(at: Date()))
     }
+
+    /// The opponent's side of the same rule.
+    ///
+    /// Their turn used to be billed against a local `Date()` that `resumeClock`
+    /// could not reach, so every second the app spent suspended during their
+    /// move was charged to them — and the humanized thinking pause sits inside
+    /// that window, which is why the bug needed no engine to reproduce. Once the
+    /// away time passed their remaining clock they were flagged and the user was
+    /// handed a win the Elo ladder then paid out.
+    @Test("The opponent's turn starts from the clock the background forgives")
+    func opponentIsBilledFromMoveStart() async throws {
+        let engine = ScriptedEngine()
+        engine.onSearch = { _, _ in result([line("e2e4", cp: 10)]) }
+
+        let session = makeSession(plainConfiguration(userColor: .black, baseSeconds: 600), engine: engine)
+
+        var atAcquire: Date?
+        var atSearch: Date?
+        engine.duringAcquire = { [weak session] _ in atAcquire = session?.moveStartedAt }
+        engine.duringSearch = { [weak session] in atSearch = session?.moveStartedAt }
+
+        await session.start()
+
+        // The opponent's clock now starts in the window between taking the
+        // engine lease and searching with it, which is what makes it the same
+        // instant `resumeClock` pushes forward — a local `Date()` inside
+        // `runOpponentMove` was unreachable from there, so every second the app
+        // spent suspended during their move was billed to them.
+        //
+        // Taken after the lease and not before it, for the reason it always
+        // was: waiting for the engine is the app's delay, not the opponent's.
+        let acquired = try #require(atAcquire)
+        let searched = try #require(atSearch)
+        #expect(searched > acquired)
+        #expect(session.moves.count == 1)
+    }
+
+    /// Suspending tears the engine lease down, so a search in flight comes back
+    /// refused. Retrying that is two bugs at once.
+    @Test("A search abandoned to the background costs no retries and no game")
+    func backgroundFailureDoesNotAbandonTheGame() async throws {
+        let engine = ScriptedEngine()
+        var searches = 0
+        engine.onSearch = { _, _ in
+            searches += 1
+            throw EngineError.notStarted
+        }
+
+        let session = makeSession(plainConfiguration(userColor: .black, baseSeconds: 600), engine: engine)
+        engine.duringSearch = { [weak session] in
+            // The app goes off screen while the opponent is thinking.
+            session?.suspendClock(at: Date().addingTimeInterval(-1))
+        }
+
+        await session.start()
+
+        // One failure, not four: the strikes exist for an engine that will not
+        // answer, and this one was never asked. Burning them here abandoned a
+        // live game as a draw for the crime of being backgrounded.
+        #expect(searches == 1)
+        if case .finished = session.phase {
+            Issue.record("backgrounding ended the game")
+        }
+    }
+
+    @Test("Nothing is asked of the engine while the app is off screen")
+    func opponentDoesNotSearchInTheBackground() async throws {
+        let engine = ScriptedEngine()
+        var searches = 0
+        engine.onSearch = { _, _ in
+            searches += 1
+            return result([line("e2e4", cp: 10)])
+        }
+
+        let session = makeSession(plainConfiguration(userColor: .black, baseSeconds: 600), engine: engine)
+        session.suspendClock(at: Date().addingTimeInterval(-1))
+        await session.start()
+
+        // Starting Stockfish here is exactly what suspending the engine exists
+        // to prevent, and the turn is owed rather than lost.
+        #expect(searches == 0)
+        #expect(session.moves.isEmpty)
+
+        session.resumeClock(at: Date())
+        // The replay is spawned rather than awaited, so let the runtime drain
+        // it. Bounded, and it exits the moment the move lands.
+        for _ in 0..<200 where session.moves.isEmpty {
+            await Task.yield()
+        }
+        #expect(session.moves.count == 1)
+    }
 }
 
 private extension GameSession.Phase {
@@ -557,12 +853,20 @@ struct GameSessionOutcomeTests {
 @MainActor
 struct GameSessionGuidedTests {
 
-    /// Five quiet moves each, so the sixth is the first move guided mode is
-    /// allowed to interrupt.
+    /// Five moves each, so the sixth is the first move guided mode is allowed to
+    /// interrupt — and a fifth pair that leaves a real threat on the board.
+    ///
+    /// The last two moves are not decoration. The gate now asks whether the
+    /// opponent's free move would be *forcing*, because the null-move number on
+    /// its own cannot tell a threat from zugzwang or from the user's own tactic.
+    /// So `Bf4` walks the bishop out, `e5` attacks it, and the null-move probe
+    /// below answers with the capture that is genuinely available in that
+    /// position rather than with a quiet move the fixture merely asserts is
+    /// dangerous.
     private static let userOpening: [(Square, Square)] = [
-        (.a2, .a3), (.b2, .b3), (.c2, .c3), (.d2, .d3), (.e2, .e3)
+        (.a2, .a3), (.b2, .b3), (.c2, .c3), (.d2, .d4), (.c1, .f4)
     ]
-    private static let opponentOpening = ["a7a6", "b7b6", "c7c6", "d7d6", "e7e6", "g8f6"]
+    private static let opponentOpening = ["a7a6", "b7b6", "c7c6", "d7d6", "e7e5", "g8f6"]
 
     private func scriptedEngine() -> ScriptedEngine {
         let engine = ScriptedEngine()
@@ -573,7 +877,8 @@ struct GameSessionGuidedTests {
                 return result([line(Self.opponentOpening[min(index, Self.opponentOpening.count - 1)], cp: 10)])
             case .nodes(let nodes) where nodes < 60_000:
                 // The null-move probe: what the opponent gets by moving twice.
-                return result([line("d8d7", cp: 100)])
+                // A capture, and a legal one — the pawn on e5 takes the bishop.
+                return result([line("e5f4", cp: 100)])
             default:
                 // The criticality probe: two lines, a clear gap between them.
                 return result([line("g1f3", cp: 200), line("b1c3", cp: -50, rank: 2)])
@@ -672,6 +977,87 @@ struct GameSessionGuidedTests {
         #expect(answered.guidedPromptHit == nil)
     }
 
+    @Test("The opponent stops thinking the instant their move lands")
+    func theProbeRunsUnderItsOwnPhase() async throws {
+        let engine = scriptedEngine()
+        var target: GameSession?
+        var probePhases: [GameSession.Phase] = []
+        engine.duringSearchOfLimit = { limit in
+            // Only the coach's probes. The opponent's own search is the one
+            // that legitimately reads `.opponentThinking`.
+            if case .nodes = limit, let target { probePhases.append(target.phase) }
+        }
+
+        let session = makeSession(
+            .guided(userColor: .white, opponentRating: 1200, focusHabit: .scanThreats),
+            engine: engine
+        )
+        target = session
+        await session.start()
+        for move in Self.userOpening {
+            _ = await session.attemptUserMove(from: move.0, to: move.1)
+        }
+
+        // The two probes used to run with the phase still `.opponentThinking`,
+        // so for a few hundred milliseconds after the opponent's piece had
+        // visibly moved their clock kept ticking and their spoken line still
+        // said they were thinking — which reads as lag, or as a second move.
+        #expect(!probePhases.isEmpty)
+        #expect(probePhases.allSatisfy { $0 == .preparing })
+    }
+
+    @Test("Nobody's clock runs while the coach is deciding")
+    func preparingIsOffBothClocks() async throws {
+        let engine = scriptedEngine()
+        var target: GameSession?
+        var flagged: [Bool] = []
+        engine.duringSearchOfLimit = { limit in
+            if case .nodes = limit, let target { flagged.append(target.checkClock()) }
+        }
+
+        let session = makeSession(
+            .guided(userColor: .white, opponentRating: 1200, focusHabit: .scanThreats),
+            engine: engine
+        )
+        target = session
+        await session.start()
+        for move in Self.userOpening {
+            _ = await session.attemptUserMove(from: move.0, to: move.1)
+        }
+
+        // The probes were the app's idea, and the opponent has already moved.
+        #expect(!flagged.isEmpty)
+        #expect(flagged.allSatisfy { $0 == false })
+    }
+
+    @Test("Resigning while the coach is deciding does not hand the board back")
+    func endingTheGameDuringTheProbeSticks() async throws {
+        let engine = scriptedEngine()
+        var target: GameSession?
+        var probes = 0
+        engine.duringSearchOfLimit = { limit in
+            guard case .nodes = limit else { return }
+            probes += 1
+            target?.resign()
+        }
+
+        let session = makeSession(
+            .guided(userColor: .white, opponentRating: 1200, focusHabit: .scanThreats),
+            engine: engine
+        )
+        target = session
+        await session.start()
+        for move in Self.userOpening {
+            _ = await session.attemptUserMove(from: move.0, to: move.1)
+        }
+
+        // The options sheet is reachable throughout the probe. Handing the board
+        // back afterwards left the user playing on inside a game already written
+        // to disk and already rated.
+        #expect(probes > 0)
+        #expect(session.phase.isFinishedPhase)
+    }
+
     @Test("Sparring never pauses, whatever the position looks like")
     func sparringNeverPauses() async throws {
         let engine = scriptedEngine()
@@ -697,7 +1083,8 @@ struct LadderRatingTests {
     private func record(
         weight: LadderGameMode?,
         result: String = GameResult.whiteWins.rawValue,
-        assisted: Bool = false
+        assisted: Bool = false,
+        retractions: Int = 0
     ) -> FinishedGameRecord {
         FinishedGameRecord(
             id: UUID(),
@@ -719,7 +1106,8 @@ struct LadderRatingTests {
             ),
             isRated: false,
             ratingWeight: weight,
-            usedAssistedRetry: assisted
+            usedAssistedRetry: assisted,
+            retractionCount: retractions
         )
     }
 
@@ -769,6 +1157,29 @@ struct LadderRatingTests {
 
         #expect(applied == nil)
         #expect(stored == 1_100)
+    }
+
+    @Test("Every take-back halves what the game is worth, down to a quarter")
+    func retractionsDiscountTheGame() async throws {
+        let (clean, _) = makeWriter()
+        let (once, _) = makeWriter()
+        let (twice, _) = makeWriter()
+        let (thrice, _) = makeWriter()
+
+        let full = try #require(try await clean.apply(record(weight: .sparring)))
+        let half = try #require(try await once.apply(record(weight: .sparring, retractions: 1)))
+        let quarter = try #require(try await twice.apply(record(weight: .sparring, retractions: 2)))
+        let floor = try #require(try await thrice.apply(record(weight: .sparring, retractions: 5)))
+
+        // The failure this pins: a win after two retracted blunders used to move
+        // the rating exactly as far as a clean win, so the number climbed faster
+        // than the player and the ladder then served opponents they could not
+        // beat unaided.
+        #expect(abs((full - 1_100) / 2 - (half - 1_100)) < 0.000_1)
+        #expect(abs((full - 1_100) / 4 - (quarter - 1_100)) < 0.000_1)
+        // Past two the result has stopped meaning much; cutting further would
+        // only be noise.
+        #expect(abs(floor - quarter) < 0.000_1)
     }
 
     @Test("A loss moves the rating down and a draw sits between them")
@@ -1027,5 +1438,267 @@ struct PromotionTests {
             replay.positions.last?.fen == session.board.position.fen,
             "replayed position diverges from the live board"
         )
+    }
+}
+
+// MARK: - Take-backs before the reply
+
+/// The board plays a tap and a drag through one gesture, so a release one
+/// square short is a legal move made by accident. Until the undo window existed
+/// a touch error cost a whole game unless it happened to be bad enough for the
+/// blunder probe to catch it.
+@Suite("Undo before the opponent answers")
+@MainActor
+struct GameSessionUndoTests {
+
+    /// A sparring session whose opponent search takes the undo, if the session
+    /// is offering one.
+    ///
+    /// The window only exists while the reply is being searched for, and
+    /// `attemptUserMove` does not return until that search is done — so the
+    /// only place a test can stand inside the window is the engine's own hook.
+    private func session(
+        _ configuration: GameSession.Configuration,
+        take: Bool
+    ) -> (GameSession, () -> Int) {
+        let engine = ScriptedEngine()
+        engine.onSearch = { _, _ in result([line("e7e5", cp: 10)]) }
+
+        var target: GameSession?
+        var offered = 0
+        engine.duringSearch = {
+            guard let target, target.canUndoLastMove else { return }
+            offered += 1
+            if take { target.undoLastUserMove() }
+        }
+
+        let made = makeSession(configuration, engine: engine)
+        target = made
+        return (made, { offered })
+    }
+
+    @Test("A move taken back leaves the board, the list and the clock as they were")
+    func undoRewindsEverything() async throws {
+        let (session, offered) = self.session(
+            .sparring(userColor: .white, opponentRating: 1_200),
+            take: true
+        )
+        let base = GameSession.Configuration.sparring(userColor: .white, opponentRating: 1_200)
+            .baseSeconds * 1_000
+
+        await session.start()
+        let played = await session.attemptUserMove(from: .e2, to: .e4)
+
+        #expect(played)
+        #expect(offered() == 1)
+        #expect(session.moves.isEmpty)
+        #expect(session.board.position.piece(at: .e2) != nil)
+        #expect(session.lastMove == nil)
+        // The increment is un-earned: a take-back that paid one would make it
+        // the cheapest way to buy time on the clock.
+        #expect(session.userClockMs == base)
+        guard case .userToMove = session.phase else {
+            Issue.record("expected the board back")
+            return
+        }
+        // And the window is shut: there is nothing left to take back.
+        #expect(!session.canUndoLastMove)
+    }
+
+    @Test("The reply that was already searching never lands")
+    func theCancelledReplyIsDiscarded() async throws {
+        let (session, _) = self.session(
+            .sparring(userColor: .white, opponentRating: 1_200),
+            take: true
+        )
+
+        await session.start()
+        _ = await session.attemptUserMove(from: .e2, to: .e4)
+
+        // The search was running against a move list that has since lost its
+        // last entry. A reply that landed anyway would be the answer to a move
+        // nobody made.
+        #expect(session.moves.isEmpty)
+        #expect(session.board.position.sideToMove == .white)
+    }
+
+    @Test("A take-back counts against what the game is worth")
+    func undoIsRecordedAsARetraction() async throws {
+        let (session, _) = self.session(
+            .sparring(userColor: .white, opponentRating: 1_200),
+            take: true
+        )
+
+        await session.start()
+        _ = await session.attemptUserMove(from: .e2, to: .e4)
+        session.resign()
+
+        guard case .finished(let outcome) = session.phase else {
+            Issue.record("expected the game to be over")
+            return
+        }
+        // No engine reading is revealed inside the window, so this is not the
+        // coached take-back second-try is — but it is still a move the player
+        // did not have to stand behind, and `EloLadder` halves K for it.
+        #expect(session.finishedGameRecord(outcome: outcome).retractionCount == 1)
+    }
+
+    @Test("A calibration game is never offered one")
+    func measurementGamesHaveNoUndo() async throws {
+        let (session, offered) = self.session(
+            .calibration(userColor: .white, opponentRating: 1_200),
+            take: false
+        )
+
+        await session.start()
+        _ = await session.attemptUserMove(from: .e2, to: .e4)
+
+        // Those five games seed the rating every other screen is built on. A
+        // take-back there is not a convenience, it is a corrupted measurement
+        // nobody can see afterwards.
+        #expect(offered() == 0)
+        #expect(session.moves.map(\.san) == ["e4", "e5"])
+    }
+
+    @Test("Keeping a blundered move does not reopen the previous move's window")
+    func keepingTheOriginalClosesTheWindow() async throws {
+        let engine = ScriptedEngine()
+        engine.onSearch = { position, limit in
+            if case .depthWithin = limit {
+                return result([line(history(position).count <= 1 ? "d7d5" : "g8f6", cp: 10)])
+            }
+            // Scores `e2e4` as a blunder and `d2d4` as fine, so the second move
+            // is retracted by the coach and the first is not.
+            return result([line("e7e5", cp: history(position).last == "e2e4" ? 600 : 40)])
+        }
+
+        var target: GameSession?
+        var offered: [Bool] = []
+        engine.duringSearchOfLimit = { limit in
+            if case .depthWithin = limit, let target { offered.append(target.canUndoLastMove) }
+        }
+
+        let session = makeSession(.sparring(userColor: .white, opponentRating: 1_200), engine: engine)
+        target = session
+
+        await session.start()
+        _ = await session.attemptUserMove(from: .d2, to: .d4)
+        _ = await session.attemptUserMove(from: .e2, to: .e4)
+        await session.keepOriginalMove()
+
+        // The first move's window opens normally. The second must not: a
+        // snapshot left over from move one would rewind the board two moves
+        // while taking one entry off the list.
+        #expect(offered == [true, false])
+        #expect(session.moves.map(\.san) == ["d4", "d5", "e4", "Nf6"])
+    }
+}
+
+// MARK: - Opponent resignation
+
+/// Without this a dead-won game had to be played to mate — session time spent
+/// on nothing the app is trying to teach, against the "~10 min" the Today card
+/// promises.
+@Suite("The opponent resigns")
+@MainActor
+struct GameSessionResignationTests {
+
+    /// Seventeen quiet White moves, none of them a capture, a check or a double
+    /// push, so the game reaches ply 34 with no repetition and no en passant to
+    /// muddy what is being measured.
+    static let userMoves: [(Square, Square)] = [
+        (.a2, .a3), (.b2, .b3), (.c2, .c3), (.d2, .d3), (.e2, .e3), (.f2, .f3), (.g2, .g3), (.h2, .h3),
+        (.a3, .a4), (.b3, .b4), (.c3, .c4), (.d3, .d4), (.e3, .e4), (.f3, .f4), (.g3, .g4), (.h3, .h4),
+        (.g1, .f3)
+    ]
+    static let opponentMoves = [
+        "a7a6", "b7b6", "c7c6", "d7d6", "e7e6", "f7f6", "g7g6", "h7h6",
+        "a6a5", "b6b5", "c6c5", "d6d5", "e6e5", "f6f5", "g6g5", "h6h5",
+        "g8f6"
+    ]
+
+    private func session(opponentRating: Int, opponentScoreCp: Int) -> GameSession {
+        let engine = ScriptedEngine()
+        engine.onSearch = { position, _ in
+            let index = history(position).count / 2
+            return result([
+                line(Self.opponentMoves[min(index, Self.opponentMoves.count - 1)], cp: opponentScoreCp)
+            ])
+        }
+        return makeSession(
+            GameSession.Configuration(
+                userColor: .white,
+                opponentRating: opponentRating,
+                baseSeconds: 600,
+                incrementSeconds: 5,
+                mode: "sparring",
+                secondTryEnabled: false,
+                guidedEnabled: false
+            ),
+            engine: engine
+        )
+    }
+
+    private func play(_ session: GameSession) async {
+        await session.start()
+        for move in Self.userMoves {
+            guard !session.isFinished else { return }
+            _ = await session.attemptUserMove(from: move.0, to: move.1)
+        }
+    }
+
+    @Test("A strong opponent gives up a position it reads as gone")
+    func hopelessOpponentResigns() async throws {
+        let session = self.session(opponentRating: 2_000, opponentScoreCp: -1_000)
+        await play(session)
+
+        guard case .finished(let outcome) = session.phase else {
+            Issue.record("expected a resignation")
+            return
+        }
+        #expect(outcome.result == "1-0")
+        #expect(outcome.termination == GameTermination.resignation.rawValue)
+        #expect(outcome.userWon == true)
+        // Ply 30 is the earliest it is allowed to, and it is held across three
+        // of its own moves — so 30, 32, and then 34, where it gives up.
+        #expect(session.moves.count == 34)
+    }
+
+    @Test("A level position is played on")
+    func levelOpponentPlaysOn() async throws {
+        let session = self.session(opponentRating: 2_000, opponentScoreCp: 0)
+        await play(session)
+
+        if case .finished = session.phase {
+            Issue.record("a level game was resigned")
+        }
+        #expect(session.moves.count == 34)
+    }
+
+    @Test("A beginner plays it out")
+    func weakOpponentNeverResigns() async throws {
+        let session = self.session(opponentRating: 900, opponentScoreCp: -1_000)
+        await play(session)
+
+        // At 900 the position is not actually lost — the user still has to
+        // convert it, and being handed the point they had not yet earned is
+        // both a lie about the game and a lost conversion rehearsal.
+        if case .finished = session.phase {
+            Issue.record("a 900 resigned")
+        }
+    }
+
+    @Test("The bar moves with the opponent's rating")
+    func ruleIsRatingBanded() throws {
+        #expect(GameSession.resignationRule(opponentRating: 800) == nil)
+        #expect(GameSession.resignationRule(opponentRating: 1_199) == nil)
+
+        let club = try #require(GameSession.resignationRule(opponentRating: 1_500))
+        let strong = try #require(GameSession.resignationRule(opponentRating: 2_000))
+
+        // A stronger player resigns earlier and on a smaller margin, because a
+        // stronger player is right about it more often.
+        #expect(strong.minimumPly < club.minimumPly)
+        #expect(strong.userWinPercent < club.userWinPercent)
     }
 }

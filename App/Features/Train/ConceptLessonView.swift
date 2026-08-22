@@ -5,6 +5,7 @@
 
 import BoardUI
 import SwiftUI
+import TrainingCore
 
 /// The lesson, shown once, before the concept is ever exercised.
 ///
@@ -55,12 +56,57 @@ struct ConceptLessonView: View {
                 .padding(.bottom, 24)
             }
 
-            Button("Try it") { onStart() }
-                .buttonStyle(.primaryAction)
-                .padding(.horizontal, 20)
-                .padding(.bottom, 8)
+            VStack(spacing: 8) {
+                Text(nextStep)
+                    .typeRole(.caption)
+                    .multilineTextAlignment(.center)
+                    .fixedSize(horizontal: false, vertical: true)
+
+                Button(startTitle) { onStart() }
+                    .buttonStyle(.primaryAction)
+            }
+            .padding(.horizontal, 20)
+            .padding(.bottom, 8)
         }
         .background(Palette.surfaceGround.dynamic.ignoresSafeArea())
+    }
+
+    /// What the button leads to, named rather than implied.
+    ///
+    /// "Try it" was a promise the endgame concepts do not keep: their exercise
+    /// is a drill that runs on its own screen *after* the set's puzzles, so the
+    /// tap opened a tactics puzzle instead. A button that says what will happen
+    /// is cheaper than a button that has to be forgiven.
+    private var startTitle: String {
+        switch concept.exercise {
+        case .drill: "Got it"
+        case .line: "Play the line"
+        case .corpusFeature: "Try it"
+        }
+    }
+
+    /// The step after the tap, with its cost.
+    ///
+    /// A drill is up to six positions of up to sixty moves each, arriving on
+    /// top of a set whose length the user chose. Nothing said so until the
+    /// board appeared.
+    private var nextStep: String {
+        switch concept.exercise {
+        case let .drill(kind):
+            let positions = EndgameDrill.drills(kind: kind).count
+            let budget = EndgameDrillTuning.default.moveBudget(
+                for: kind,
+                curriculum: DomainTuning.default.curriculum
+            )
+            let count = positions == 1 ? "one position" : "\(positions) positions"
+            return "Your puzzles come first. Then you play this against the engine — "
+                + "\(count), up to \(budget) moves each."
+        case let .line(_, moves, opponentMovesFirst):
+            let yours = opponentMovesFirst ? moves.count / 2 : (moves.count + 1) / 2
+            return "You play \(yours) moves of this line; the replies answer themselves."
+        case .corpusFeature:
+            return "One position, one move to find."
+        }
     }
 
     private var header: some View {

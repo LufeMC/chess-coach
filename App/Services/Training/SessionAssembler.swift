@@ -151,17 +151,52 @@ struct SessionItemPlan: Sendable, Hashable, Identifiable {
     /// Whether this slot was filled from the weekly focus habit's themes.
     var isFocusThemed: Bool
 
-    init(id: UUID = UUID(), kind: Kind, presented: PresentedPuzzle, isFocusThemed: Bool = false) {
+    /// Whether this item came from the calculation set rather than the daily
+    /// queue.
+    ///
+    /// Carried on the item rather than inferred at the call site because three
+    /// separate writes downstream have to know, and every one of them would be
+    /// wrong for a puzzle drawn 200 points above the user: the per-theme
+    /// counters rung 2 gates on (a deliberately-too-hard miss is not evidence
+    /// the user has stopped knowing forks), new-card admission (three of these
+    /// would spend the whole daily cap on positions they are not expected to
+    /// solve yet, starving the ordinary set and the game-mistake reserve), and
+    /// anything else that reads a `.fresh` item as "a puzzle at this user's
+    /// level". See `TrainingService.persist` and `registerCandidate`.
+    var isCalculation: Bool
+
+    init(
+        id: UUID = UUID(),
+        kind: Kind,
+        presented: PresentedPuzzle,
+        isFocusThemed: Bool = false,
+        isCalculation: Bool = false
+    ) {
         self.id = id
         self.kind = kind
         self.presented = presented
         self.isFocusThemed = isFocusThemed
+        self.isCalculation = isCalculation
     }
 
+    /// What a wrong move costs on this item.
+    ///
+    /// ## Why a fresh puzzle gets no second try
+    ///
+    /// `Docs/DesignBrief.md` describes a "blunder → second try → hint ladder"
+    /// and says the primary action reads *Try again*. That is the rule for a
+    /// position the user has already been taught — a relearn, or a concept
+    /// exercise — and it is deliberately **not** the rule for a fresh puzzle.
+    ///
+    /// A fresh puzzle is a test of whether the user *saw* it. Handing back the
+    /// same position after a wrong answer turns it into a multiple-choice
+    /// question: with two guesses the second one is informed by the first, the
+    /// grade stops measuring recall, and the spaced-repetition interval that
+    /// comes out the other end is wrong for months. A relearn item exists
+    /// precisely to give another go at something just failed, so ending it on
+    /// the first slip would make it identical to the review that already
+    /// failed.
     var retryPolicy: PuzzleSolveMachine.RetryPolicy {
-        // A relearn item exists precisely to give the user another go at
-        // something they just failed; ending it on the first slip would make it
-        // identical to the review that already failed.
         if case .relearn = kind { return .allowRetries(1) }
         return .endOnFirstMistake
     }
@@ -325,6 +360,62 @@ enum SessionAssembler {
         }
 
         return AssembledSession(items: items, retired: plan.retired, mix: mix)
+    }
+
+    /// Picks the calculation set out of a raised-band candidate list.
+    ///
+    /// Fresh puzzles only, and no scheduler anywhere near it. `SessionBuilder`
+    /// is what decides how many review cards a day holds and which of them have
+    /// finished the anti-memorization ladder; running the calculation set
+    /// through it would spend the day's review budget on twelve minutes of work
+    /// that has nothing to do with the deck, and retire cards on the strength of
+    /// a session they were never in. Nothing here reads or writes an SRS card,
+    /// so the daily set assembled afterwards sees exactly the queue it would
+    /// have seen.
+    ///
+    /// - Parameter candidates: puzzles already fetched from the raised band,
+    ///   over-fetched by ``DomainTuning/Calculation/candidateMultiple``. The
+    ///   caller supplies the band and the exclusions for the same reason
+    ///   ``assemble(_:targetSize:scheduler:tuning:)``'s caller does: every I/O
+    ///   decision stays outside this type so the rule can be tested from
+    ///   literals.
+    static func calculationSet(
+        candidates: [Puzzle],
+        tuning: DomainTuning.Calculation = DomainTuning.default.calculation
+    ) -> AssembledSession {
+
+        // Longest solution first, and served in that order.
+        //
+        // Ranked rather than filtered: a hard floor on line length would let a
+        // thin band come back empty and turn a real set into nothing, and a
+        // one-move puzzle 250 points above the user is still calculation work —
+        // it is the *band* that carries the promise the entry point makes, and
+        // that promise is kept by the query. The order matters for the same
+        // reason the focus puzzles lead the daily set: a user who stops after
+        // one has then spent their attention on the deepest line available
+        // rather than the shallowest.
+        //
+        // The corpus query cannot do this itself — `moves` is one
+        // space-separated column, so length is not a predicate the rating index
+        // can help with — which is why the caller over-fetches.
+        let ranked = candidates.enumerated().sorted { left, right in
+            let leftPlies = left.element.solution.count
+            let rightPlies = right.element.solution.count
+            // Ties keep the corpus's own `ORDER BY random()` order, so a band
+            // whose puzzles are all the same length still varies day to day.
+            // `sorted(by:)` is not documented as stable, hence the index.
+            if leftPlies == rightPlies { return left.offset < right.offset }
+            return leftPlies > rightPlies
+        }
+
+        let items = ranked.prefix(max(0, tuning.setSize)).map { candidate in
+            SessionItemPlan(
+                kind: .fresh,
+                presented: PresentedPuzzle(item: SolvableItem(puzzle: candidate.element), preferring: .identity),
+                isCalculation: true
+            )
+        }
+        return AssembledSession(items: items)
     }
 
     /// Appends same-day retries for the cards failed during this session.

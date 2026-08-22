@@ -46,6 +46,19 @@ struct SelfAssessmentView: View {
                         .typeRole(.body, appliesForeground: false)
                         .foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
+
+                    // The cost and the escape, on the screen where the user is
+                    // deciding whether to spend the evening on this.
+                    Text(CalibrationModel.costLine)
+                        .typeRole(.caption)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .padding(.top, 2)
+
+                    // And what the hour buys, which until now was answered for
+                    // the first time by the reveal at the end of it.
+                    Text(CalibrationModel.payoffLine)
+                        .typeRole(.caption)
+                        .fixedSize(horizontal: false, vertical: true)
                 }
 
                 // The question is the content of this screen, not a label on a
@@ -70,7 +83,7 @@ struct SelfAssessmentView: View {
                 // path, so the only thing missing was somebody saying so.
                 if selection == nil {
                     Text(
-                        "Not sure? Leave it — the first opponent plays around \(CalibrationSeed.defaultOpponentRating) and the ladder moves after every result."
+                        "Not sure? Leave it — the first opponent plays at about club-beginner level, and each game after that gets harder or easier depending on how the last one went."
                     )
                     .typeRole(.caption)
                     .fixedSize(horizontal: false, vertical: true)
@@ -86,7 +99,7 @@ struct SelfAssessmentView: View {
             // Names the step and its cost rather than saying `Continue`, and is
             // never disabled: the question seeds the measurement, it does not
             // gate it.
-            Button("Play the first game", action: onContinue)
+            Button("Play game 1 · 15 min on your clock", action: onContinue)
                 .buttonStyle(.primaryAction)
                 .padding(.horizontal)
                 .padding(.top, 10)

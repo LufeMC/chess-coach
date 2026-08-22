@@ -71,19 +71,41 @@ struct AdvancementTests {
 
     @Test("All criteria of a conjunction must hold")
     func conjunctionSemantics() {
-        let skill = Curriculum.rung(1)!.skills.first { $0.id == "r1.blunderControl" }!
+        let skill = Curriculum.rung(1)!.skills.first { $0.id == "r1.basicMates" }!
         #expect(skill.criteria.count == 2)
 
         var half = MetricSnapshot()
-        half.set(2.0, samples: 8, for: .blundersPer100, window: .lastGames(8))
-        half.set(0.30, samples: 8, for: .cleanRetryRate, window: .lastGames(8))
+        half.set(3, samples: 3, for: .kqkDrillCleanStreak, window: .allTime)
+        half.set(0, samples: 3, for: .krkDrillCleanStreak, window: .allTime)
         let partial = skill.evaluate(in: half)
         #expect(!partial.isMet)
         #expect(partial.failingCriteria.count == 1)
 
         var full = half
-        full.set(0.60, samples: 8, for: .cleanRetryRate, window: .lastGames(8))
+        full.set(3, samples: 3, for: .krkDrillCleanStreak, window: .allTime)
         #expect(skill.evaluate(in: full).isMet)
+    }
+
+    @Test("The clean-retry rate is measured but never gates rung 1")
+    func cleanRetryIsNotAGate() {
+        // The only way to produce a clean-retry attempt is to fail a review
+        // card and re-play it, so a user with no due cards — or one who solves
+        // them — never generates the number at all. As a required conjunct that
+        // held the rung shut on evidence they had no way to go and create.
+        let skill = Curriculum.rung(1)!.skills.first { $0.id == "r1.cleanRetries" }!
+        #expect(!skill.isRequired)
+        #expect(Curriculum.rung(1)!.requiredSkills.allSatisfy { skill in
+            skill.criteria.allSatisfy { $0.metricKey != .cleanRetryRate }
+        })
+
+        // Everything else met, clean retries never measured: still a promotion.
+        var metrics = passingRung1()
+        metrics[.cleanRetryRate, .lastGames(8)] = nil
+        let decision = advancement(
+            state: AdvancementState(currentRung: 1, metrics: metrics, gamesAtRung: 12, daysAtRung: 20)
+        )
+        #expect(decision.canAdvance)
+        #expect(decision.unmetSkillIDs.contains("r1.cleanRetries"))
     }
 
     @Test("An unmeasured metric is reported separately from a failing one")
@@ -112,6 +134,31 @@ struct AdvancementTests {
         for theme in DomainTuning.default.curriculum.rung2Themes {
             snapshot.set(0.8, samples: 20, for: .puzzleThemeSuccess(theme, ratingFloor: 1200), window: .allTime)
         }
+        #expect(skill.evaluate(in: snapshot).isMet)
+    }
+
+    @Test("The rung-2 guided-prompt gate needs a real sample, not one lucky answer")
+    func guidedPromptGateHasAMinimumSample() {
+        let skill = Curriculum.rung(2)!.skills.first { $0.id == "r2.threatAwareness" }!
+        let criterion = skill.criteria.first { $0.metricKey == .guidedScanThreatsHitRate }!
+        #expect(criterion.minimumSamples == DomainTuning.default.curriculum.guidedPromptMinimumSamples)
+        #expect(criterion.minimumSamples > 1)
+
+        // Guided mode asks at most three questions a game, so without the
+        // minimum a single answered prompt was a 100% hit rate — and this is a
+        // *required* skill, so that one prompt decided a rung.
+        var snapshot = MetricSnapshot()
+        snapshot.set(0.5, samples: 10, for: .ignoredThreatPer100, window: .lastGames(10))
+        snapshot.set(1.0, samples: 1, for: .guidedScanThreatsHitRate, window: .lastGames(10))
+
+        let thin = skill.evaluate(in: snapshot)
+        #expect(!thin.isMet)
+        // Unmeasured, not failed: the user has done nothing wrong, there is
+        // simply not enough of it yet.
+        #expect(thin.failingCriteria.isEmpty)
+        #expect(thin.unmeasuredCriteria.count == 1)
+
+        snapshot.set(0.65, samples: criterion.minimumSamples, for: .guidedScanThreatsHitRate, window: .lastGames(10))
         #expect(skill.evaluate(in: snapshot).isMet)
     }
 

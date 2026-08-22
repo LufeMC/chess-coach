@@ -408,3 +408,60 @@ struct SessionBuilderTests {
         #expect(CardPolicy.shouldCreateCard(origin: .freshPuzzle, solved: false))
     }
 }
+
+// MARK: - Calculation set
+
+/// The calculation set's tuning is nothing but numbers, and the whole feature is
+/// a claim about how those numbers relate to the daily set's. Asserting the
+/// relationship here is what stops a future calibration pass from moving one of
+/// them and leaving the entry point promising something the band no longer
+/// delivers.
+@Suite("Calculation tuning")
+struct CalculationTuningTests {
+
+    @Test("The calculation band starts above everything the daily set can serve")
+    func bandsCannotOverlap() {
+        let tuning = DomainTuning.default
+        // The card says these sit above the user's level. That sentence is only
+        // true while the raised band starts beyond the top of the band fresh
+        // puzzles already come from — at or below it, the calculation set is the
+        // daily set with a different label, which is the silent substitution the
+        // whole mode exists to remove.
+        #expect(tuning.calculation.bandOffset > tuning.cards.freshServingBand)
+    }
+
+    @Test("The band has width to sample from")
+    func bandHasWidth() {
+        // A zero-width band is one rating value, and the corpus query orders by
+        // random() *inside* the band — so the same handful of puzzles would come
+        // back every day and the set would become a recall test.
+        #expect(DomainTuning.default.calculation.bandWidth > 0)
+    }
+
+    @Test("The set is short, and shorter than a day's ordinary session")
+    func setIsShort() {
+        let tuning = DomainTuning.default
+        #expect(tuning.calculation.setSize > 0)
+        // It is served on top of the daily set, at minutes per puzzle rather
+        // than seconds. A calculation set that rivalled the session in length
+        // would not be finished, and an abandoned calculation puzzle rehearses
+        // the exact habit it exists to break.
+        #expect(tuning.calculation.setSize < tuning.cards.sessionTargetSize)
+    }
+
+    @Test("The budget is minutes per puzzle, not seconds")
+    func budgetIsMinutes() {
+        let tuning = DomainTuning.default
+        // The daily set grades a correct answer under ten seconds as `.easy`,
+        // i.e. as recognition. The calculation budget has to be far enough past
+        // that for the label to mean anything.
+        #expect(tuning.calculation.minutesPerPuzzle * 60_000 > tuning.grading.easyLatencyMs)
+    }
+
+    @Test("Enough candidates are fetched for the length preference to bite")
+    func overFetchesCandidates() {
+        // Solution length is not a SQL predicate, so it is chosen from an
+        // over-fetch. A multiple of one is no choice at all.
+        #expect(DomainTuning.default.calculation.candidateMultiple > 1)
+    }
+}

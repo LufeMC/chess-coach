@@ -38,6 +38,16 @@ final class GameSession {
         case notStarted
         case userToMove
         case opponentThinking
+        /// The opponent's move has landed but the board is not the user's yet:
+        /// the coach is deciding whether this position is worth a question.
+        ///
+        /// Its own case rather than an early `.userToMove`, because two engine
+        /// probes run inside it and neither clock may be charged for them.
+        /// Without it the probes ran with the phase still `.opponentThinking`,
+        /// so for a few hundred milliseconds after the opponent's piece had
+        /// visibly moved their clock kept ticking and their spoken line still
+        /// said they were thinking — which reads as lag, or as a second move.
+        case preparing
         /// A blunder was just played and retracted; the user must try again.
         case secondTry(SecondTryState)
         /// Guided mode paused before the user's move to ask a question.
@@ -142,6 +152,28 @@ final class GameSession {
         }
     }
 
+    // MARK: - Second try
+
+    /// The clock floor a second try needs, below which the take-back stops
+    /// firing.
+    ///
+    /// The probe is two engine searches and the sheet is a pause on top of
+    /// them; in the last minute that trade costs more than the blunder it
+    /// catches, so the coach stands down. The rule is defensible — the silence
+    /// was not. A user who has spent fourteen minutes learning that a blunder
+    /// gets caught, and then blunders in time trouble to nothing at all, reads
+    /// it as the feature misfiring rather than as a boundary they were told
+    /// about.
+    static let secondTryMinClockMs = 60_000
+
+    /// How the rule reads on the start prompt.
+    ///
+    /// Kept next to the threshold it describes, in the shape guided mode's
+    /// pause count already uses, so the promise cannot outlive the rule: the
+    /// wording spells out ``secondTryMinClockMs`` and moving one without the
+    /// other is what turns a caption into a lie.
+    static let secondTryPromise = "A blunder gets a second try, until your last minute."
+
     // MARK: - Observable state
 
     private(set) var board = Board(position: .standard)
@@ -152,6 +184,12 @@ final class GameSession {
     private(set) var opponentClockMs: Int
     /// Opponent's live evaluation, shown only after the game unless in guided mode.
     private(set) var currentEvaluation: Double = 50
+    /// Whether ``currentEvaluation`` is a reading or still its 50 placeholder.
+    ///
+    /// The two are indistinguishable by value — "dead level" and "nobody has
+    /// looked yet" are both 50 — and ``offerDraw()`` must not mistake the second
+    /// for the first and hand away a won position.
+    private var opponentHasEvaluated = false
 
     let configuration: Configuration
     let gameID = UUID()
@@ -206,6 +244,19 @@ final class GameSession {
     /// Set once the coach has drawn a refutation and the user has taken the move
     /// back. See ``FinishedGameRecord/usedAssistedRetry``.
     private var usedAssistedRetry = false
+    /// How many moves the user took back, by any route.
+    ///
+    /// ``usedAssistedRetry`` only catches the one case where the coach drew the
+    /// refutation first. A game where two blunders were quietly retracted at
+    /// hint level 0 is still not a game the player finished unaided, and until
+    /// this counter existed it moved the ladder exactly as far as a clean one.
+    /// See ``TrainingCore/LadderGame/retractionCount``.
+    private var retractionsUsed = 0
+    /// Consecutive opponent moves whose own reading said the game was gone.
+    private var opponentHopelessMoves = 0
+    /// Everything the user's last move overwrote, kept so it can be taken back
+    /// before the opponent answers. Nil whenever there is nothing to undo.
+    private var undoSnapshot: UndoSnapshot?
     private var opponentTask: Task<Void, Never>?
     /// Retained so the save is not cancelled by the view going away when the
     /// user leaves the finished-game screen.
@@ -217,6 +268,9 @@ final class GameSession {
     /// ``resumeClock(at:)`` idempotent: a foreground notification with no
     /// matching background one has nothing to forgive.
     private var leftForegroundAt: Date?
+    /// Set when the opponent's turn was put down because the app left the
+    /// screen. The move is owed, and replayed by ``resumeOwedOpponentMove()``.
+    private var opponentMoveOwed = false
     /// Removes the lifecycle observers when this session is released.
     private let foregroundObservers = ObserverBox()
 
@@ -252,6 +306,23 @@ final class GameSession {
         board.position.sideToMove == configuration.userColor
     }
 
+    /// Whether the side to move can take back on the square the last move landed
+    /// on.
+    ///
+    /// The board's own answer to "was that a trade or a gift", which the
+    /// opponent's spoken line needs and cannot get from the move text: `Bxf7` is
+    /// the same three characters whether the bishop is walking into a recapture
+    /// or collecting a free piece. Any legal move *ending* on that square is a
+    /// capture, because the mover's own piece is standing there.
+    ///
+    /// Computed on demand rather than stored, because it is asked once per user
+    /// move — while the opponent thinks — and move generation for one position
+    /// is cheaper than a cache that can go stale.
+    var lastMoveCanBeAnswered: Bool {
+        guard let square = lastMove?.to else { return false }
+        return PositionUtilities.legalMovePairs(in: board.position).contains { $0.end == square }
+    }
+
     // MARK: - Lifecycle
 
     func start() async {
@@ -269,6 +340,66 @@ final class GameSession {
         let result = configuration.userColor == .white ? "0-1" : "1-0"
         finish(Outcome(result: result, termination: GameTermination.resignation.rawValue, userWon: false))
     }
+
+    /// Whether a draw can be offered right now.
+    ///
+    /// Only on the user's own move: an offer made while the opponent is
+    /// thinking would be answered by a reading of a position that is about to
+    /// change, and over the board an offer is made *with* a move, not across
+    /// one.
+    var canOfferDraw: Bool {
+        if case .userToMove = phase { return !isFinished }
+        return false
+    }
+
+    /// Offers a draw, and returns whether the opponent took it.
+    ///
+    /// Recognising a dead ending and agreeing it is endgame technique, and it is
+    /// a named habit in the curriculum. Until this existed the only ways out of
+    /// one were to shuffle until the fifty-move counter or a repetition arrived
+    /// — which usually did arrive, so this is a convenience rather than a rescue
+    /// — or to resign a drawn position and take the ladder loss for it.
+    ///
+    /// ## What the opponent is allowed to know
+    ///
+    /// It answers from its own last search and nothing else, which is the whole
+    /// point: a 1200 agrees a draw when *their* reading says the position is
+    /// level, not when a full-strength engine says so. That reading is one ply
+    /// stale and depth-capped, and in an endgame both of those are small.
+    ///
+    /// Endgame-only, and level-only, because the failure that matters is
+    /// one-sided. Declining a genuine draw costs the user a few more moves;
+    /// accepting one in a position they were winning costs them half a point and
+    /// a rating move they had earned. So the bar is the conservative one and the
+    /// answer is no whenever the opponent has not actually looked at the
+    /// position yet.
+    @discardableResult
+    func offerDraw() -> Bool {
+        guard canOfferDraw, opponentHasEvaluated else { return false }
+        guard AnalysisKit.Phase.classify(position: board.position, ply: moves.count + 1) == .endgame else {
+            return false
+        }
+        let levelWindow = EvalMath.winPercent(cp: Self.drawOfferLevelCentipawns) - 50
+        guard abs(currentEvaluation - 50) <= levelWindow else { return false }
+
+        opponentTask?.cancel()
+        finish(
+            Outcome(
+                result: "1/2-1/2",
+                termination: GameTermination.agreement.rawValue,
+                userWon: nil
+            )
+        )
+        return true
+    }
+
+    /// How level the opponent's own last reading has to be before it agrees a
+    /// draw, in centipawns.
+    ///
+    /// Under a third of a pawn. Half a pawn is too generous in an endgame, where
+    /// a single pawn is frequently the whole game, and an exact zero would never
+    /// fire at all: a depth-capped search almost never lands on it.
+    private static let drawOfferLevelCentipawns = 30
 
     // MARK: - Foreground
 
@@ -317,13 +448,35 @@ final class GameSession {
     func resumeClock(at date: Date = Date()) -> Bool {
         guard let leftForegroundAt else { return false }
         self.leftForegroundAt = nil
-        guard date > leftForegroundAt, !isFinished else { return false }
-        moveStartedAt = Self.moveStart(
-            forgivingAwayTime: moveStartedAt,
-            leftAt: leftForegroundAt,
-            returnedAt: date
-        )
-        return true
+
+        let forgiven = date > leftForegroundAt && !isFinished
+        if forgiven {
+            moveStartedAt = Self.moveStart(
+                forgivingAwayTime: moveStartedAt,
+                leftAt: leftForegroundAt,
+                returnedAt: date
+            )
+        }
+
+        // Ordered after the forgiveness so the replayed search is billed from
+        // the corrected instant rather than from the moment the app went away.
+        resumeOwedOpponentMove()
+        return forgiven
+    }
+
+    /// Restarts an opponent move that was put down when the app left the screen.
+    ///
+    /// The alternative — letting ``recoverFromOpponentFailure(_:)`` retry in the
+    /// background — is what used to happen, and it is two bugs. It spends the
+    /// three-strike budget on a failure that was never the engine's fault (the
+    /// lease is torn down on suspension, so all three strikes land inside a
+    /// second and the game is abandoned as a draw), and it starts a fresh
+    /// Stockfish search off screen, which is the exact thing suspending the
+    /// engine exists to prevent.
+    private func resumeOwedOpponentMove() {
+        guard opponentMoveOwed, !isFinished, case .opponentThinking = phase else { return }
+        opponentMoveOwed = false
+        Task { [weak self] in await self?.playOpponentMove() }
     }
 
     /// Where ``moveStartedAt`` lands once the away time is forgiven.
@@ -389,9 +542,17 @@ final class GameSession {
     /// from a display timer: a player who simply stops moving still flags, and
     /// nothing else in this class is driven by the passage of time.
     ///
-    /// A guided pause is not on anybody's clock. The pause was the app's idea,
+    /// Neither coaching pause is on anybody's clock. Both were the app's idea,
     /// and flagging someone for reading a question they did not ask for is the
     /// fastest way to make guided mode feel like a tax.
+    ///
+    /// `.secondTry` used to be the exception, and it was an exception in one
+    /// direction only: nothing charges the deliberation between the retraction
+    /// and the replacement — ``keepOriginalMove()`` pays only what the first
+    /// attempt cost, ``resumeAfterSecondTry()`` restarts the clock from scratch,
+    /// and the pill treats the phase as stopped — yet this method could still
+    /// end the game on it. A pause that cannot cost you a second but can cost
+    /// you the game is the worst of both readings.
     @discardableResult
     func checkClock() -> Bool {
         guard !isFinished else { return true }
@@ -400,7 +561,7 @@ final class GameSession {
         let elapsedMs = Int(Date().timeIntervalSince(moveStartedAt) * 1000)
 
         switch phase {
-        case .userToMove, .secondTry:
+        case .userToMove:
             guard elapsedMs >= userClockMs else { return false }
             userClockMs = 0
             opponentTask?.cancel()
@@ -412,7 +573,10 @@ final class GameSession {
             opponentTask?.cancel()
             finish(timeoutOutcome(flagged: opponentColor))
             return true
-        case .notStarted, .guidedPrompt, .finished:
+        // `.preparing` joins the coaching pauses for the same reason: the two
+        // probes that run in it were the app's idea, and the opponent has
+        // already moved.
+        case .notStarted, .preparing, .secondTry, .guidedPrompt, .finished:
             return false
         }
     }
@@ -486,6 +650,7 @@ final class GameSession {
         let boardBefore = board
         let lastMoveBefore = lastMove
         let clockBeforeMove = userClockMs
+        let startedThinkingAt = moveStartedAt
 
         guard var move = board.move(pieceAt: from, to: to) else { return false }
         move = completePromotionIfNeeded(move, to: promoting)
@@ -498,6 +663,18 @@ final class GameSession {
         let guided = takeGuidedVerdict(playedUCI: Self.uciText(for: move))
 
         userClockMs = max(0, userClockMs - thinkTimeMs) + configuration.incrementSeconds * 1000
+        // The move has been paid for, so the instant it was measured from has to
+        // be retired in the same breath.
+        //
+        // Everything below this line can await — the blunder probe is two engine
+        // searches — and both the status pill and ``checkClock()`` read the
+        // clock against `moveStartedAt`. Leaving the move's own start date in
+        // place therefore charged the same think time a second time for as long
+        // as the probe ran: the displayed clock dipped by the whole think and
+        // sprang back when the probe returned, on the one screen whose brief is
+        // that nothing moves, and a long think followed by a perfectly legal
+        // move could flag the user in the gap.
+        moveStartedAt = Date()
         record(move: move, byUser: true, thinkTimeMs: thinkTimeMs, clockAfterMs: userClockMs, guided: guided)
         lastMove = (from, to)
 
@@ -508,9 +685,10 @@ final class GameSession {
 
         // Second-try check happens after the move is on the board so the user
         // sees the consequence, then it is taken back.
-        if configuration.secondTryEnabled, userClockMs > 60_000,
+        if configuration.secondTryEnabled, userClockMs > Self.secondTryMinClockMs,
             let blunder = await detectBlunder(playedMove: move, thinkTimeMs: thinkTimeMs)
         {
+            guard !isFinished else { return true }
             retract(
                 to: boardBefore,
                 lastMove: lastMoveBefore,
@@ -522,6 +700,26 @@ final class GameSession {
             moveStartedAt = Date()
             return true
         }
+
+        // Nothing after an await may resurrect a game that ended while it ran.
+        // ``finish(_:)`` has by then written the record and moved the ladder, so
+        // overwriting `.finished` here left the user playing on inside a game
+        // already on disk — and when it ended a second time it was saved and
+        // rated again under the same id. Resigning from the options sheet during
+        // the blunder probe is the reachable way in; ``runOpponentMove()`` has
+        // guarded its own equivalent all along.
+        guard !isFinished else { return true }
+
+        // Armed here rather than beside the snapshot it is built from, because
+        // this is the exact point the undo window opens: the move stands, the
+        // game did not end on it, and the opponent has not answered yet.
+        undoSnapshot = UndoSnapshot(
+            board: boardBefore,
+            lastMove: lastMoveBefore,
+            clockMs: clockBeforeMove,
+            startedThinkingAt: startedThinkingAt,
+            guided: guided
+        )
 
         // The opponent's think time starts now, not when the user picked the
         // piece up: `checkClock` measures the side on move against
@@ -557,9 +755,104 @@ final class GameSession {
         moves.removeLast()
         lastMove = lastMoveBefore
         userClockMs = max(0, clockBeforeMove - thinkTimeMs)
+        // The undo window belongs to the move that just left the board, and
+        // there is no arming it again: the coach has already handed this move
+        // back. Left in place, the previous move's snapshot would survive into
+        // ``keepOriginalMove()`` — which ends on `.opponentThinking` with a user
+        // move on top — and an undo there would rewind the board two moves
+        // while removing one.
+        undoSnapshot = nil
         // The verdict survives the move it was about, to be written onto
         // whichever move ends up standing in its place.
         pendingGuidedPrompt = guided.map(PendingGuidedPrompt.graded)
+    }
+
+    // MARK: - Take-backs
+
+    /// Everything one user move overwrote.
+    ///
+    /// A whole `Board` rather than a position, for the reason
+    /// ``retract(to:lastMove:clockBeforeMove:thinkTimeMs:guided:)`` keeps one:
+    /// `Board` carries the repetition counts, and rebuilding it from a position
+    /// resets them, which silently disables threefold detection for the rest of
+    /// the game.
+    private struct UndoSnapshot {
+        var board: Board
+        var lastMove: (from: Square, to: Square)?
+        /// The clock before the move was charged for, and before it earned its
+        /// increment.
+        var clockMs: Int
+        /// When the user picked the piece up. Restored rather than reset,
+        /// because the thinking genuinely happened and is still happening.
+        var startedThinkingAt: Date
+        /// The guided verdict the retracted move consumed, if there was one.
+        var guided: GuidedPromptOutcome?
+    }
+
+    /// Whether the user's last move can still be taken back.
+    ///
+    /// The window is the opponent's visible thinking pause — 0.4s to 3.6s — and
+    /// it shuts the moment their reply lands. That is deliberately the whole
+    /// affordance: the board plays a tap and a drag through one gesture, so a
+    /// release one square short is a legal move made by accident, and until this
+    /// existed a touch error cost a whole rated game unless it happened to be
+    /// bad enough for the blunder probe to catch.
+    ///
+    /// Not offered in a measurement game. Calibration is the one shape with no
+    /// coaching and no take-backs in it, because the five games it runs seed the
+    /// rating every other screen is built on; a take-back there is not a
+    /// convenience, it is a corrupted measurement nobody can see afterwards.
+    var canUndoLastMove: Bool {
+        guard !isMeasurement, undoSnapshot != nil, case .opponentThinking = phase else { return false }
+        return moves.last?.byUser == true
+    }
+
+    /// Takes the user's last move back and stops the reply it started.
+    ///
+    /// The clock is put back to where it stood *before* the move: the increment
+    /// is un-earned, and `moveStartedAt` returns to the instant the user first
+    /// picked the piece up, so the think time keeps running rather than
+    /// restarting. Anything else would make a take-back the cheapest way to buy
+    /// time on the clock.
+    ///
+    /// It counts as a retraction — see ``retractionsUsed`` — so the ladder
+    /// discounts a game full of them. No engine reading is revealed inside the
+    /// window, so this is not the coached take-back second-try is, but it is
+    /// still a move the player did not have to stand behind.
+    func undoLastUserMove() {
+        guard canUndoLastMove, let snapshot = undoSnapshot else { return }
+        undoSnapshot = nil
+
+        // Cancelled before the board moves. The reply is searching against the
+        // move list that is about to lose its last entry, and a search that
+        // landed after the rewind would play the answer to a move nobody made.
+        opponentTask?.cancel()
+        opponentTask = nil
+        opponentMoveOwed = false
+
+        board = snapshot.board
+        moves.removeLast()
+        lastMove = snapshot.lastMove
+        userClockMs = snapshot.clockMs
+        retractionsUsed += 1
+        // The verdict survives the move it was about, exactly as it does
+        // through a second-try retraction: erring right after being asked about
+        // an idea is the evidence the curriculum gates on, and letting a
+        // take-back rewrite it would turn the hit rate into a measure of the
+        // take-back button.
+        pendingGuidedPrompt = snapshot.guided.map(PendingGuidedPrompt.graded)
+        phase = .userToMove
+        moveStartedAt = snapshot.startedThinkingAt
+    }
+
+    /// Whether this game is a measurement rather than training — no coaching,
+    /// no take-backs.
+    ///
+    /// The same test ``FinishedGameRecord/isRated`` is written from, named once
+    /// so the two cannot drift: a game that offers an undo must not also be
+    /// reported as evidence of unaided playing strength.
+    private var isMeasurement: Bool {
+        !configuration.secondTryEnabled && !configuration.guidedEnabled
     }
 
     /// Returns to the position the blunder was retracted from so the user can
@@ -574,6 +867,10 @@ final class GameSession {
         // chosen with the answer on screen. `EloLadder` treats such a game as
         // unrated and has to: the result is partly the coach's.
         if state.hintLevel >= SecondTryState.assistedHintLevel { usedAssistedRetry = true }
+        // Counted here rather than at the retraction, because this is the point
+        // the take-back is actually taken: ``keepOriginalMove()`` is the other
+        // exit, and there the blunder stands and the game is still the player's.
+        retractionsUsed += 1
         phase = .userToMove
         moveStartedAt = Date()
     }
@@ -706,6 +1003,15 @@ final class GameSession {
     }
 
     private func runOpponentMove() async {
+        // Nothing is asked of Stockfish while the app is off screen. A search
+        // started here would be racing the process's own suspension, and the
+        // turn is owed rather than lost: ``resumeOwedOpponentMove()`` picks it
+        // up on the way back in.
+        guard leftForegroundAt == nil else {
+            opponentMoveOwed = true
+            return
+        }
+
         let profile = humanizer.profile
         let device = await engine.deviceProfile()
 
@@ -720,7 +1026,25 @@ final class GameSession {
         defer { Task { await engine.release(.play, lease) } }
 
         let history = moves.map(\.uci)
-        let started = Date()
+
+        // The opponent's turn is billed from `moveStartedAt`, not from a local
+        // `Date()` taken at this same instant — and that difference is the whole
+        // point. ``resumeClock(at:)`` forgives time the app spent suspended by
+        // pushing `moveStartedAt` forward; a local start date it cannot reach is
+        // a clock that keeps running while the process does not. Backgrounding
+        // during the opponent's move therefore charged every second of it to
+        // them, humanized thinking pause included, and once the away time passed
+        // their remaining clock the flag check below handed the user a win on
+        // time that the Elo ladder then paid out. No engine had to be involved:
+        // a phone call during a visible three-second pause reproduces it. The
+        // user's own clock has been forgiven this way since ``suspendClock(at:)``
+        // was written; this is the same honesty applied to the other side.
+        //
+        // Taken *after* the lease for the reason it always was: waiting for the
+        // engine is the app's delay, and charging engine contention to a player
+        // would flag someone who did nothing but wait.
+        moveStartedAt = Date()
+
         let limit = SearchLimit.depthWithin(
             depth: profile.depth,
             milliseconds: Self.opponentMoveBudgetMs(clockRemainingMs: opponentClockMs)
@@ -766,15 +1090,49 @@ final class GameSession {
                 return
             }
 
+            // Telemetry for the one thing the shipped opponent cannot be caught
+            // doing. `.depthWithin` returns normally when the millisecond
+            // backstop expires, so a search that stopped two plies short of the
+            // profile's horizon is indistinguishable from one that reached it —
+            // and the horizon *is* the opponent's rating label. Logged rather
+            // than recorded on the move: the row is CloudKit-visible and adding
+            // a column is a migration, while "does depth 13 finish inside the
+            // cap on this phone?" is a question a console log answers.
+            if let reached = result.principal?.depth, reached > 0, reached < profile.depth {
+                AppLog.engine.warning(
+                    "Opponent search reached depth \(reached, privacy: .public) of \(profile.depth, privacy: .public) at rating \(self.configuration.opponentRating, privacy: .public)"
+                )
+            }
+            AppLog.engine.debug(
+                "Opponent chose rank \(selection.rankChosen, privacy: .public) of \(selection.candidateCount, privacy: .public), blunder event: \(selection.wasBlunderEvent, privacy: .public)"
+            )
+
             // A visible pause: an instant reply on every move breaks the
             // illusion far more than a suboptimal move does.
             let think = humanizer.thinkTime(candidates: result.lines, using: &rng)
-            let elapsed = Date().timeIntervalSince(started)
+            let elapsed = Date().timeIntervalSince(moveStartedAt)
             let remaining = think - .seconds(elapsed)
             if remaining > .zero {
                 await pause(remaining)
             }
             guard !Task.isCancelled else { return }
+
+            // The flag is checked before the move is applied, exactly as it is
+            // on the user's side. A move made after the flag falls never lands,
+            // and `timeoutOutcome` reads the board to decide whether the winner
+            // has anything to mate with — which has to be the position the clock
+            // actually ran out in, not the one the abandoned move would create.
+            let thinkMs = Int(Date().timeIntervalSince(moveStartedAt) * 1000)
+            if thinkMs >= opponentClockMs {
+                opponentClockMs = 0
+                // Was a hard-coded win for the user, which quietly overruled
+                // FIDE 6.9: a player who flags still draws if the other side
+                // cannot mate, and `checkClock` has honoured that on this very
+                // clock all along. A bare king could win on time through here
+                // and draw through there.
+                finish(timeoutOutcome(flagged: opponentColor))
+                return
+            }
 
             guard
                 let move = EngineLANParser.parse(move: selection.move, for: board.position.sideToMove, in: board.position),
@@ -786,18 +1144,6 @@ final class GameSession {
             // `promotedPiece`.
             played = completePromotionIfNeeded(played, to: move.promotedPiece?.kind ?? .queen)
 
-            let thinkMs = Int(Date().timeIntervalSince(started) * 1000)
-            if thinkMs >= opponentClockMs {
-                opponentClockMs = 0
-                finish(
-                    Outcome(
-                        result: configuration.userColor == .white ? "1-0" : "0-1",
-                        termination: GameTermination.timeout.rawValue,
-                        userWon: true
-                    )
-                )
-                return
-            }
             opponentClockMs = max(0, opponentClockMs - thinkMs) + configuration.incrementSeconds * 1000
             record(move: played, byUser: false, thinkTimeMs: thinkMs, clockAfterMs: opponentClockMs)
             lastMove = (move.start, move.end)
@@ -806,8 +1152,18 @@ final class GameSession {
             if let principal = result.principal {
                 // Engine scores are side-to-move relative; store from the
                 // user's perspective so the eval bar doesn't flip each ply.
+                //
+                // The perspective is the *opponent's*, not the board's. This
+                // search was run before `board.move` above, for the position
+                // where the opponent was to move, so its score belongs to the
+                // opponent whatever the board says now. Asking the post-move
+                // board who is to move inverted every reading: it is the user's
+                // turn by then, so the check passed and the opponent's win
+                // percentage was stored as the user's — the guided-mode eval
+                // pill showed the user winning exactly when they were losing.
                 let winPct = winPercent(principal.score)
-                currentEvaluation = board.position.sideToMove == configuration.userColor ? winPct : 100 - winPct
+                currentEvaluation = 100 - winPct
+                opponentHasEvaluated = true
             }
 
             // The opponent's move is complete, so nothing that happens between
@@ -816,7 +1172,16 @@ final class GameSession {
 
             if let outcome = terminalOutcome() {
                 finish(outcome)
+                return
             }
+
+            // Ordered after the terminal check, and that ordering is the whole
+            // safety of it. The reading below was taken *before* the move that
+            // just landed, so a move that stalemates the user arrives with the
+            // opponent's own position looking hopeless — resigning on that would
+            // turn a draw into a win the user never played for, and hand it to
+            // the ladder.
+            considerResignation(hasReading: result.principal != nil)
         } catch {
             // A search that fails after the game has ended must not reopen it:
             // every termination cancels this task, and that cancellation is one
@@ -824,6 +1189,72 @@ final class GameSession {
             guard !isFinished else { return }
             await recoverFromOpponentFailure(error)
         }
+    }
+
+    // MARK: - Resignation
+
+    /// How many of its own moves in a row the opponent has to see the game as
+    /// gone before it gives up.
+    ///
+    /// Three rather than one, because the reading is a single depth-capped
+    /// search: an unresolved sacrifice or an aspiration-window artefact can
+    /// print one catastrophic score in a position that is not lost, and
+    /// resigning on it would end a game the user was not winning.
+    private static let movesBeforeResigning = 3
+
+    /// When an opponent of this strength gives up: the earliest ply, and how far
+    /// gone its own reading has to say the position is, as the user's win
+    /// percentage.
+    ///
+    /// `nil` for a profile that plays everything out.
+    ///
+    /// Resignation is a rating-band habit rather than a rule of chess, and the
+    /// expensive direction to be wrong in is the generous one: a point handed
+    /// over is a conversion the user did not have to play, and converting a won
+    /// position is exactly what a won position is for. So the bar is high, it is
+    /// held across three moves, and under 1200 the opponent simply plays on —
+    /// which is what happens in that band over the board, and what the user at
+    /// that level still needs the practice of finishing.
+    nonisolated static func resignationRule(opponentRating: Int) -> (minimumPly: Int, userWinPercent: Double)? {
+        switch opponentRating {
+        case ..<1200: nil
+        case ..<1800: (minimumPly: 40, userWinPercent: 97)
+        default: (minimumPly: 30, userWinPercent: 93)
+        }
+    }
+
+    /// Ends the game if the opponent has now seen its own position as lost for
+    /// long enough to resign it.
+    ///
+    /// Without this a dead-won game had to be played to mate and a dead-drawn
+    /// one shuffled to the fifty-move counter — session time spent on nothing
+    /// the app is trying to teach.
+    ///
+    /// - Parameter hasReading: whether the move that just landed came with a
+    ///   score. A move played without one is not evidence either way, and
+    ///   counting a stale reading again would let one spike resign a game on its
+    ///   own.
+    private func considerResignation(hasReading: Bool) {
+        guard
+            hasReading,
+            let rule = Self.resignationRule(opponentRating: humanizer.profile.rating),
+            moves.count >= rule.minimumPly,
+            currentEvaluation >= rule.userWinPercent
+        else {
+            opponentHopelessMoves = 0
+            return
+        }
+
+        opponentHopelessMoves += 1
+        guard opponentHopelessMoves >= Self.movesBeforeResigning else { return }
+
+        finish(
+            Outcome(
+                result: configuration.userColor == .white ? "1-0" : "0-1",
+                termination: GameTermination.resignation.rawValue,
+                userWon: true
+            )
+        )
     }
 
     /// Handles an opponent search that threw.
@@ -840,6 +1271,17 @@ final class GameSession {
     /// retrying keeps failing is the game genuinely unable to continue, and then
     /// it is ended and recorded rather than left hanging.
     private func recoverFromOpponentFailure(_ error: Error) async {
+        // A search that failed while the app was off screen failed *because* the
+        // app was off screen: suspending the engine tears the lease down, so the
+        // search returns truncated and the retry is refused outright. Spending a
+        // strike on that would burn all three inside a second — the backoff is
+        // 250ms — and abandon a perfectly live game as a draw for backgrounding
+        // it. The turn is owed instead, and replayed on the way back in.
+        guard leftForegroundAt == nil else {
+            opponentMoveOwed = true
+            return
+        }
+
         opponentRetriesUsed += 1
 
         guard opponentRetriesUsed <= Self.maxOpponentRetries else {
@@ -913,9 +1355,20 @@ final class GameSession {
     /// has to happen before their clock starts: the pause is the app's idea, and
     /// the search that decides whether to pause is even more so.
     private func handOverToUser() async {
+        // Set before the probes rather than after them, so the opponent stops
+        // thinking the instant their move lands. See ``Phase/preparing``.
+        phase = .preparing
         moveStartedAt = Date()
 
-        guard let pending = await guidedPrompt() else {
+        let pending = await guidedPrompt()
+
+        // Nothing after an await may resurrect a game that ended while it ran.
+        // Resigning or agreeing a draw from the options sheet while the probe is
+        // searching is the reachable way in, and handing the board back
+        // afterwards left the user playing on inside a game already on disk.
+        guard !isFinished else { return }
+
+        guard let pending else {
             phase = .userToMove
             moveStartedAt = Date()
             return
@@ -941,6 +1394,10 @@ final class GameSession {
         let budget = mode.budget
         guard fullMoveNumber(ply: ply) >= budget.minFullMoveNumber else { return nil }
         guard guidedPausesUsed < budget.maxPausesPerGame else { return nil }
+        guard
+            guidedPausesUsed < budget.maxPausesPerGame - 1
+                || fullMoveNumber(ply: ply) >= budget.reservedPauseMinFullMoveNumber
+        else { return nil }
         guard pliesSinceLastGuidedPause(ply: ply) >= budget.minPliesBetweenPauses else { return nil }
         guard userClockMs > budget.minClockMs else { return nil }
 
@@ -961,7 +1418,63 @@ final class GameSession {
             let best = result.principal
         else { return nil }
 
+        // A gap is only a gap if both sides of it are real numbers from the same
+        // search.
+        //
+        // Two ways a node-limited MultiPV search hands back a pair that cannot
+        // be subtracted. A search stopped part-way through an iteration reports
+        // rank 1 from the depth it finished and rank 2 from the depth before it,
+        // and the difference between two depths is mostly depth. And a root move
+        // that failed outside the aspiration window is printed as `lowerbound`
+        // or `upperbound` — a clamp on the window, not an evaluation — so
+        // subtracting it manufactures a gap out of the window's edge.
+        //
+        // Either one invents criticality where there was none, and the cost of
+        // that is not a wasted search: it is a pause, which stops the clock and
+        // announces "this position matters" about a position that does not.
+        // Three of those per game is the entire budget.
+        guard !result.wasTruncated else { return nil }
         let secondBest = result.line(rank: 2)
+        if let secondBest {
+            guard best.bound == .exact, secondBest.bound == .exact else { return nil }
+            guard best.depth == secondBest.depth else { return nil }
+        }
+
+        // Criticality's suppressions, borrowed without its gap test.
+        //
+        // A best-minus-second gap is a terrible proxy for "this position asked
+        // something of you", and the two ways it fails hardest are the two
+        // `Criticality` already names: a free capture and a forced recapture
+        // both show an enormous gap and demand nothing at all. Against a
+        // humanized 1000–1500 opponent those are also the *largest* gaps in the
+        // game — they are the opponent's own blunders — so a greedy budget spent
+        // the pauses on exactly them. Pausing there is the worst leak this
+        // feature has: it tells a user who had not seen the hanging piece to go
+        // and look, and then records the capture they were pointed at as a
+        // threat-awareness hit, inflating the very number the curriculum gates
+        // the habit on.
+        //
+        // `.alreadyDecided` is deliberately *not* honoured. It fires beyond
+        // 600cp, and `convertCleanly` is chosen at 0.85 expected points — about
+        // +470cp — so applying it wholesale would suppress precisely the
+        // positions one of the habits exists to train. `GuidedMode` keeps its own
+        // thresholds for everything that survives here; this is only about gaps
+        // that were never a decision.
+        //
+        // The one gap left open, stated so nobody rediscovers it as a bug:
+        // `Criticality.evaluate` returns no suppression at all below its own
+        // 0.10 bar, so a free capture worth less than that can still reach a
+        // focus-habit pause at 0.07. The filters it needs are internal to
+        // `AnalysisKit`, and a free capture that small is rare enough not to
+        // justify widening that package's surface for it.
+        let suppression = Criticality.evaluate(
+            best: best,
+            secondBest: secondBest,
+            board: board,
+            lastCaptureSquare: opponentLastCaptureSquare
+        ).suppressedBy
+        guard suppression != .freeCapture, suppression != .forcedRecapture else { return nil }
+
         let expectedPoints = EvalMath.expectedPoints(score: best.score)
         let threat = await nullMoveThreat(userExpectedPoints: expectedPoints, lease: lease)
 
@@ -974,6 +1487,7 @@ final class GameSession {
             best: best,
             secondBest: secondBest,
             nullMoveThreatEP: threat?.expectedPoints,
+            nullMoveThreatIsForcing: threat?.isForcing ?? false,
             bestMoveIsQuiet: isQuiet(uci: best.bestMove),
             bestMoveIsProphylactic: parries(uci: best.bestMove, threat: threat?.move),
             phase: AnalysisKit.Phase.classify(position: board.position, ply: ply),
@@ -998,7 +1512,7 @@ final class GameSession {
     private func nullMoveThreat(
         userExpectedPoints: Double,
         lease: EngineService.Lease?
-    ) async -> (expectedPoints: Double, move: String?)? {
+    ) async -> (expectedPoints: Double, move: String?, isForcing: Bool)? {
         if case .check = board.state { return nil }
         guard
             let fen = Self.nullMoveFEN(board.position.fen),
@@ -1008,7 +1522,62 @@ final class GameSession {
 
         // The probe's score belongs to the opponent, who is to move in it.
         let afterPassing = 1 - EvalMath.expectedPoints(score: principal.score)
-        return (max(0, userExpectedPoints - afterPassing), principal.bestMove)
+        return (
+            max(0, userExpectedPoints - afterPassing),
+            principal.bestMove,
+            isForcing(uci: principal.bestMove, inNullMovePosition: fen)
+        )
+    }
+
+    /// Whether the opponent's free move is one the user would have to answer —
+    /// a check, a capture or a promotion.
+    ///
+    /// This is the discriminator the number on its own does not have. What the
+    /// null-move probe measures is the *value of the tempo*: the difference
+    /// between the user's best move and what the opponent gets for a free one.
+    /// That is large whenever the opponent threatens something, and equally
+    /// large in two cases where they threaten nothing at all. When the user is
+    /// the one with a tactic — a mate in two, say — the free move is worth a lot
+    /// because it defuses *their* idea, and the coach would ask "what are every
+    /// check, capture and threat — theirs first?" about a position that is
+    /// entirely about the user's own shot; the user then plays it, matches rank
+    /// one and is recorded as a threat-awareness hit for a scan they never had
+    /// to do. In a pawn ending the same number reads zugzwang as a threat, and
+    /// the question is unanswerable because there are no checks or captures on
+    /// the board to find.
+    ///
+    /// The post-game ``IgnoredThreatDetector`` guards the same conflation by
+    /// requiring the opponent to actually play the threat move. Live, that
+    /// evidence does not exist yet, so the forcing test is what stands in for it.
+    /// It is narrower than the truth — a quiet move that *sets up* a threat is a
+    /// real threat and is now not counted — and that is the intended direction
+    /// to be wrong in: a pause the coach skips costs one question, a pause spent
+    /// on a question the position does not ask costs the user's trust and
+    /// corrupts the hit rate the curriculum reads.
+    private func isForcing(uci: String?, inNullMovePosition fen: String) -> Bool {
+        guard
+            let uci,
+            let position = Position(fen: fen),
+            let applied = LineReplay.apply(uci: uci, to: position)
+        else { return false }
+        if case .capture = applied.move.result { return true }
+        if applied.move.promotedPiece != nil { return true }
+        return applied.move.checkState == .check || applied.move.checkState == .checkmate
+    }
+
+    /// The square the opponent's last move captured on, if it captured.
+    ///
+    /// Read off the recorded move rather than by diffing positions, because the
+    /// board it was played on is gone by the time the gate runs and keeping a
+    /// second copy of it for one square is not worth the memory. SAN marks a
+    /// capture with an `x` and marks nothing else with one; the UCI text names
+    /// the square it landed on, and the promotion piece is the only thing that
+    /// can follow it.
+    private var opponentLastCaptureSquare: Square? {
+        guard let last = moves.last, !last.byUser, last.san.contains("x"), last.uci.count >= 4 else {
+            return nil
+        }
+        return Square(String(last.uci.dropFirst(2).prefix(2)))
     }
 
     /// The same position with the other side to move.
@@ -1223,6 +1792,16 @@ final class GameSession {
             // Analysis is queued rather than started directly: the queue is what
             // makes a preempted or crashed pass resumable, and draining it here
             // also picks up anything an earlier session left behind.
+            //
+            // Calibration is the exception, and it is a thermal one rather than
+            // a correctness one. Those five games run back to back, so draining
+            // here spends game N+1's think time analysing game N — full-depth,
+            // full-threads, on a phone that is already warm — and the doc names
+            // exactly that as the one place shipped opponent strength drifts
+            // below the measured table. The row stays `pending`, and `AppModel`
+            // drains it on the next activation, by which time the user has seen
+            // their reveal and the device has cooled.
+            guard record.mode != GameMode.calibration.rawValue else { return }
             guard let service = AnalysisService.shared(engineService: engineService) else { return }
             await service.analyzePending()
         }
@@ -1266,9 +1845,10 @@ final class GameSession {
             // A game where blunders could be taken back, or where the coach
             // answered questions mid-game, says nothing about playing strength —
             // so it must not feed the rating. Calibration games have both off.
-            isRated: !configuration.secondTryEnabled && !configuration.guidedEnabled,
+            isRated: isMeasurement,
             ratingWeight: ratingWeight,
-            usedAssistedRetry: usedAssistedRetry
+            usedAssistedRetry: usedAssistedRetry,
+            retractionCount: retractionsUsed
         )
     }
 
@@ -1322,7 +1902,14 @@ final class GameSession {
             // Rung 1 trains blunder-avoidance only; higher rungs also catch
             // mistakes. Threshold comes from the curriculum, defaulting to the
             // blunder bar.
-            guard deltaEP >= 0.30 else { return nil }
+            //
+            // Named rather than written out, so this gate and the post-game
+            // pass cannot drift apart. They are the same judgment about the same
+            // move — one live at 60k nodes, one afterwards at the full analysis
+            // budget — and a review that calls a move a blunder after the coach
+            // declined to stop the user playing it is the app disagreeing with
+            // itself in front of them.
+            guard deltaEP >= EvalMath.blunderThreshold else { return nil }
 
             let refutation = bestAfter.pv.first.flatMap {
                 EngineLANParser.parse(move: $0, for: board.position.sideToMove, in: board.position)

@@ -61,9 +61,27 @@ struct PositioningScaleGeometry: Sendable, Hashable {
     /// The band the chip names.
     func bandName(tuning: DomainTuning.Calibration = DomainTuning.default.calibration) -> String {
         let names = ["Beginner", "Improver", "Club", "Strong club"]
+        return names[min(bandIndex(tuning: tuning), names.count - 1)]
+    }
+
+    /// The rung the band name corresponds to, 1-based.
+    ///
+    /// The names and the rungs are cut on the *same* boundaries, so this is the
+    /// rung the user would start on if the placement were read straight off the
+    /// estimate. It exists because the placement is **not** read straight off:
+    /// ``CalibrationCombiner/startingRung(rating:sigma:tuning:)`` bands
+    /// `r − 0.5σ` instead, which near a boundary lands a rung lower than the
+    /// chip says. The reveal compares the two so it can say which happened,
+    /// rather than asserting both placements in one breath and leaving the
+    /// reader to notice they disagree.
+    func bandRung(tuning: DomainTuning.Calibration = DomainTuning.default.calibration) -> Int {
+        bandIndex(tuning: tuning) + 1
+    }
+
+    private func bandIndex(tuning: DomainTuning.Calibration) -> Int {
         var index = 0
         for boundary in tuning.rungBoundaries where estimate >= boundary { index += 1 }
-        return names[min(index, names.count - 1)]
+        return index
     }
 }
 

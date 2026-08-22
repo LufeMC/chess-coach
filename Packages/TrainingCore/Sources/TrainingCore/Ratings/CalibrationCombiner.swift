@@ -31,6 +31,16 @@ public struct CalibrationEstimate: Sendable, Hashable {
 
     /// The puzzle-side estimate, already converted to the playing scale.
     public var puzzleEstimate: Double
+
+    /// The Glicko deviation behind ``puzzleEstimate``, on the **puzzle** scale.
+    ///
+    /// This is what the Glicko update produced and what gets stored as the
+    /// user's puzzle RD, so it must stay unshifted and uninflated. It is
+    /// deliberately *not* the uncertainty the fusion was given: converting a
+    /// puzzle rating into a playing rating is itself uncertain, and
+    /// ``CalibrationCombiner/playingScaleSigma(puzzleSigma:conversionSigma:)``
+    /// is where that gets added. So ``sigma`` can legitimately come out wider
+    /// than this number.
     public var puzzleSigma: Double
 
     /// The user won every calibration game. Their true strength is somewhere
@@ -74,6 +84,11 @@ public struct CalibrationEstimate: Sendable, Hashable {
 /// twenty puzzles (low variance, but measuring a related-not-identical skill).
 /// Neither alone is good enough — five games has a standard error near 200
 /// points, and puzzle rating systematically overstates playing strength.
+///
+/// "Related-not-identical" is the part that is easy to lose in the algebra. The
+/// puzzle side only becomes evidence about *playing* strength after a conversion
+/// that has never been measured, so it enters the fusion carrying that
+/// conversion's error as well as its own — see ``puzzleConversionSigma``.
 public enum CalibrationCombiner {
 
     /// Runs the combiner.
@@ -95,7 +110,10 @@ public enum CalibrationCombiner {
             gameSigma: gameSigma,
             hasGames: !games.isEmpty,
             puzzleRating: puzzleRating,
-            puzzleSigma: puzzleSigma,
+            // Not `puzzleSigma`: the fusion is a statement about *playing*
+            // strength, and the puzzle side only becomes one after a conversion
+            // that carries its own error.
+            puzzleSigma: playingScaleSigma(puzzleSigma: puzzleSigma),
             hasPuzzles: !puzzles.isEmpty
         )
 
@@ -182,6 +200,47 @@ public enum CalibrationCombiner {
         }
         let final = glicko.update(GlickoRating.start(tuning: tuning.puzzleRating), with: puzzles)
         return (final.rating + tuning.calibration.puzzleRatingOffset, final.deviation)
+    }
+
+    // MARK: - Crossing between the two scales
+
+    /// How wrong ``DomainTuning/Calibration/puzzleRatingOffset`` could be.
+    ///
+    /// That offset is a single number — puzzles run about a hundred points hot —
+    /// standing in for a conversion nobody has measured. The calibration
+    /// document (`Docs/humanizer-calibration.md`) is explicit that the app's
+    /// scale has never been anchored against an external rating at all, so the
+    /// honest statement is "about a hundred, and it would not be surprising if
+    /// it turned out to be nothing or two hundred". A standard error of a
+    /// hundred points says exactly that.
+    ///
+    /// It lives here rather than in `DomainTuning` because it is not a dial
+    /// anyone should turn without new measurements behind it: it is a claim
+    /// about what has been measured, and the day the anchoring in that document
+    /// is done is the day this number is replaced rather than tuned.
+    public static let puzzleConversionSigma: Double = 100
+
+    /// The puzzle side's uncertainty restated as a claim about *playing*
+    /// strength.
+    ///
+    /// The bug: the fusion was handed the raw Glicko deviation and treated it as
+    /// the uncertainty of the user's playing strength, which is only true if the
+    /// −100 conversion is exact. Twenty puzzles give a deviation near 100, so the
+    /// puzzle side arrived looking nearly twice as precise as five real games,
+    /// dominated the weighting, and produced a combined ±89 — a tighter error bar
+    /// than either measurement can support, on the one screen where the user
+    /// decides how much to believe the number. Independent errors add in
+    /// quadrature, so the conversion's own uncertainty belongs inside the square
+    /// root alongside the deviation.
+    ///
+    /// The knock-on is intended too: ``startingRung(rating:sigma:tuning:)`` bands
+    /// `r − 0.5σ`, so an honest σ also makes the placement as conservative as
+    /// that subtraction was written to be.
+    static func playingScaleSigma(
+        puzzleSigma: Double,
+        conversionSigma: Double = puzzleConversionSigma
+    ) -> Double {
+        (puzzleSigma * puzzleSigma + conversionSigma * conversionSigma).squareRoot()
     }
 
     // MARK: - Fusion

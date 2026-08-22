@@ -39,6 +39,11 @@ struct TodayClimbStrip: View {
     /// The bottom of the scale. See the type's note on why it is not zero.
     static let floor = 800
 
+    /// Which scale the destination is on. One sentence, and it is the only
+    /// place on the home screen the distinction is drawn.
+    static let scaleNote =
+        "Rookly's own scale: it tracks your progress against Rookly's opponents, and is not a Lichess, Chess.com or club rating."
+
     private var progress: Double? {
         guard let rating else { return nil }
         let span = Double(Self.target - Self.floor)
@@ -60,10 +65,17 @@ struct TodayClimbStrip: View {
                 Spacer(minLength: 8)
 
                 if let remaining {
-                    Text(remaining == 0 ? "Arrived" : "\(remaining) to go")
-                        .font(.system(.caption, design: .rounded, weight: .bold))
-                        .monospacedDigit()
-                        .foregroundStyle(.secondary)
+                    // The unit and the destination, not a bare distance. "949
+                    // to go" over an unlabelled bar makes the reader infer the
+                    // app's entire premise from two numbers at the ends of it.
+                    Text(
+                        remaining == 0
+                            ? "Arrived at \(Self.target)"
+                            : "\(remaining) rating points to \(Self.target)"
+                    )
+                    .font(.system(.caption, design: .rounded, weight: .bold))
+                    .monospacedDigit()
+                    .foregroundStyle(.secondary)
                 }
             }
 
@@ -72,11 +84,31 @@ struct TodayClimbStrip: View {
             HStack {
                 Text(verbatim: "\(Self.floor)")
                 Spacer(minLength: 8)
-                Text(verbatim: "\(Self.target)")
+                // Verbatim like every rating in the app: the localised form
+                // prints "2,000", which reads as money.
+                Text(verbatim: "\(Self.target) goal")
             }
             .font(.system(.caption2, design: .rounded, weight: .bold))
             .monospacedDigit()
             .foregroundStyle(.tertiary)
+
+            // Said here because this is the card that makes the external
+            // claim. The rest of the app can call the number a rating and be
+            // fine; this strip names a destination — 2000 — that the user
+            // already means in club or online terms, and nothing else on the
+            // screen has ever told them the two scales are not the same one.
+            //
+            // See `Docs/humanizer-calibration.md`: self-play measures the
+            // *spacing* between the five opponent anchors and cannot see their
+            // absolute offset at all, so this ladder could be uniformly a few
+            // hundred points out and every game would look identical. Until
+            // someone plays enough rated games elsewhere to anchor it, the
+            // honest description is a progress metric that moves the right way
+            // by the right amount.
+            Text(Self.scaleNote)
+                .typeRole(.label, appliesForeground: false)
+                .foregroundStyle(.tertiary)
+                .fixedSize(horizontal: false, vertical: true)
         }
         .padding(16)
         .elevation(.raised, cornerRadius: CornerRadius.card)
@@ -100,10 +132,15 @@ struct TodayClimbStrip: View {
     }
 
     private var accessibilityLabel: String {
-        guard let rating, let remaining else { return "Progress to 2000, not yet measured" }
+        // The scale note rides along rather than being dropped: the element is
+        // `.ignore`d as a whole, so a caveat left out of this string is a
+        // caveat a VoiceOver user is never told.
+        guard let rating, let remaining else {
+            return "Progress to 2000, not yet measured. \(Self.scaleNote)"
+        }
         return remaining == 0
-            ? "Rating \(rating). Target of 2000 reached."
-            : "Rating \(rating). \(remaining) points to 2000."
+            ? "Rating \(rating). Target of 2000 reached. \(Self.scaleNote)"
+            : "Rating \(rating). \(remaining) points to 2000. \(Self.scaleNote)"
     }
 }
 

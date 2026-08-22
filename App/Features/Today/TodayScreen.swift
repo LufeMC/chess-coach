@@ -33,6 +33,8 @@ struct TodayScreen: View {
                 // first thing read — before any accounting of the absence.
                 returnBanner(plan)
 
+                unavailableBanner
+
                 RungCard(rung: todayModel.rung, isMeasuring: todayModel.isRungProgressPending)
 
                 StreakStrip(
@@ -64,8 +66,8 @@ struct TodayScreen: View {
             .toolbar(.hidden, for: .navigationBar)
             .safeAreaInset(edge: .top, spacing: 0) {
                 TodayStatHeader(
-                    streakDays: todayModel.streakDays,
-                    rating: todayModel.snapshot?.userRating
+                    rating: todayModel.snapshot?.userRating,
+                    ratingDelta: todayModel.snapshot?.ratingDelta
                 )
             }
         #endif
@@ -94,6 +96,30 @@ struct TodayScreen: View {
                 }
             }
             .frame(maxWidth: .infinity, alignment: .leading)
+            .accessibilityElement(children: .combine)
+        }
+    }
+
+    /// Said out loud, because the zeroed screen underneath it is not the truth.
+    ///
+    /// With no store the streak, the rating and the history all read as a first
+    /// run, and the game the user is about to play will be thrown away when it
+    /// ends. Silence here is the app letting them spend twenty-five minutes on
+    /// a game it has already decided to lose.
+    @ViewBuilder
+    private var unavailableBanner: some View {
+        if todayModel.snapshot?.isUnavailable == true {
+            VStack(alignment: .leading, spacing: 4) {
+                Text("Your training data could not be opened.")
+                    .typeRole(.headline)
+                Text("Today's numbers are blank because nothing could be read, and games played now will not be saved. Reopening the app is the first thing to try.")
+                    .typeRole(.body, appliesForeground: false)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(14)
+            .elevation(.raised, cornerRadius: CornerRadius.card)
             .accessibilityElement(children: .combine)
         }
     }
@@ -127,6 +153,28 @@ struct TodayScreen: View {
             // tally it can only move by one.
             SectionHeader(title: "Today", qualifier: plan.headerQualifier.accessibilityText)
 
+            // Said once, on the day it is needed. "Moments" is this app's own
+            // word — the positions the engine flagged in your game — and the
+            // CTA one screen-height below uses it as though it were common
+            // knowledge. The order is load-bearing too: the game is what
+            // produces the moments, which is why puzzles are not first.
+            if plan.phase == .firstRun {
+                Text("Play a game, review the moments it turned on — the positions the engine flags — then drill the patterns behind them.")
+                    .typeRole(.caption)
+                    .fixedSize(horizontal: false, vertical: true)
+
+                // The tab bar carries four glyphs and no labels, by design —
+                // but two of the four open ideas that have no icon: the puzzle
+                // piece is the whole drill queue, and the bar chart is the leak
+                // diagnosis, which is the most valuable screen in the app and
+                // the least likely to be found by poking. "Rung" is named here
+                // for the same reason: it is on the card directly above and
+                // nothing else on this screen says what it counts.
+                Text("The puzzle-piece tab holds your drills. The bar chart holds your rating, your rung — which of the four stages of the plan you're on — and the leaks your own games keep showing.")
+                    .typeRole(.caption)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
             // The day's work as three squares off a rank — see ``TodayBoardRow``
             // for why this is not a path.
             TodayBoardRow(
@@ -147,6 +195,18 @@ struct TodayScreen: View {
 
             if let alternative = plan.alternative {
                 TodayActionButton(action: alternative) { perform(alternative) }
+                // The reason an action is being offered, when the action's own
+                // name cannot carry it. "Guided game · check opponent threats"
+                // says what happens; it cannot say that the rung is stuck
+                // waiting on the one metric no ordinary game produces, and a
+                // user who does not know that has no reason to choose it.
+                if let subtitle = alternative.subtitle {
+                    Text(subtitle)
+                        .typeRole(.caption)
+                        .multilineTextAlignment(.center)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .padding(.horizontal, 8)
+                }
             }
         }
         .padding(.horizontal)
@@ -164,6 +224,13 @@ struct TodayScreen: View {
     }
 
     private func perform(_ action: TodayAction) {
+        // A coached game is the one destination that is not a plain route: it
+        // carries the habit the prompts are about, and Play has to be told
+        // before it starts the game rather than after.
+        if case .playGuided(let habit) = action.destination {
+            model.navigate(toGuidedGame: habit)
+            return
+        }
         model.navigate(to: todayModel.route(for: action.destination))
     }
 }
@@ -228,8 +295,11 @@ private struct TodayPreview: View {
                 RungCard(
                     rung: RungPresentation(
                         rung: 2,
+                        rungCount: 4,
                         title: "Tactical Vision",
-                        progress: hasHistory ? 0.35 : nil,
+                        skills: hasHistory
+                            ? RungSkillProgress(met: 1, total: 3, unmeasured: 1)
+                            : nil,
                         focusHabit: hasHistory ? "Check opponent threats" : nil,
                         unmeasuredNote: RungPresentation.firstRunNote
                     ),

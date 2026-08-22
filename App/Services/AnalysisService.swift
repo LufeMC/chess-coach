@@ -73,6 +73,26 @@ actor AnalysisService {
     /// precisely when the user is least interested in a 12-point review.
     private static let enrichmentBudget = 12
 
+    /// How much more search an enriched position gets than a base-pass one.
+    ///
+    /// Enrichment used to run at exactly the base pass's node budget while
+    /// asking for three lines instead of two, starting from a transposition
+    /// table the lease handoff had just cleared. That is not the deeper search
+    /// the pipeline describes: the same nodes spread over three root moves from
+    /// a cold table buy roughly a ply *less* than the base pass got. It matters
+    /// because the enriched rank 1 is what names the move on the review card and
+    /// what decides whether the user's own move was the best one — so the
+    /// shallower search was overruling the deeper one on the two questions the
+    /// review exists to answer.
+    ///
+    /// Doubling restores the per-line budget and pays for the cold table on top.
+    /// The ceiling on the cost is twelve positions, which is the cheapest place
+    /// in this pass to spend time: a verified alternative is the most useful
+    /// sentence a review produces. The correctness does not rest on the number,
+    /// though — `AnalysisPipeline` only lets an enriched line override the base
+    /// one when it actually searched at least as deep.
+    private static let enrichmentBudgetMultiplier = 2
+
     /// How often the evaluation prefix is written out. Insurance against a hard
     /// kill (jetsam, force-quit) — a clean preemption always flushes anyway.
     private static let flushInterval = 8
@@ -170,6 +190,10 @@ actor AnalysisService {
 
     private var isDraining = false
 
+    /// Failed passes already given their retry, so one that fails for a reason
+    /// that will never change cannot spin the queue.
+    private var retriedFailures: Set<UUID> = []
+
     /// Drains the backlog of games awaiting analysis, oldest first.
     ///
     /// Stops at the first preemption instead of moving on to the next game: the
@@ -181,15 +205,31 @@ actor AnalysisService {
         defer { isDraining = false }
 
         recoverStalledGames()
+        // Read before the drain, not after. A pass that fails during this drain
+        // failed under exactly the conditions still in force, so retrying it in
+        // the same breath would spend a second pass to arrive at the same place;
+        // it keeps its turn until the next time the queue is pumped.
+        let earlierFailures = (try? store.failed()) ?? []
+        guard await drainQueue(limit: limit) else { return }
 
+        // Failures go last, and the ordering is the whole reason: the queue runs
+        // oldest-first, so a failure from last week would be picked ahead of the
+        // game the user finished thirty seconds ago and is waiting to read.
+        retry(earlierFailures)
+        _ = await drainQueue(limit: limit)
+    }
+
+    /// Works through the queue. Answers `false` if it stopped on a preemption.
+    private func drainQueue(limit: Int) async -> Bool {
         var attempted: Set<UUID> = []
         for _ in 0..<limit {
             guard let next = (try? store.pending(limit: limit))?.first(where: { !attempted.contains($0.id) })
-            else { return }
+            else { return true }
 
             attempted.insert(next.id)
-            if await analyze(gameID: next.id) == .preempted { return }
+            if await analyze(gameID: next.id) == .preempted { return false }
         }
+        return true
     }
 
     /// Returns games abandoned mid-pass to the queue.
@@ -203,6 +243,32 @@ actor AnalysisService {
             try? store.setState(.pending, forGame: game.id)
         }
         AppLog.analysis.info("Requeued \(stalled.count) game(s) left running by a previous launch.")
+    }
+
+    /// Gives a failed pass one more chance per launch.
+    ///
+    /// `failed` used to be a terminal state: nothing in the app ever looked at
+    /// such a row again, so a game whose pass died of something momentary — the
+    /// engine not up yet, a database write losing a race, an enrichment search
+    /// that timed out on a hot phone — kept its place in the user's history with
+    /// no eval curve, no moments and no cards, permanently. The causes are
+    /// overwhelmingly momentary, so the right default is to try again.
+    ///
+    /// Once per launch, though, and that is the whole design. Some failures are
+    /// permanent — a stored move that will not replay, a colour this build does
+    /// not recognise — and `analysisState` is a bare string with no room for an
+    /// attempt count, so the retry budget has to live in memory. One attempt per
+    /// launch means a transient failure heals on the next foreground while a
+    /// permanent one costs a single doomed pass rather than an endless loop.
+    private func retry(_ failures: [GameRow]) {
+        let retryable = failures.filter { !retriedFailures.contains($0.id) }
+        guard !retryable.isEmpty else { return }
+
+        for game in retryable {
+            retriedFailures.insert(game.id)
+            try? store.setState(.pending, forGame: game.id)
+        }
+        AppLog.analysis.info("Retrying \(retryable.count) game(s) whose analysis had failed.")
     }
 
     // MARK: - One game
@@ -393,10 +459,12 @@ actor AnalysisService {
 
         // Resume: whatever a previous pass got through is still on disk. Rows are
         // only ever written as a contiguous prefix, so the first gap is the
-        // restart point.
+        // restart point — as is the first row searched at a budget this device
+        // no longer uses.
         var evaluations = AnalysisPipeline.resumePrefix(
             from: (try? store.evals(forGame: gameID)) ?? [],
-            positionCount: total
+            positionCount: total,
+            minimumNodes: AnalysisPipeline.resumeNodeFloor(budget: nodeBudget)
         )
         var sinceFlush = 0
 
@@ -466,7 +534,7 @@ actor AnalysisService {
         let prefix = Array(uci.prefix(plyIndex))
         let result = try await engineService.search(
             .startPosition(moves: prefix),
-            limit: .nodes(nodeBudget),
+            limit: .nodes(nodeBudget * Self.enrichmentBudgetMultiplier),
             lease: lease
         )
         guard !result.wasTruncated else { return nil }
@@ -475,11 +543,17 @@ actor AnalysisService {
         // input the ignored-threat detectors need. It is only worth its search on
         // positions that already look like mistakes, which is why it lives here
         // rather than in phase 1.
+        //
+        // At the full base budget, not the half it used to get. Its answer is
+        // turned into a sentence telling the user what their opponent was about
+        // to do, and this pass is under a lease configured for three lines, so
+        // half a budget across three root moves was the shallowest search in the
+        // whole pipeline underwriting one of its most concrete claims.
         var probe: ThreatProbe?
         if let probeFEN = NullMove.probeFEN(for: replay.positions[plyIndex]) {
             let probeResult = try await engineService.search(
                 .fen(probeFEN, moves: []),
-                limit: .nodes(nodeBudget / 2),
+                limit: .nodes(nodeBudget),
                 lease: lease
             )
             if let principal = probeResult.principal, !probeResult.wasTruncated {
