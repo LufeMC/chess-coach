@@ -327,8 +327,42 @@ struct TrainHomeScreen: View {
         }
     }
 
+    /// What is still to come, said in enough detail to be worth reading.
+    ///
+    /// "17 more, one per set, as your rating reaches them" is a count and a
+    /// scheduling rule, and it answers none of the questions somebody looking at
+    /// this row is asking: what *are* they, and what am I working towards?
+    ///
+    /// The old comment's argument for withholding them is right about exactly
+    /// one family. A positional title is very nearly its own solution — being
+    /// told "the outpost" is coming hands over most of the exercise. An opening
+    /// and an endgame are the opposite: they are named techniques, the name is
+    /// the thing being learned, and knowing that Lucena is ahead spoils nothing
+    /// anybody could have solved from the position anyway. So the two nameable
+    /// families are named, and the one that would be spoiled is counted.
+    /// The concepts that can actually turn up next, named.
+    private var nextUpTitles: [String] {
+        home.covered.filter { !$0.isTaught && $0.isUnlocked }.map(\.concept.title)
+    }
+
+    /// What is waiting on rating, grouped by the rating that releases it.
+    ///
+    /// Shown as thresholds rather than as a queue because that is what they
+    /// are. A locked concept is not scheduled behind the others — it is not in
+    /// `TrainingConcept.available(atRating:)` at all, so no amount of playing
+    /// sets brings it closer. Only the rating does.
+    private var lockedTiers: [(rating: Int, titles: [String])] {
+        let locked = home.covered.filter { !$0.isTaught && !$0.isUnlocked }
+        return Dictionary(grouping: locked, by: \.concept.fromRating)
+            .sorted { $0.key < $1.key }
+            .map { (rating: $0.key, titles: $0.value.map(\.concept.title)) }
+    }
+
     private func upcomingRow(_ remaining: Int) -> some View {
-        HStack(spacing: 12) {
+        let next = nextUpTitles
+        let tiers = lockedTiers
+
+        return HStack(alignment: .top, spacing: 12) {
             ZStack {
                 Circle()
                     .fill(Palette.surfaceSunken.dynamic)
@@ -338,18 +372,43 @@ struct TrainHomeScreen: View {
                     .foregroundStyle(.secondary)
             }
 
-            Text(
-                home.covered.contains(where: \.isTaught)
-                    ? "\(remaining) more, one per set, as your rating reaches them"
-                    : "\(remaining) more ideas, one taught per set"
-            )
-            .typeRole(.body, appliesForeground: false)
-            .foregroundStyle(.secondary)
+            VStack(alignment: .leading, spacing: 6) {
+                // The headline counts only what can actually arrive. The old
+                // line counted every untaught concept and said "one per set",
+                // which invites the arithmetic the reader then does: thirteen
+                // sets, five puzzles each, sixty-five puzzles. Eleven of those
+                // thirteen were not queued behind anything — they were waiting
+                // on rating, and no amount of puzzles releases them.
+                if next.isEmpty {
+                    Text("Nothing new until your rating goes up")
+                        .typeRole(.body)
+                        .fixedSize(horizontal: false, vertical: true)
+                } else {
+                    Text(next.count == 1 ? "1 more to come, in your next set" : "\(next.count) more to come, one per set")
+                        .typeRole(.body)
+                        .fixedSize(horizontal: false, vertical: true)
+                    Text(next.joined(separator: ", "))
+                        .typeRole(.caption)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
 
-            Spacer(minLength: 0)
+                if !tiers.isEmpty {
+                    Text("Then, as your rating climbs")
+                        .typeRole(.caption, appliesForeground: false)
+                        .foregroundStyle(.tertiary)
+                    ForEach(tiers, id: \.rating) { tier in
+                        Text("\(tier.rating)+ · \(tier.titles.joined(separator: ", "))")
+                            .typeRole(.caption)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
         }
         .padding(.vertical, 12)
+        .accessibilityElement(children: .combine)
     }
+
 
     private var taughtQualifier: String {
         "\(home.covered.filter(\.isTaught).count) of \(home.covered.count)"

@@ -266,4 +266,81 @@ enum PuzzleConcept {
     static func chipLabel(theme: ThemeTag, answer _: String?) -> String {
         noun(for: theme) ?? "position"
     }
+
+    // MARK: - The line, written out
+
+    /// One numbered move of a taught line: the move the user plays, and the
+    /// reply that follows it.
+    struct LineMove: Sendable, Hashable, Identifiable {
+        /// Full move number, as it would be written in a book.
+        var number: Int
+        /// The user's move in algebraic notation.
+        var user: String
+        /// The reply, when the line has one. `nil` on a line that ends on the
+        /// user's move.
+        var reply: String?
+
+        var id: Int { number }
+    }
+
+    /// The line a concept asks the user to play, in algebraic notation.
+    ///
+    /// ## Why the lesson has to print this
+    ///
+    /// `ConceptLessonView`'s own doc comment sets the rule: an opening "is
+    /// knowledge", and testing knowledge that was never given teaches nothing
+    /// because "they had either been told or they had not". The London lesson
+    /// then described the idea — d4, bishop out to f4, only then e3 — and the
+    /// exercise asked for eight moves in order. The three the lesson named were
+    /// gettable. Moves four to eight were not written anywhere, so a reader who
+    /// had understood every word of the lesson still had to guess that move
+    /// seven was the c-pawn and not the knight, and Nc3 is the more natural
+    /// looking of the two. Being marked "Missed" for that is the exact failure
+    /// the lesson screen exists to prevent.
+    ///
+    /// Notation rather than prose, because this is the one place in the app
+    /// where the reader is memorising a sequence: `1. d4 d5 2. Bf4` is how every
+    /// book they will ever open writes it, and turning it into sentences would
+    /// make it longer and harder to hold.
+    ///
+    /// - returns: An empty array for exercises that are not a stored line, and
+    ///   for a line whose moves do not replay from its own starting position —
+    ///   a silent empty section is better than half a line presented as whole.
+    static func lineMoves(for concept: TrainingConcept) -> [LineMove] {
+        guard case let .line(fen, moves, opponentMovesFirst) = concept.exercise,
+            let start = Position(fen: fen)
+        else { return [] }
+
+        var board = Board(position: start)
+        var sans: [String] = []
+        for uci in moves {
+            guard let origin = origin(ofUCI: uci), let destination = destination(ofUCI: uci),
+                var move = board.move(pieceAt: origin, to: destination)
+            else { return [] }
+            if case .promotion = board.state {
+                move = board.completePromotion(of: move, to: .queen)
+            }
+            sans.append(move.san)
+        }
+
+        // The user's moves are every other one, starting wherever their turn
+        // does. `opponentMovesFirst` is false for the openings — the line starts
+        // from the initial position and the first move is the user's.
+        let firstUserIndex = opponentMovesFirst ? 1 : 0
+        var out: [LineMove] = []
+        var number = 1
+        var index = firstUserIndex
+        while index < sans.count {
+            out.append(
+                LineMove(
+                    number: number,
+                    user: sans[index],
+                    reply: index + 1 < sans.count ? sans[index + 1] : nil
+                )
+            )
+            number += 1
+            index += 2
+        }
+        return out
+    }
 }

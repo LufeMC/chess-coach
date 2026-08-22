@@ -49,6 +49,7 @@ struct ConceptLessonView: View {
                     section("The idea", concept.teaching.idea)
                     boardPreview
                     cue
+                    moveList
                     section("Why it matters", concept.teaching.why)
                 }
                 .padding(.horizontal, 20)
@@ -147,6 +148,64 @@ struct ConceptLessonView: View {
                 }
             }
             .frame(maxWidth: .infinity)
+        }
+    }
+
+    /// The line itself, written out, for a concept whose exercise is a line.
+    ///
+    /// The screen's whole argument — at the top of this file — is that an
+    /// opening is knowledge, and that testing knowledge nobody was given
+    /// teaches nothing. The lesson then described the London's idea in three
+    /// moves and the exercise asked for eight in order. Nothing named moves
+    /// four to eight, so a reader who understood every word still had to guess
+    /// that move seven was the c-pawn rather than the knight — and Nc3 looks
+    /// like the more natural move of the two. That is not a test of whether
+    /// they were listening.
+    ///
+    /// Their own moves are the ones set in full strength: the replies are here
+    /// so the sequence reads as a game rather than a list, but they are not
+    /// what is being learned, and the exercise plays them automatically.
+    @ViewBuilder
+    private var moveList: some View {
+        let moves = PuzzleConcept.lineMoves(for: concept)
+        if !moves.isEmpty {
+            VStack(alignment: .leading, spacing: 8) {
+                Text("The moves")
+                    .typeRole(.caption, appliesForeground: false)
+                    .foregroundStyle(.secondary)
+
+                LazyVGrid(
+                    columns: [GridItem(.adaptive(minimum: 118), spacing: 10, alignment: .leading)],
+                    alignment: .leading,
+                    spacing: 6
+                ) {
+                    ForEach(moves) { move in
+                        HStack(spacing: 4) {
+                            Text("\(move.number).")
+                                .typeRole(.caption, monospacedDigits: true, appliesForeground: false)
+                                .foregroundStyle(.tertiary)
+                            Text(move.user)
+                                .typeRole(.body, appliesForeground: false)
+                                .fontWeight(.semibold)
+                            if let reply = move.reply {
+                                Text(reply)
+                                    .typeRole(.body, appliesForeground: false)
+                                    .foregroundStyle(.secondary)
+                            }
+                        }
+                        .accessibilityElement(children: .combine)
+                        .accessibilityLabel(
+                            move.reply.map { "Move \(move.number). You play \(move.user). They reply \($0)." }
+                                ?? "Move \(move.number). You play \(move.user)."
+                        )
+                    }
+                }
+
+                Text("You play the moves in bold. Their replies are played for you.")
+                    .typeRole(.caption)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
         }
     }
 

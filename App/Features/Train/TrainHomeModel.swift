@@ -371,6 +371,16 @@ final class TrainHomeModel {
         /// the row read `0 of 3` at a user who had passed every run. The streak
         /// is what the curriculum gates on and the only honest number here.
         var drillMastery: DrillMastery?
+        /// Whether the rating has reached this concept yet.
+        ///
+        /// `ConceptScheduler` only ever picks from `TrainingConcept.available(atRating:)`,
+        /// so an untaught concept above the current rating is not "next" in any
+        /// sense — it is not in the running at all. Counting the two together
+        /// produced the screen's most misleading sentence: at 1051 the list said
+        /// thirteen were coming one per set, which reads as thirteen sessions of
+        /// work, when eleven of the thirteen were waiting on rating and only two
+        /// could actually arrive.
+        var isUnlocked: Bool = true
 
         var id: String { concept.id }
 
@@ -409,7 +419,8 @@ final class TrainHomeModel {
                     isTaught: progress?.introducedAt != nil,
                     timesSeen: progress?.timesSeen ?? 0,
                     timesCorrect: progress?.timesCorrect ?? 0,
-                    drillMastery: drillMastery
+                    drillMastery: drillMastery,
+                    isUnlocked: concept.fromRating <= rating
                 )
             }
 

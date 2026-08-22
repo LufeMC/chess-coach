@@ -111,7 +111,27 @@ struct ResultBanner: View {
                 // The symmetry rule is untouched: both outcomes reserve four,
                 // so the banner is still a fixed height and the button still
                 // sits in the same place whichever way the puzzle went.
-                .lineLimit(4, reservesSpace: true)
+                // A *floor* of four lines, not a ceiling.
+                //
+                // `lineLimit(4, reservesSpace: true)` kept the height stable and
+                // then clipped anything longer, which is the one failure this
+                // paragraph says the component cannot afford — shipped, it read
+                // "…it holds the position rather than att…". The character
+                // budget was supposed to prevent that and could not: 140
+                // characters was measured against the banner's full width, and
+                // the text never gets the full width. The glyph and the button
+                // take roughly a third of it, so four lines is nearer 110
+                // characters — and fewer again at larger Dynamic Type sizes,
+                // which no fixed character count can follow.
+                //
+                // `lineLimit(4...)` keeps every property the fixed version was
+                // for: four lines are still reserved, so both outcomes are the
+                // same height and the button does not move between them. It
+                // simply grows instead of cutting when a sentence needs a fifth
+                // line. The budget below stays as a guide for how much the
+                // builders should try to say; it is no longer what stands
+                // between the reader and half a sentence.
+                .lineLimit(4...)
                 .frame(maxWidth: .infinity, alignment: .leading)
 
             Button(action: onContinue) {

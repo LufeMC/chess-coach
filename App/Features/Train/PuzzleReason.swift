@@ -200,7 +200,8 @@ enum PuzzleReason {
         if let gain = outcome(
             from: line,
             isCheck: isCheck,
-            answerGain: captured.map { value(of: $0.kind) } ?? 0
+            answerGain: captured.map { value(of: $0.kind) } ?? 0,
+            isPawnEndgame: isPawnEndgame(position)
         ) { return gain }
 
         // A quiet move whose whole point is that something of yours was
@@ -446,14 +447,39 @@ enum PuzzleReason {
     /// clauses that are. The exception is a pawn that promotes, which is not a
     /// pawn win at all — it is the whole point of every pawn endgame, and the
     /// threshold alone would have said nothing about it.
-    private static func outcome(from line: Line, isCheck: Bool, answerGain: Int) -> String? {
+    /// Kings and pawns only.
+    ///
+    /// The distinction earns its place because it changes what counts as
+    /// material worth naming — see ``outcome(from:isCheck:answerGain:isPawnEndgame:)``.
+    private static func isPawnEndgame(_ position: Position) -> Bool {
+        position.pieces.allSatisfy { $0.kind == .king || $0.kind == .pawn }
+    }
+
+    private static func outcome(
+        from line: Line,
+        isCheck: Bool,
+        answerGain: Int,
+        isPawnEndgame: Bool = false
+    ) -> String? {
         // What the line is worth on the board, counting the answer's own
         // capture and every recapture that follows it.
         let net = answerGain + line.net
+
+        // A pawn is not worth naming in a middlegame tactic — "you win the
+        // pawn" after a queen sacrifice is noise, and the bar is a knight for
+        // that reason. In a king-and-pawn ending it is the opposite: a pawn is
+        // usually the whole game, and holding the bar at a knight meant this
+        // clause could never fire at all, because there is no knight left to
+        // win. So the sentence fell through to the theme tag, and a puzzle
+        // whose solution was a winning king march came back labelled "a
+        // defensive move — it holds the position rather than attacking", which
+        // is not a vague description of that line, it is the opposite of it.
+        let bar = isPawnEndgame ? value(of: .pawn) : value(of: .knight)
+
         let gain: String
         if line.promotes {
             gain = "your pawn queens"
-        } else if let won = line.won, value(of: won) >= value(of: .knight), net >= value(of: won) {
+        } else if let won = line.won, value(of: won) >= bar, net >= value(of: won) {
             gain = "you win the \(noun(for: won))"
         } else {
             return nil
